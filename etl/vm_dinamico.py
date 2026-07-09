@@ -2,13 +2,14 @@
 vm_dinamico.py — VM Dinâmico + Pulmão por SKU
 
 VM (prateleira): demanda média × cobertura × taxa × correção
-Pulmão (armário): Z × σ_diária × √lead_time
+Pulmão (armário): Fator de Serviço × Desvio-Padrão diário × √lead time
 """
 
 import pandas as pd
 import numpy as np
 import math
-from pathlib import Path
+
+from etl import demanda
 
 NIVEL_SERVICO_Z = {90: 1.28, 95: 1.65, 97: 1.88, 98: 2.05, 99: 2.33}
 
@@ -19,75 +20,6 @@ def _nivel_para_z(nivel: float) -> float:
     return NIVEL_SERVICO_Z.get(round(nivel), 1.65)
 
 
-def carregar_parametros_vm(caminho_xlsx: str) -> dict:
-    caminho = Path(caminho_xlsx)
-    avisos = []
-
-    if not caminho.exists():
-        return {"ok": False, "erros": [f"Arquivo não encontrado: {caminho}"], "avisos": []}
-
-    try:
-        import openpyxl
-        wb = openpyxl.load_workbook(str(caminho), data_only=True)
-    except Exception as e:
-        return {"ok": False, "erros": [f"Erro ao ler: {e}"], "avisos": []}
-
-    # Globais
-    globais = {
-        "dias_cobertura": 15, "inicio_alta": 10, "fim_alta": 3,
-        "mult_pa": 2.0, "vm_minimo": 2, "lead_time": 3, "nivel_servico_default": 95,
-    }
-    if "Parametros_Globais" in wb.sheetnames:
-        ws = wb["Parametros_Globais"]
-        mapa = {
-            "Dias Cobertura VM": "dias_cobertura", "Início Alta Temporada": "inicio_alta",
-            "Fim Alta Temporada": "fim_alta", "Multiplicador PA": "mult_pa",
-            "VM Mínimo Absoluto": "vm_minimo", "Lead Time Reposição": "lead_time",
-            "Nível de Serviço Padrão": "nivel_servico_default",
-        }
-        for r in range(4, 20):
-            p, v = ws.cell(r, 2).value, ws.cell(r, 3).value
-            if p and str(p).strip() in mapa and v is not None:
-                try:
-                    globais[mapa[str(p).strip()]] = float(v)
-                except (ValueError, TypeError):
-                    avisos.append(f"Valor inválido para '{p}': {v}")
-
-    # Colégios (A=nome, B=taxa, C=nível serviço)
-    colegios = {}
-    if "Parametros_Colegio" in wb.sheetnames:
-        ws = wb["Parametros_Colegio"]
-        for r in range(2, 100):
-            nome_c, taxa, ns = ws.cell(r, 1).value, ws.cell(r, 2).value, ws.cell(r, 3).value
-            if nome_c and str(nome_c).strip():
-                n = str(nome_c).strip()
-                try:
-                    t = float(taxa) if taxa is not None else 1.0
-                except (ValueError, TypeError):
-                    t = 1.0
-                try:
-                    s = float(ns) if ns is not None else globais["nivel_servico_default"]
-                except (ValueError, TypeError):
-                    s = globais["nivel_servico_default"]
-                colegios[n] = {"taxa_crescimento": t, "nivel_servico": s}
-
-    # SKUs (A=código, B=produto, C=correção)
-    skus = {}
-    if "Parametros_SKU" in wb.sheetnames:
-        ws = wb["Parametros_SKU"]
-        for r in range(2, 2000):
-            cod, corr = ws.cell(r, 1).value, ws.cell(r, 3).value
-            if cod and str(cod).strip():
-                c = str(cod).strip()
-                try:
-                    skus[c] = float(corr) if corr is not None else 1.0
-                except (ValueError, TypeError):
-                    skus[c] = 1.0
-
-    return {"globais": globais, "colegios": colegios, "skus": skus,
-            "ok": True, "erros": [], "avisos": avisos}
-
-
 def _filtrar_alta(df, inicio_mes, fim_mes):
     mes = df["Data"].dt.month
     if inicio_mes <= fim_mes:
@@ -95,23 +27,32 @@ def _filtrar_alta(df, inicio_mes, fim_mes):
     return df[(mes >= inicio_mes) | (mes <= fim_mes)]
 
 
-def calcular_vm_por_sku(dados: dict, params: dict) -> dict:
-    glob = params["globais"]
-    map_colegios = params["colegios"]
-    map_skus_correcao = params["skus"]
+def calcular_vm_por_sku(dados: dict, config: dict) -> dict:
+    glob = config.get("vm", {})
+    map_colegios = config.get("colegios") or {}
+    excecoes = config.get("excecoes_sku") or {}
+    map_skus_correcao = {
+        sku: v["correcao"] for sku, v in excecoes.items()
+        if isinstance(v, dict) and "correcao" in v
+    }
 
-    dias_cobertura = glob["dias_cobertura"]
-    inicio_alta, fim_alta = int(glob["inicio_alta"]), int(glob["fim_alta"])
-    mult_pa = glob["mult_pa"]
-    vm_minimo = int(glob["vm_minimo"])
-    lead_time = glob["lead_time"]
-    ns_default = glob["nivel_servico_default"]
+    dias_cobertura = glob.get("dias_cobertura", 15)
+    inicio_alta, fim_alta = int(glob.get("inicio_alta", 10)), int(glob.get("fim_alta", 3))
+    mult_pa = glob.get("mult_pa", 2.0)
+    vm_minimo = int(glob.get("vm_minimo", 2))
+    lead_time = glob.get("lead_time", 3)
+    ns_default = glob.get("nivel_servico_default", 95)
+    ativo_cresc = glob.get("aplicar_crescimento", True)
+    obs_cresc = (demanda.calcular_crescimento_observado(dados, config)
+                 if (config.get("demanda", {}) or {}).get("crescimento_observado_ativo", True)
+                 else None)
 
     itens = dados["itens"]
     produtos = dados["produtos"]
     detalhes = dados["detalhes"]
 
     map_id_colegio = detalhes.set_index("ID_produto")["Marca_sku"].to_dict()
+    map_id_grupo = detalhes.set_index("ID_produto")["Grupo"].to_dict()
 
     if inicio_alta <= fim_alta:
         meses_alta = list(range(inicio_alta, fim_alta + 1))
@@ -172,10 +113,11 @@ def calcular_vm_por_sku(dados: dict, params: dict) -> dict:
             sigma = 0.0
 
         colegio = str(map_id_colegio.get(id_prod, "")).strip()
+        grupo = str(map_id_grupo.get(id_prod, "")).strip()
         col_p = map_colegios.get(colegio, {})
-        taxa_cresc = col_p.get("taxa_crescimento", 1.0) if col_p else 1.0
+        taxa_cresc = demanda.taxa_crescimento_efetiva(colegio, config, grupo, ativo_cresc, obs_cresc)
         nivel_servico = col_p.get("nivel_servico", ns_default) if col_p else ns_default
-        z = _nivel_para_z(nivel_servico)
+        fator_servico = _nivel_para_z(nivel_servico)
         correcao = map_skus_correcao.get(sku, 1.0)
 
         # VM
@@ -192,7 +134,7 @@ def calcular_vm_por_sku(dados: dict, params: dict) -> dict:
             fonte = "cobertura"
 
         # Pulmão
-        pulmao = math.ceil(z * sigma * math.sqrt(lead_time))
+        pulmao = math.ceil(fator_servico * sigma * math.sqrt(lead_time))
         total = vm_final + pulmao
 
         resultado[sku] = {

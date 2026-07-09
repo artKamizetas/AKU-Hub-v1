@@ -1,9 +1,11 @@
 # Bling Dashboard — Contexto do Projeto
 
 ## O que é este projeto
-Dashboard Streamlit que substitui o fluxo Google Apps Script + Looker Studio da Art Kamizetas.
+Dashboard Streamlit que substitui o fluxo Google Apps Script + Looker Studio da AK Uniformes.
 Lê dados do **Supabase** (Postgres espelhado da pipeline Bling→Supabase, mantida por outra equipe), processa via pandas e exibe análises de estoque, PCP e vendas.
-Empresa: Art Kamizetas — lojas em Natal e Mossoró (RN).
+Empresa: **AK Uniformes** (varejo, do Grupo AK) — lojas em Natal e Mossoró (RN). A fábrica própria do grupo é a **Art Kamizetas** (referida quando o assunto é produção/PCP).
+
+> **Documentação humana detalhada em [`docs/`](docs/README.md)**: arquitetura, dados, regras de negócio, metodologia de PCP (order-up-to) e log de decisões. Este CLAUDE.md é o resumo orientado a agente; ao mudar metodologia/arquitetura, atualize também o doc correspondente e registre em `docs/decisoes.md`.
 
 ## Como rodar
 ```bash
@@ -22,22 +24,26 @@ streamlit run app.py
 app.py                      # Ponto de entrada — registra as páginas
 config.yaml                 # Todas as configurações (metas, IDs, janelas de tempo, exceções SKU)
 auth.py                     # Autenticação Streamlit (role-based access control)
-data/                       # Dados locais (Parametros_VM.xlsx, não sincronizado com Bling)
+data/                       # Saídas locais opcionais (ex: VM_Calculado.xlsx via scripts/exportar_vm.py), não sincronizado com Bling
 etl/
   loader.py                 # Lê Supabase (via PostgREST) e valida → retorna dict de DataFrames
                             # Mapas TABELAS_SUPABASE / COLUNAS_SUPABASE convertem nomes para o SCHEMA
   daily.py                  # Lógica de Comercial / Metas diárias
   logistica.py              # Lógica de Reposição de Loja
-  fabrica.py                # Lógica de PCP / Planejamento de Produção
-  planejamento.py           # Lógica de Planejamento Anual de Rodadas
-  vm_dinamico.py            # Cálculo de VM (Visual Merchandising) dinâmico
+  demanda.py                 # Motor único de demanda por SKU × Colégio × Mês (sazonalidade, crescimento, janela de cobertura) — usado por fabrica.py e planejamento.py
+  fabrica.py                # Sugestão tática de produção por SKU (PCP)
+  planejamento.py           # Simulação estratégica de rodadas de produção anuais (bottom-up, a partir de demanda.py)
+  vm_dinamico.py            # Cálculo de VM (Visual Merchandising) dinâmico — reposição de loja
 pages/
   0_Home.py                 # Tela inicial / status do sistema
   1_Daily.py                # Dashboard Comercial (metas, vendedores, lojas)
   2_Logistica.py            # Reposição de Loja (sugestões de transferência)
-  3_Fabrica.py              # PCP / Estoque de Fábrica
-  4_Planejamento.py         # Planejamento de produção anual por rodadas
+  3_Fabrica.py              # "Simulador de Produção" — PCP tático (Sugestão por SKU) + planejamento anual (Visão Geral/rodadas), ambos usando etl/demanda.py como base comum
   5_Configuracoes.py        # (Admin) Configuração de parâmetros, exceções SKU e sistema
+scripts/                    # Utilitários de linha de comando (rodar da raiz: python scripts/<nome>.py)
+  exportar_vm.py            # Exporta data/VM_Calculado.xlsx (VM + Pulmão de todos os SKUs)
+  memoria_calculo.py        # Memória de cálculo passo a passo do VM Dinâmico p/ um SKU
+  memoria_calculo_fabrica.py# Memória de cálculo passo a passo do PCP (order-up-to) p/ um SKU
 ```
 
 ## Fluxo de dados padrão
@@ -79,17 +85,29 @@ pages/
 - Cada módulo ETL recebe DataFrames e o dicionário `config` — não abre arquivos diretamente
 - **YAML:** usar `ruamel.yaml` (não `yaml`) quando precisar salvar config.yaml preservando comentários
 
+## Motor de Demanda + Abastecimento (etl/demanda.py)
+
+Fonte única usada tanto pela aba tática ("Sugestão por SKU") quanto pela estratégica ("Visão Geral"/rodadas) do Simulador de Produção. Metodologia: **demanda ancorada na alta + política order-up-to (R,S) com projeção forward** (ref. Silver-Pyke-Peterson; newsvendor; aggregate planning). Fundamentação e decisões da diretoria no plano `~/.claude/plans/ethereal-whistling-prism.md`.
+
+- **Demanda ancorada na ALTA** (`calcular_demanda_mensal_por_sku`): a alta define forma e magnitude, a baixa só adiciona volume — o dado esparso da baixa nunca entra no nível do SKU.
+  - Meses de alta (`config["demanda"]["janela_alta"]`, ex: [12,1,2]): `vendas reais da última temporada de alta completa × crescimento` (a grade de tamanhos é preservada porque cada SKU é um tamanho).
+  - Meses de baixa: `demanda de baixa` = demanda de alta × `proporção da baixa`, espalhada pela `distribuicao_mensal_baixa()` agregada. A proporção é **global** (`calcular_proporcao_baixa()` = Σbaixa/Σalta da empresa, últimos 2 ciclos ≈ 0,43) com **cascata de override manual** (`proporcao_baixa_efetiva(sku, colegio, config, base)`): `excecoes_sku[sku].proporcao_baixa → colegios[COL].proporcao_baixa → global`. Backtest (2023-25): fatiar por categoria/SKU não melhora (teto ~48%); global + override nos poucos gigantes de cauda curta é o que sustenta. Editável na tela (coluna no editor de Colégios + coluna no CSV de exceções).
+- **Crescimento por (colégio × série)** (`taxa_crescimento_efetiva(colegio, config, grupo, ativo, observado)`): cascata híbrida (manual do planejador SEMPRE vence os dados): `crescimento_grupos[grupo] (manual) → taxa_crescimento colégio (manual) → observado colégio×segmento → observado colégio → 1+fabrica.crescimento_pct/100`. A **camada observada** (`calcular_crescimento_observado`) mede o crescimento realizado nas ALTAS (alta-sobre-alta, sinal limpo — a baixa tem ruptura), por colégio e por segmento, clamp [0.5,2.0], gate de volume ≥30. O mapa grupo→segmento (`mapa_grupo_segmento(config)`) tem default no código (`SEGMENTO_POR_GRUPO`) sobrescrito por `config["grupo_segmento"]` — editável na página de Configurações (baldes atuais: Infantil, Inf+Fund, Fundamental, Médio, Tempo Integral, Diário, Ed. Física, Esporte, Outros). Desligável em `config["demanda"]["crescimento_observado_ativo"]` (→ volta ao +10% cego). `ativo=False` desliga tudo (toggle p/ comparar). Vale p/ fábrica e VM logística. Não muda o total da rede (~+11%), **redistribui** para o mix certo (ex: NEV Médio +51% vs LMN −29%).
+- **Política order-up-to** (`simular_politica_reabastecimento`): motor comum. Por SKU, caminha as rodadas mantendo estoque projetado (`estoque − backlog`, consumido mês a mês, reabastecido a cada chegada). Em cada rodada r: `DemandaPeriodo` = demanda até a próxima chegar; `EstoqueSeguranca = estoque_seguranca(DemandaPeriodo, contém_alta, config)` (Fator de Serviço × Variação da Demanda × DemandaPeriodo); `EstoqueAlvo = DemandaPeriodo + EstoqueSeguranca`; `Pedido = par_ceil(EstoqueAlvo − EstoqueProjetado_na_chegada)`. As colunas do DataFrame retornado usam esses nomes (`DemandaPeriodo`/`EstoqueSeguranca`/`EstoqueAlvo`/`EstoqueProjetado`; antes eram `DI`/`SS`/`S`/`OH`). Sugestão por SKU = Pedido da rodada selecionada; Visão Geral = soma por rodada.
+- **Nível de serviço** (`config["demanda"]["nivel_servico_alta"/"nivel_servico_baixa"/"variacao_demanda"]`): alta ~99% ("não pode faltar"), baixa ~92%. Fator de Serviço pela criticidade do intervalo.
+- `planejamento.periodo_historico_inicio`/`fim` = período histórico único (sazonalidade agregada + distribuição mensal da baixa + base dos SKUs só-de-baixa). Define o FORMATO do ano, não o tamanho do pico. Calendário de rodadas: `planejamento.rodadas_datas` (datas ISO explícitas, este ano + próximo, SEM repetição anual — a última data só fecha o intervalo da penúltima; recomendado) com fallback em `planejamento.rodadas` (meses fixos que repetem todo ano). Override p/ cenários aceita meses e/ou datas em `rodadas_meses`. A simulação expõe `DemandaPeriodoAlta`/`DemandaPeriodoBaixa`/`MesesIntervalo`/`data_chegada_seguinte` (split pico/baixa usado pela UI da Sugestão por SKU).
+
 ## Página de Configuração (5_Configuracoes.py)
 
 **Admin only** — acesso controlado por role em `st.secrets["auth_config"]`.
 
 ### Aba 1: Parâmetros Gerais
-Formulário para editar configurações de produção:
-- Metas comerciais (Natal, Mossoró)
-- Parâmetros de logística (VM padrão, dias análise, cobertura mínima)
-- Parâmetros de fábrica (período histórico, crescimento, sazonalidade, cobertura)
-- Planejamento (rodadas de produção, lead time, sazonalidade, buffer)
-- Status IDs de pedido (em_aberto, em_andamento, pronto_retirada)
+Formulário organizado pelos **3 subsistemas** da metodologia atual:
+- **Comercial (Daily):** metas (Natal, Mossoró) + status IDs de pedido (em_aberto, em_andamento, pronto_retirada)
+- **Reposição de Loja:** VM Dinâmico (`config.yaml["vm"]` — cobertura, alta temporada, multiplicador PA, VM mínimo, lead time, nível de serviço, toggle de crescimento) + *fallback* fixo (`logistica.vm_padrao`, `logistica.dias_analise_giro`) usado só quando o SKU não tem giro
+- **Produção (Simulador):** Demanda/order-up-to (`config.yaml["demanda"]` — níveis de serviço alta/baixa, variação, janela da alta, toggle de crescimento), Planejamento (rodadas, lead time, período histórico único) e *fallback* da Fábrica (crescimento, cobertura, correção manual global)
+
+Logo abaixo do formulário, editor independente de **Colégios** (`config.yaml["colegios"]`): tabela com taxa de crescimento e nível de serviço por colégio, descobertos dinamicamente a partir de `detalhes["Marca_sku"]` — valores são sempre input manual do usuário, nunca calculados a partir das vendas.
 
 Ao salvar:
 1. Valida estrutura mínima e valores numéricos
@@ -98,10 +116,11 @@ Ao salvar:
 
 ### Aba 2: Exceções de SKU
 CSV template para sobrescrever parâmetros globais por SKU:
-- Columns: `sku`, `vm_override`, `dias_analise`, `sazonalidade`, `correcao_manual`
+- Columns: `sku`, `vm_override`, `correcao_manual` (as antigas `dias_analise`/`sazonalidade` foram removidas — nenhum motor as lia)
 - Download: template atual (ou exemplo padrão se nenhuma exceção existe)
 - Upload: aplicar novas exceções via CSV
 - Salva em `config.yaml["excecoes_sku"]`
+- O campo `correcao_manual` (salvo como chave `correcao`) também é lido por `vm_dinamico.calcular_vm_por_sku()` como fator de correção do VM dinâmico
 
 ### Aba 3: Sistema
 Informações do sistema:
@@ -133,7 +152,7 @@ postgrest
 streamlit-authenticator
 ```
 
-`openpyxl` continua porque `data/Parametros_VM.xlsx` é local (carregado por `vm_dinamico.carregar_parametros_vm`).
+`openpyxl` continua porque `scripts/exportar_vm.py` exporta `data/VM_Calculado.xlsx` (não é mais usado para ler parâmetros de entrada — o VM Dinâmico lê tudo de `config.yaml`).
 
 ---
 

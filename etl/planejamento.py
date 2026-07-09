@@ -1,8 +1,9 @@
 """
-planejamento.py — Planejamento de Produção Anual
+planejamento.py — Planejamento de Produção Anual (Visão Geral estratégica)
 
-Calcula sazonalidade mensal a partir do histórico e simula
-rodadas de produção distribuídas ao longo do ano.
+Agrega BOTTOM-UP a política order-up-to por SKU de etl/demanda.py — a mesma
+base usada pela sugestão tática de etl/fabrica.py. As duas visões (anual e
+tática) derivam sempre dos mesmos números.
 
 Uso:
     from etl.planejamento import calcular_sazonalidade, simular_rodadas
@@ -11,245 +12,136 @@ Uso:
 """
 
 import pandas as pd
-import numpy as np
-import math
+
+from etl import demanda as _demanda
 
 
-NOMES_MES = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun",
-             "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
+NOMES_MES = _demanda.NOMES_MES
 
-
-def calcular_sazonalidade(dados: dict, config: dict) -> pd.DataFrame:
-    """
-    Calcula peso relativo de cada mês a partir do histórico de vendas.
-    
-    PesoNormalizado: soma = 12.0 (mês médio = 1.0)
-        > 1.0 = mês acima da média (alta)
-        < 1.0 = mês abaixo da média (baixa)
-    """
-    cfg = config.get("planejamento", {})
-    dt_ini = pd.Timestamp(cfg.get("sazonalidade_inicio", "2025-01-01"))
-    dt_fim = pd.Timestamp(cfg.get("sazonalidade_fim", "2026-02-28"))
-
-    itens = dados["itens"]
-    vendas = itens[(itens["Data"] >= dt_ini) & (itens["Data"] <= dt_fim)].copy()
-
-    if len(vendas) == 0:
-        return pd.DataFrame({
-            "Mes": range(1, 13),
-            "NomeMes": NOMES_MES,
-            "Vendas": 0,
-            "PesoRelativo": [1/12] * 12,
-            "PesoNormalizado": [1.0] * 12,
-        })
-
-    vendas["Mes"] = vendas["Data"].dt.month
-    vendas["AnoMes"] = vendas["Data"].dt.to_period("M")
-
-    # Média por mês-calendário (se tem Jan/25 e Jan/26, faz média)
-    por_anomes = vendas.groupby("AnoMes")["Quantidade"].sum().reset_index()
-    por_anomes["Mes"] = por_anomes["AnoMes"].dt.month
-    media_por_mes = por_anomes.groupby("Mes")["Quantidade"].mean()
-
-    rows = []
-    for m in range(1, 13):
-        rows.append({
-            "Mes": m,
-            "NomeMes": NOMES_MES[m-1],
-            "Vendas": round(media_por_mes.get(m, 0), 1),
-        })
-
-    df = pd.DataFrame(rows)
-    total = df["Vendas"].sum()
-
-    if total > 0:
-        df["PesoRelativo"] = df["Vendas"] / total
-        df["PesoNormalizado"] = round(df["PesoRelativo"] * 12, 3)
-    else:
-        df["PesoRelativo"] = 1/12
-        df["PesoNormalizado"] = 1.0
-
-    return df
+# Mantido como alias — quem já importa calcular_sazonalidade daqui continua
+# funcionando; a implementação real vive em etl/demanda.py.
+calcular_sazonalidade = _demanda.calcular_sazonalidade_empresa
 
 
 def simular_rodadas(dados: dict, config: dict, sazonalidade: pd.DataFrame,
                     rodadas_override: list = None, buffer_override: float = None,
-                    pct_por_rodada: dict = None) -> dict:
+                    pct_por_rodada: dict = None, ativo_crescimento: bool = None) -> dict:
     """
-    Simula as rodadas de produção.
+    Simula as rodadas de produção agregando a política order-up-to por SKU.
 
-    Args:
-        rodadas_override: lista de meses (substitui config para simulação interativa)
-        buffer_override: % buffer (substitui config)
-        pct_por_rodada: dict {mes_disparo: pct_demanda_anual} — controle individual
-                        por rodada. Se None, distribui igualmente entre as rodadas.
+    rodadas_override: calendário alternativo (meses de disparo) p/ cenários.
+    ativo_crescimento: liga/desliga o fator de crescimento (toggle).
+    buffer_override/pct_por_rodada: aceitos por compatibilidade de assinatura;
+        não usados no modelo order-up-to (a margem vem do nível de serviço, e
+        o tamanho de cada rodada emerge da projeção forward, não de um %).
 
-    Retorna dict com: demanda_mensal, rodadas, totais, estoque_projetado
+    Retorna dict com: demanda_mensal, rodadas, totais, estoque_projetado.
     """
-    cfg_plan = config.get("planejamento", {})
-    cfg_fab = config.get("fabrica", {})
-
-    rodadas_meses = rodadas_override or cfg_plan.get("rodadas", [3, 7, 11])
-    lt_semanas = cfg_plan.get("lead_time_semanas", 4)
-    buffer_pct = buffer_override if buffer_override is not None else cfg_plan.get("buffer_pct", 10)
-    crescimento = cfg_fab.get("crescimento_pct", 10)
-
-    lt_meses = math.ceil(lt_semanas / 4)
-
     produtos = dados["produtos"]
-    itens = dados["itens"]
 
-    # Custo médio ponderado
-    custo_medio = produtos["preco_custo"].mean() if len(produtos) > 0 else 0
-
-    # ================================================================
-    # MÉDIA MENSAL BASE — normalizada pela sazonalidade
-    # ================================================================
-    # Se o histórico só cobre meses de alta (Out-Mar), a média bruta
-    # seria inflada. Corrigimos dividindo pelo peso dos meses COM dados.
-    #
-    # Exemplo: se só tenho Out-Mar e esses meses representam 65% das
-    # vendas anuais (soma dos pesos = 7.8 de 12), a média real mensal
-    # é: vendas_periodo / meses_com_dados * (12 / soma_pesos_cobertos)
-    # Isso extrapola corretamente para o ano todo.
-    # ================================================================
-    cfg_saz_ini = pd.Timestamp(cfg_plan.get("sazonalidade_inicio", "2025-01-01"))
-    cfg_saz_fim = pd.Timestamp(cfg_plan.get("sazonalidade_fim", "2026-02-28"))
-    vendas_periodo = itens[
-        (itens["Data"] >= cfg_saz_ini) & (itens["Data"] <= cfg_saz_fim)
-    ]["Quantidade"].sum()
-
-    meses_periodo = max((cfg_saz_fim - cfg_saz_ini).days / 30, 1)
-
-    # Identificar quais meses-calendário têm dados no período
-    vendas_no_periodo = itens[
-        (itens["Data"] >= cfg_saz_ini) & (itens["Data"] <= cfg_saz_fim)
-    ].copy()
-    if len(vendas_no_periodo) > 0:
-        meses_com_dados = vendas_no_periodo["Data"].dt.month.unique().tolist()
-    else:
-        meses_com_dados = list(range(1, 13))
-
-    # Soma dos pesos de sazonalidade dos meses com dados
-    saz_temp = sazonalidade.set_index("Mes")
-    soma_pesos_cobertos = sum(
-        float(saz_temp.loc[m, "PesoNormalizado"]) if m in saz_temp.index else 1.0
-        for m in meses_com_dados
+    # Demanda mensal por SKU + simulação order-up-to (bottom-up)
+    dem = _demanda.calcular_demanda_mensal_por_sku(dados, config, ativo_crescimento)
+    sim = _demanda.simular_politica_reabastecimento(
+        dados, config, dem=dem, rodadas_meses=rodadas_override
     )
 
-    # Média mensal corrigida: remove viés de só ter dados de alta/baixa
-    if soma_pesos_cobertos > 0 and meses_periodo > 0:
-        # vendas / meses = média bruta (enviesada)
-        # × (n_meses_dados / soma_pesos) = fator de correção
-        media_bruta = vendas_periodo / meses_periodo
-        fator_correcao = len(meses_com_dados) / soma_pesos_cobertos
-        media_mensal_base = media_bruta * fator_correcao
-    else:
-        media_mensal_base = vendas_periodo / meses_periodo if meses_periodo > 0 else 0
-
-    media_mensal_proj = media_mensal_base * (1 + crescimento / 100)
-
-    # Demanda mensal projetada
-    saz = sazonalidade.set_index("Mes")
-    demanda_mensal = []
-    for m in range(1, 13):
-        peso = saz.loc[m, "PesoNormalizado"] if m in saz.index else 1.0
-        demanda_mensal.append({
-            "Mes": m,
-            "NomeMes": NOMES_MES[m-1],
-            "Peso": round(float(peso), 3),
-            "Demanda": round(media_mensal_proj * float(peso)),
-        })
-
-    df_demanda = pd.DataFrame(demanda_mensal)
+    df_demanda = _demanda.agregar_demanda_mensal_total(dem, sazonalidade)
     demanda_dict = df_demanda.set_index("Mes")["Demanda"].to_dict()
-    demanda_anual = df_demanda["Demanda"].sum()
+    demanda_anual = int(df_demanda["Demanda"].sum())
+
+    custo_map = produtos.set_index("codigo")["preco_custo"].to_dict()
+    colegio_map = dem.groupby("SKU")["Colegio"].first().to_dict()
 
     # ================================================================
-    # Simulação das rodadas
+    # Rodadas (agregação bottom-up da política)
     # ================================================================
-    rodadas_sorted = sorted(rodadas_meses)
-    n_rodadas = len(rodadas_sorted)
-
-    # Distribuição de % da demanda anual por rodada
-    if pct_por_rodada is None:
-        pct_igual = round(100 / n_rodadas, 1) if n_rodadas > 0 else 100
-        pct_por_rodada = {m: pct_igual for m in rodadas_sorted}
-
     resultado_rodadas = []
+    if len(sim) > 0:
+        sim = sim.copy()
+        sim["Custo"] = sim["SKU"].map(custo_map).fillna(0.0)
+        sim["Colegio"] = sim["SKU"].map(colegio_map).fillna("")
+        sim["Invest"] = sim["Pedido"] * sim["Custo"]
 
-    for i, mes_disparo in enumerate(rodadas_sorted):
-        mes_chegada = mes_disparo + lt_meses
-        if mes_chegada > 12:
-            mes_chegada -= 12
+        rodadas_meta = (
+            sim[["rodada", "mes_disparo", "ano_disparo", "data_disparo", "data_chegada"]]
+            .drop_duplicates().sort_values("data_chegada")
+        )
 
-        # Próxima chegada
-        if i < n_rodadas - 1:
-            prox_chegada = rodadas_sorted[i + 1] + lt_meses
-        else:
-            prox_chegada = rodadas_sorted[0] + lt_meses
-        if prox_chegada > 12:
-            prox_chegada -= 12
+        for _, meta in rodadas_meta.iterrows():
+            s = sim[(sim["mes_disparo"] == meta["mes_disparo"]) &
+                    (sim["ano_disparo"] == meta["ano_disparo"])]
+            producao = int(s["Pedido"].sum())
+            investimento = float(s["Invest"].sum())
+            demanda_periodo = int(round(s["DemandaPeriodo"].sum()))
+            seguranca = int(round(s["EstoqueSeguranca"].sum()))
+            alvo = int(round(s["EstoqueAlvo"].sum()))            # demanda intervalo + segurança
+            sem_estoque = int(s["PedidoSemEstoque"].sum())       # pedido se ignorasse estoque
+            abate_estoque = int(sem_estoque - producao)          # quanto o estoque existente abateu
+            custo_med = (investimento / producao) if producao > 0 else (
+                float(produtos["preco_custo"].mean()) if len(produtos) > 0 else 0.0
+            )
+            chegada = pd.Timestamp(meta["data_chegada"])
+            pct_anual = (producao / demanda_anual * 100) if demanda_anual > 0 else 0
 
-        # Meses cobertos (info contextual)
-        meses_cobertos = []
-        m = mes_chegada
-        for _ in range(12):
-            meses_cobertos.append(m)
-            m = m + 1 if m < 12 else 1
-            if m == prox_chegada:
-                break
+            detalhe_col = (
+                s[s["Pedido"] > 0].groupby("Colegio")["Pedido"].sum()
+                .round().astype(int).reset_index()
+                .rename(columns={"Pedido": "Producao"})
+                .sort_values("Producao", ascending=False).reset_index(drop=True)
+            )
 
-        demanda_periodo = sum(demanda_dict.get(mc, 0) for mc in meses_cobertos)
-
-        # Produção baseada em % da demanda anual (controle individual)
-        pct_rodada = pct_por_rodada.get(mes_disparo, 0)
-        demanda_base = demanda_anual * pct_rodada / 100
-        buffer = demanda_base * buffer_pct / 100
-        producao = math.ceil(demanda_base + buffer)
-        if producao % 2 != 0:
-            producao += 1
-
-        investimento = producao * custo_medio
-        pct_anual = (producao / demanda_anual * 100) if demanda_anual > 0 else 0
-
-        resultado_rodadas.append({
-            "rodada": i + 1,
-            "mes_disparo": mes_disparo,
-            "nome_disparo": NOMES_MES[mes_disparo - 1],
-            "mes_chegada": mes_chegada,
-            "nome_chegada": NOMES_MES[mes_chegada - 1],
-            "meses_cobertos": meses_cobertos,
-            "nomes_cobertos": ", ".join(NOMES_MES[mc-1] for mc in meses_cobertos),
-            "n_meses": len(meses_cobertos),
-            "demanda_periodo": round(demanda_periodo),
-            "pct_rodada": pct_rodada,
-            "buffer": round(buffer),
-            "producao": producao,
-            "investimento": round(investimento, 2),
-            "pct_anual": round(pct_anual, 1),
-        })
+            resultado_rodadas.append({
+                "rodada": int(meta["rodada"]),
+                "mes_disparo": int(meta["mes_disparo"]),
+                "nome_disparo": NOMES_MES[int(meta["mes_disparo"]) - 1],
+                "mes_chegada": chegada.month,
+                "nome_chegada": NOMES_MES[chegada.month - 1],
+                "ano_chegada": chegada.year,
+                "demanda_periodo": demanda_periodo,
+                "seguranca": seguranca,
+                "alvo": alvo,
+                "sem_estoque": sem_estoque,
+                "abate_estoque": abate_estoque,
+                "producao": producao,
+                "custo_medio_ponderado": round(custo_med, 2),
+                "investimento": round(investimento, 2),
+                "pct_anual": round(pct_anual, 1),
+                "detalhe_por_colegio": detalhe_col,
+                "nomes_cobertos": f"chega {NOMES_MES[chegada.month - 1]}/{chegada.year}",
+                "n_meses": "—",
+            })
 
     producao_total = sum(r["producao"] for r in resultado_rodadas)
     investimento_total = sum(r["investimento"] for r in resultado_rodadas)
+    custo_medio_anual = (investimento_total / producao_total) if producao_total > 0 else (
+        float(produtos["preco_custo"].mean()) if len(produtos) > 0 else 0.0
+    )
 
     # ================================================================
-    # Curva de estoque projetada
+    # Curva de estoque projetada — 12 meses A PARTIR DE HOJE (não Jan–Dez,
+    # porque estamos no meio do ano). Começa no estoque líquido atual da rede.
     # ================================================================
+    est_rede = dados["estoque"].groupby("ID_produto")["saldoFisico"].sum()
+    estoque_inicial = float(est_rede.sum())
+
+    # Chegadas por (ano, mês) reais
+    entradas_por_data = {}
+    for r in resultado_rodadas:
+        entradas_por_data[(r["ano_chegada"], r["mes_chegada"])] = \
+            entradas_por_data.get((r["ano_chegada"], r["mes_chegada"]), 0) + r["producao"]
+
+    hoje = pd.Timestamp.now().normalize().replace(day=1)
     estoque_proj = []
-    estoque_atual = 0
-
-    for m in range(1, 13):
-        entrada = sum(
-            r["producao"] for r in resultado_rodadas if r["mes_chegada"] == m
-        )
-        estoque_atual += entrada
+    estoque_atual = estoque_inicial
+    for i in range(12):
+        dt = hoje + pd.DateOffset(months=i)
+        m = dt.month
+        entrada = entradas_por_data.get((dt.year, m), 0)
         demanda_mes = demanda_dict.get(m, 0)
-        estoque_atual -= demanda_mes
-
+        estoque_atual += entrada - demanda_mes
         estoque_proj.append({
             "Mes": m,
-            "NomeMes": NOMES_MES[m-1],
+            "NomeMes": NOMES_MES[m - 1],
             "Entrada": round(entrada),
             "Demanda": round(demanda_mes),
             "EstoqueFinal": round(estoque_atual),
@@ -261,11 +153,9 @@ def simular_rodadas(dados: dict, config: dict, sazonalidade: pd.DataFrame,
         "totais": {
             "producao_total": int(producao_total),
             "investimento_total": round(float(investimento_total), 2),
-            "demanda_anual": int(round(demanda_anual)),
-            "custo_medio": round(float(custo_medio), 2),
-            "media_mensal_proj": round(float(media_mensal_proj), 1),
-            "meses_com_dados": sorted(meses_com_dados),
-            "fator_correcao": round(fator_correcao, 3) if soma_pesos_cobertos > 0 else 1.0,
+            "demanda_anual": demanda_anual,
+            "custo_medio": round(float(custo_medio_anual), 2),
+            "estoque_inicial": round(estoque_inicial),
         },
         "estoque_projetado": pd.DataFrame(estoque_proj),
     }

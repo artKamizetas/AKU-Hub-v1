@@ -6,8 +6,8 @@
 
 # --- FONTE DE DADOS ---
 fonte:
-  # Nome da fonte de dados (Google Sheets em produção)
-  nome: "Google Sheets — Bling ERP"
+  # Nome da fonte de dados (exibido no rodapé da Home)
+  nome: "Supabase — Bling ERP"
 
 # --- DEPÓSITOS ---
 # IMPORTANTE: No Bling, "Loja" e "Depósito" são entidades diferentes.
@@ -29,9 +29,28 @@ depositos:
 
 # --- LOGÍSTICA (Reposição de Loja) ---
 logistica:
-  vm_padrao: 10              # Visual Merchandising — exposição mínima padrão
-  dias_analise_giro: 30      # Janela de dias para calcular giro
-  dias_cobertura_minima: 15  # Dias de estoque mínimo na loja
+  vm_padrao: 2              # Visual Merchandising — exposição mínima padrão (fallback se VM dinâmico não cobrir o SKU)
+  dias_analise_giro: 30     # Janela de dias para calcular giro
+
+# --- VM DINÂMICO (Reposição de Loja — cálculo por SKU a partir de vendas reais) ---
+vm:
+  dias_cobertura: 15          # Dias de demanda que o VM de prateleira deve cobrir
+  inicio_alta: 10              # Mês de início da alta temporada (1-12)
+  fim_alta: 3                  # Mês de fim da alta temporada (1-12)
+  mult_pa: 2.0                 # Multiplicador sobre peças/atendimento (piso do VM)
+  vm_minimo: 2                 # VM mínimo absoluto por SKU
+  lead_time: 3                 # Dias de lead time de reposição (usado no pulmão)
+  nivel_servico_default: 95    # Nível de serviço padrão (%) quando o colégio não tem override
+  aplicar_crescimento: true    # Liga/desliga o fator de crescimento (colégio×grupo) no VM, p/ comparar
+
+# --- COLÉGIOS (parâmetros do VM Dinâmico por colégio/marca) ---
+# Nome do colégio (igual ao valor de Marca_sku) → parâmetros específicos.
+# Colégio não cadastrado aqui usa taxa_crescimento 1.0 e vm.nivel_servico_default.
+colegios:
+  # Exemplo:
+  # "ADC":
+  #   taxa_crescimento: 1.1
+  #   nivel_servico: 95
 
 # --- DAILY (Comercial / Metas) ---
 daily:
@@ -52,50 +71,115 @@ daily:
 
 # --- PCP / FÁBRICA ---
 fabrica:
-  # Período histórico para calcular média de demanda
-  data_inicio: "2025-04-01"
-  data_fim: "2026-03-31"
-
-  crescimento_pct: 10.0      # % de expectativa de crescimento sobre a média
-  sazonalidade: 1.0          # Multiplicador de sazonalidade (ex: 5.0 para alta temporada)
-  cobertura_meses: 2         # Meses de estoque meta
-  correcao_manual: 0         # Ajuste fixo somado à demanda projetada (global)
+  crescimento_pct: 10.0      # % de crescimento — fallback para colégios sem taxa própria em config["colegios"]
+  cobertura_meses: 2         # Fallback: cobertura de estoque (meses) quando planejamento.rodadas está vazio
+  correcao_manual: 0         # Ajuste fixo somado à demanda projetada de TODO SKU (global)
 
   # IDs de situação que representam BACKLOG (consomem estoque sem faturar)
   situacoes_backlog: [6, 15]
 
+# --- DEMANDA (motor único usado por Fábrica e Planejamento) ---
+# Modelo ancorado na ALTA: a demanda de cada SKU vem das vendas reais da
+# última temporada de alta × crescimento; a baixa só adiciona volume de
+# manutenção (fator medido dos dados). Política order-up-to com estoque de
+# segurança por nível de serviço.
+demanda:
+  # Thresholds da sazonalidade agregada (fallback/shape de manutenção)
+  min_vendas_colegio: 30
+  min_meses_colegio: 6
+
+  # Janela de alta temporada, em ordem cronológica (âncora da demanda)
+  janela_alta:                 # Dez, Jan, Fev (Jan pico, Fev declínio)
+
+  # Nível de serviço → estoque de segurança (não pode faltar na alta)
+  - 12
+  - 1
+  - 2
+  nivel_servico_alta: 99       # %
+  nivel_servico_baixa: 92      # %
+  variacao_demanda: 0.25       # coeficiente de variação da demanda — incerteza de previsão, calibrável
+
+  # Liga/desliga o fator de crescimento no cálculo da fábrica (p/ comparar)
+  aplicar_crescimento_fabrica: true
+
+  # Camada OBSERVADA do crescimento: mede o crescimento realizado por
+  # colégio×segmento nas altas e usa como baseline quando não há override
+  # manual em config["colegios"]. false = volta ao +10% cego (fabrica.crescimento_pct).
+  crescimento_observado_ativo: true
+
+  # Proporção da baixa = base GLOBAL medida (Σbaixa/Σalta, últimos 2 ciclos).
+  # Overrides manuais (vencem a base, do mais específico ao geral):
+  #   - por SKU:     excecoes_sku[SKU].proporcao_baixa   (cauda idiossincrática, ex: NEV009)
+  #   - por colégio: colegios[COLÉGIO].proporcao_baixa   (ex: vende o ano todo)
+  # Editáveis na página de Configurações. (backtest: fatiar por categoria não
+  # melhora — global + override manual nos poucos gigantes é o que sustenta.)
+
+# --- AGRUPAMENTO DE GRUPOS EM SEGMENTOS ---
+# Nível intermediário usado para medir o crescimento observado (colégio×segmento).
+# O código traz um default; o que estiver aqui sobrescreve. Reagrupe pela página
+# de Configurações (ou aqui) para testar outros cortes. Grupo ausente = "Outros".
+grupo_segmento:
+  BER: Infantil
+  EIN: Infantil
+  IDF: Infantil          # Infantil + Ed.Física → principal Infantil
+  EIF: Inf+Fund          # combo Infantil + Fundamental
+  EF1: Fundamental
+  EF2: Fundamental
+  EFD: Fundamental
+  FDF: Fundamental       # Fundamental + Ed.Física → principal Fundamental
+  EME: Médio
+  PRE: Médio
+  CUR: Médio
+  EFM: Médio             # combo Fundamental + Médio → Médio
+  TEI: Tempo Integral
+  DIA: Diário            # uniforme diário (legado SES)
+  EDF: Ed. Física        # uniforme de ed. física (todo aluno)
+  ESP: Esporte           # times/equipe (opcional)
+  EQP: Esporte
+  OPC: Outros
+
 # --- PLANEJAMENTO DE PRODUÇÃO ANUAL ---
 # Define as rodadas de produção ao longo do ano.
 # Cada rodada dispara um pedido à fábrica que deve cobrir a demanda
-# até a próxima rodada chegar (+ buffer de segurança).
+# até a próxima rodada chegar. A margem de segurança vem do nível de
+# serviço (order-up-to), não de um buffer percentual.
 planejamento:
-  # Meses em que os pedidos são disparados para a fábrica
-  # Cada rodada cobre da sua data até a próxima rodada
-  rodadas:                      # Março, Julho, Novembro
+  # ===== CALENDÁRIO EXPLÍCITO (recomendado) =====
+  # Datas REAIS de disparo, deste ano E do próximo — nada se repete
+  # automaticamente. Permite rodada atrasada este ano e antecipada no próximo.
+  # A ÚLTIMA data só serve para fechar o intervalo da penúltima (inclua sempre
+  # a primeira rodada do ano seguinte). Vazio = usa "rodadas" mensais abaixo.
+  # Exemplo:
+  # rodadas_datas: ["2026-07-20", "2026-10-01", "2027-02-01", "2027-06-15"]
+  # Este ano: Jul, Out. Ano que vem: Mar, Jun, Out. A última data (Mar/2028) só
+  # fecha o intervalo do Out/2027 (não gera pedido próprio).
+  rodadas_datas: ["2026-07-01", "2026-10-01", "2027-03-01", "2027-06-01", "2027-10-01", "2028-03-01"]
+
+  # ===== FALLBACK MENSAL (comportamento clássico) =====
+  # Meses em que os pedidos são disparados para a fábrica, repetidos todo ano.
+  # Só é usado se rodadas_datas estiver vazio.
+  rodadas:                      # Julho, Outubro (2 rodadas este ano; pico chega em Nov)
 
   # Lead time de produção (semanas) — tempo entre disparar e receber
-  - 3
   - 7
-  - 11
+  - 10
   lead_time_semanas: 4
 
-  # Buffer de segurança (% extra sobre a demanda do período)
-  buffer_pct: 10
-
-  # Período histórico para calcular SAZONALIDADE e MÉDIA MENSAL
-  # IMPORTANTE: Use o período mais amplo possível (ideal: 12+ meses).
-  # Se só tem dados de Out-Mar (alta), o sistema normaliza automaticamente
-  # para extrapolar a demanda dos meses de baixa.
-  # Com mais histórico = projeção mais precisa.
-  sazonalidade_inicio: "2025-01-01"
-  sazonalidade_fim: "2026-02-28"
+  # Período histórico único: a janela de vendas passadas que ensina o FORMATO
+  # do ano (sazonalidade mês a mês) e a base dos SKUs que só vendem na baixa.
+  # NÃO define o tamanho do pico — esse vem das vendas reais da última alta.
+  # IMPORTANTE: Use o período mais amplo possível (ideal: 12+ meses, incluindo
+  # meses de baixa). Com mais histórico = projeção mais precisa.
+  periodo_historico_inicio: "2025-12-01"
+  periodo_historico_fim: "2026-02-28"
 
 # --- EXCEÇÕES POR SKU ---
 # Sobrescreve regras globais para produtos específicos.
-# Campos opcionais: vm, dias_analise, dias_min, sazonalidade, correcao
+# Campos opcionais:
+#   vm       → força o VM de prateleira do SKU (Reposição de Loja)
+#   correcao → ajuste (unidades no PCP / fator no VM dinâmico) do SKU
 excecoes_sku:
   # Exemplo:
   # "ABC-PP":
   #   vm: 5
-  #   sazonalidade: 3.0
-  #   dias_analise: 60
+  #   correcao: 10

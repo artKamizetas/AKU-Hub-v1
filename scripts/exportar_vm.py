@@ -4,8 +4,8 @@ exportar_vm.py — Exporta VM + Pulmão calculados para Excel
 Gera a planilha VM_Calculado.xlsx na pasta data/ com o resultado
 do cálculo de VM dinâmico e pulmão para todos os SKUs.
 
-Uso:
-    python exportar_vm.py
+Uso (a partir da raiz do projeto):
+    python scripts/exportar_vm.py
 """
 
 import sys
@@ -13,11 +13,12 @@ import yaml
 import time
 from pathlib import Path
 
-BASE = Path(__file__).parent
+# Raiz do projeto (o script vive em scripts/, um nível abaixo)
+BASE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE))
 
 from etl.loader import carregar_dados
-from etl.vm_dinamico import carregar_parametros_vm, calcular_vm_por_sku
+from etl.vm_dinamico import calcular_vm_por_sku
 
 
 def main():
@@ -35,18 +36,10 @@ def main():
         print(f"ERRO: {dados['validacao']['erros']}")
         return
 
-    # Carrega parâmetros
-    print("Carregando parâmetros VM...", end=" ", flush=True)
-    params = carregar_parametros_vm(str(BASE / "data" / "Parametros_VM.xlsx"))
-    if not params["ok"]:
-        print(f"ERRO: {params['erros']}")
-        return
-    print("OK")
-
     # Calcula VM
     print("Calculando VM + Pulmão...", end=" ", flush=True)
     t1 = time.time()
-    vm_map = calcular_vm_por_sku(dados, params)
+    vm_map = calcular_vm_por_sku(dados, config)
     print(f"OK — {len(vm_map)} SKUs ({time.time()-t1:.1f}s)")
 
     # Monta DataFrame
@@ -63,15 +56,10 @@ def main():
             "Fonte VM": info["fonte_vm"],
             "D Alta (pçs/dia)": info["d_alta"],
             "PA (pçs/atend)": info["pa"],
-            "σ Diário": info["sigma"],
+            "Desvio-Padrão diário": info["sigma"],
             "Pedidos/Dia": info["pedidos_dia"],
-            "Vendas Alta": info["vendas_alta"],
-            "Pedidos Alta": info["pedidos_alta"],
             "Taxa Cresc.": info["taxa_cresc"],
             "Correção": info["correcao"],
-            "Nível Serviço": info["nivel_servico"],
-            "Z": info["z"],
-            "Lead Time": info["lead_time"],
         })
 
     df = pd.DataFrame(rows)
@@ -100,7 +88,7 @@ def main():
     for _, r in top.iterrows():
         print(f"  {r['SKU']:<30} VM={r['VM (prateleira)']:>3}  "
               f"Pulm={r['Pulmão (armário)']:>3}  Total={r['Total na Loja']:>3}  "
-              f"(σ={r['σ Diário']:.2f})")
+              f"(Desvio-Padrão={r['Desvio-Padrão diário']:.2f})")
 
 
 if __name__ == "__main__":

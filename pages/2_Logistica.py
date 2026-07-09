@@ -9,7 +9,7 @@ exigir_login()
 import plotly.express as px
 import pandas as pd
 from etl.logistica import processar_logistica
-from etl.vm_dinamico import carregar_parametros_vm, calcular_vm_por_sku
+from etl.vm_dinamico import calcular_vm_por_sku
 
 import yaml
 from pathlib import Path
@@ -21,15 +21,11 @@ def _carregar():
     with open(caminho_config, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
     dados = carregar_dados()
-
-    caminho_params = Path(__file__).parent.parent / "data" / "Parametros_VM.xlsx"
-    params_vm = carregar_parametros_vm(str(caminho_params))
-
-    return dados, config, params_vm
+    return dados, config
 
 
 with st.spinner("Carregando dados..."):
-    dados, config, params_vm = _carregar()
+    dados, config = _carregar()
 
 if not dados["validacao"]["ok"]:
     st.error("Dados inválidos. Verifique a página principal.")
@@ -37,35 +33,27 @@ if not dados["validacao"]["ok"]:
 
 
 @st.cache_data
-def _processar(_dados, _config, _params_vm):
-    vm_map = None
-    if _params_vm["ok"]:
-        vm_map = calcular_vm_por_sku(_dados, _params_vm)
-    return processar_logistica(_dados, _config, vm_map), _params_vm
+def _processar(_dados, _config):
+    vm_map = calcular_vm_por_sku(_dados, _config)
+    return processar_logistica(_dados, _config, vm_map)
 
 
 with st.spinner("Processando logística..."):
-    df, params_info = _processar(dados, config, params_vm)
+    df = _processar(dados, config)
 
 st.title("📦 Logística — Reposição de Loja")
 
 # Info sobre VM
-if params_info["ok"]:
-    g = params_info["globais"]
-    st.caption(
-        f"VM Dinâmico ativo — "
-        f"Cobertura: {int(g['dias_cobertura'])}d | "
-        f"Alta: {int(g['inicio_alta'])}-{int(g['fim_alta'])} | "
-        f"Mult. PA: {g['mult_pa']}x | "
-        f"LT: {int(g['lead_time'])}d | "
-        f"Colégios: {len(params_info['colegios'])} | "
-        f"SKUs c/ correção: {len(params_info['skus'])}"
-    )
-    if params_info["avisos"]:
-        for av in params_info["avisos"]:
-            st.warning(av)
-else:
-    st.warning("⚠️ Parametros_VM.xlsx não encontrado em data/. Usando VM fixo do config.yaml.")
+g = config.get("vm", {})
+st.caption(
+    f"VM Dinâmico ativo — "
+    f"Cobertura: {int(g.get('dias_cobertura', 15))}d | "
+    f"Alta: {int(g.get('inicio_alta', 10))}-{int(g.get('fim_alta', 3))} | "
+    f"Mult. PA: {g.get('mult_pa', 2.0)}x | "
+    f"LT: {int(g.get('lead_time', 3))}d | "
+    f"Colégios: {len(config.get('colegios') or {})} | "
+    f"SKUs c/ correção: {len(config.get('excecoes_sku') or {})}"
+)
 
 # =================================================================
 # FILTROS
@@ -170,7 +158,7 @@ st.caption(f"**{len(df_filtrado)}** SKUs exibidos")
 with st.expander("🔍 Diagnóstico VM Dinâmico — Detalhes do Cálculo"):
     st.caption(
         "Mostra como o VM e Pulmão foram calculados para cada SKU. "
-        "**Pulmão** = Z × σ × √LT (absorve picos de demanda)."
+        "**Pulmão** = Fator de Serviço × Desvio-Padrão × √lead time (absorve picos de demanda)."
     )
 
     colunas_diag = [
@@ -188,7 +176,7 @@ with st.expander("🔍 Diagnóstico VM Dinâmico — Detalhes do Cálculo"):
             "Pulmao": st.column_config.NumberColumn("Pulmão"),
             "Total": st.column_config.NumberColumn("VM+Pulmão"),
             "PA": st.column_config.NumberColumn("PA (pçs/atend)", format="%.1f"),
-            "Sigma": st.column_config.NumberColumn("σ diário", format="%.2f"),
+            "Sigma": st.column_config.NumberColumn("Desvio-Padrão", format="%.2f"),
             "D_Alta": st.column_config.NumberColumn("Demanda/Dia", format="%.3f"),
             "TaxaCresc": st.column_config.NumberColumn("Taxa Cresc.", format="%.2f"),
             "Correcao": st.column_config.NumberColumn("Correção", format="%.2f"),
@@ -197,8 +185,8 @@ with st.expander("🔍 Diagnóstico VM Dinâmico — Detalhes do Cálculo"):
     )
 
     st.caption(
-        "**σ alto** = vendas irregulares → pulmão maior. "
-        "**σ ≈ 0** = vendas estáveis → pulmão mínimo."
+        "**Desvio-Padrão alto** = vendas irregulares → pulmão maior. "
+        "**Desvio-Padrão ≈ 0** = vendas estáveis → pulmão mínimo."
     )
 
 # =================================================================

@@ -3,9 +3,9 @@ memoria_calculo.py — Memória de Cálculo do VM Dinâmico + Pulmão
 
 Mostra passo a passo como o VM e Pulmão foram calculados para um SKU.
 
-Uso:
-    python memoria_calculo.py                        # SKU padrão
-    python memoria_calculo.py NEV020CAMEDF-PP        # SKU específico
+Uso (a partir da raiz do projeto):
+    python scripts/memoria_calculo.py                        # SKU padrão
+    python scripts/memoria_calculo.py NEV020CAMEDF-PP        # SKU específico
 """
 
 import sys
@@ -16,9 +16,9 @@ import numpy as np
 from pathlib import Path
 from datetime import datetime, timedelta
 
-sys.path.insert(0, str(Path(__file__).parent))
+RAIZ = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(RAIZ))
 from etl.loader import carregar_dados
-from etl.vm_dinamico import carregar_parametros_vm
 
 
 # ==============================
@@ -44,19 +44,11 @@ def calc(nome, formula, resultado):
 def main():
     sku_alvo = sys.argv[1] if len(sys.argv) > 1 else "TESTENUM"
 
-    base = Path(__file__).parent
-    caminho_config = base / "config.yaml"
+    caminho_config = RAIZ / "config.yaml"
     with open(caminho_config, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
     dados = carregar_dados()
-
-    caminho_params = base / "data" / "Parametros_VM.xlsx"
-    params = carregar_parametros_vm(str(caminho_params))
-
-    if not params["ok"]:
-        print(f"ERRO: {params['erros']}")
-        return
 
     # Encontra o produto
     produtos = dados["produtos"]
@@ -85,29 +77,32 @@ def main():
     # ================================================================
     linha("ETAPA 1 — PARÂMETROS DO SKU")
 
-    glob = params["globais"]
-    dias_cobertura = glob["dias_cobertura"]
-    inicio_alta = int(glob["inicio_alta"])
-    fim_alta = int(glob["fim_alta"])
-    mult_pa = glob["mult_pa"]
-    vm_minimo = int(glob["vm_minimo"])
+    glob = config.get("vm", {})
+    dias_cobertura = glob.get("dias_cobertura", 15)
+    inicio_alta = int(glob.get("inicio_alta", 10))
+    fim_alta = int(glob.get("fim_alta", 3))
+    mult_pa = glob.get("mult_pa", 2.0)
+    vm_minimo = int(glob.get("vm_minimo", 2))
     lead_time = glob.get("lead_time", 3)
     ns_default = glob.get("nivel_servico_default", 95)
 
-    col_params = params["colegios"].get(colegio, {})
+    map_colegios = config.get("colegios") or {}
+    col_params = map_colegios.get(colegio, {})
     taxa_cresc = col_params.get("taxa_crescimento", 1.0) if col_params else 1.0
     nivel_servico = col_params.get("nivel_servico", ns_default) if col_params else ns_default
-    correcao = params["skus"].get(sku_alvo, 1.0)
 
-    z_map = {90: 1.28, 95: 1.65, 97: 1.88, 98: 2.05, 99: 2.33}
+    excecoes = config.get("excecoes_sku") or {}
+    correcao = excecoes.get(sku_alvo, {}).get("correcao", 1.0) if isinstance(excecoes.get(sku_alvo), dict) else 1.0
+
+    fator_map = {90: 1.28, 95: 1.65, 97: 1.88, 98: 2.05, 99: 2.33}
     ns_int = round(nivel_servico if nivel_servico > 1 else nivel_servico * 100)
-    z = z_map.get(ns_int, 1.65)
+    fator_servico = fator_map.get(ns_int, 1.65)
 
     sub("Dados do Produto")
     print(f"  Colégio (Marca_sku): '{colegio}'")
     print(f"  Categoria: '{categoria}' | Super: '{super_cat}' | Tamanho: '{tamanho}'")
 
-    sub("Parâmetros Globais (Parametros_VM.xlsx → Parametros_Globais)")
+    sub("Parâmetros Globais (config.yaml → vm)")
     print(f"  Dias de Cobertura VM:   {dias_cobertura}")
     print(f"  Alta Temporada:         mês {inicio_alta} a mês {fim_alta}")
     print(f"  Multiplicador PA:       {mult_pa}x")
@@ -115,16 +110,16 @@ def main():
     print(f"  Lead Time Reposição:    {lead_time} dias")
     print(f"  Nível Serviço Padrão:   {ns_default}%")
 
-    sub("Parâmetros do Colégio (Parametros_VM.xlsx → Parametros_Colegio)")
+    sub("Parâmetros do Colégio (config.yaml → colegios)")
     print(f"  Colégio '{colegio}' → Taxa Crescimento = {taxa_cresc}")
-    print(f"  Colégio '{colegio}' → Nível de Serviço = {nivel_servico}% (Z = {z:.2f})")
-    if colegio not in params["colegios"]:
-        print(f"  ⚠️  Colégio não cadastrado na planilha. Usando defaults.")
+    print(f"  Colégio '{colegio}' → Nível de Serviço = {nivel_servico}% (Fator de Serviço = {fator_servico:.2f})")
+    if colegio not in map_colegios:
+        print(f"  ⚠️  Colégio não cadastrado em config.yaml. Usando defaults.")
 
-    sub("Parâmetros do SKU (Parametros_VM.xlsx → Parametros_SKU)")
+    sub("Correção do SKU (config.yaml → excecoes_sku)")
     print(f"  SKU '{sku_alvo}' → Correção Manual = {correcao}")
-    if sku_alvo not in params["skus"]:
-        print(f"  ⚠️  SKU não cadastrado na planilha. Usando default 1.0.")
+    if sku_alvo not in excecoes:
+        print(f"  ⚠️  SKU não cadastrado em excecoes_sku. Usando default 1.0.")
 
     # ================================================================
     # ETAPA 2 — VENDAS NA ALTA
@@ -244,11 +239,11 @@ def main():
                   f"max={vd_por_dia.max():.0f}, média={vd_por_dia.mean():.2f}")
         print(f"    Média diária (c/ zeros): {todas_qtds.mean():.4f}")
 
-        calc("Desvio Padrão da demanda diária (σ):",
+        calc("Desvio-Padrão da demanda diária (σ):",
              f"std({n_dias_reais} dias, incluindo {dias_sem_venda} zeros)",
              f"{sigma:.4f} peças/dia")
 
-        print(f"\n  📖 O QUE É O σ (SIGMA):")
+        print(f"\n  📖 O QUE É O DESVIO-PADRÃO (σ):")
         print(f"     Mede quanto a demanda diária varia em torno da média.")
         print(f"     σ alto = vendas muito irregulares (dias com 0, dias com 12).")
         print(f"     σ baixo = vendas estáveis (sempre perto da média).")
@@ -256,12 +251,12 @@ def main():
         sigma = 0.0
         print(f"\n  Sem vendas na alta → σ = 0 (pulmão será zero)")
 
-    pulmao_bruto = z * sigma * math.sqrt(lead_time)
+    pulmao_bruto = fator_servico * sigma * math.sqrt(lead_time)
     pulmao_final = math.ceil(pulmao_bruto)
 
     calc("Pulmão (estoque de segurança):",
-         f"Z × σ × √LT = {z:.2f} × {sigma:.4f} × √{lead_time}",
-         f"{z:.2f} × {sigma:.4f} × {math.sqrt(lead_time):.2f} = {pulmao_bruto:.2f}")
+         f"Fator de Serviço × Desvio-Padrão × √lead time = {fator_servico:.2f} × {sigma:.4f} × √{lead_time}",
+         f"{fator_servico:.2f} × {sigma:.4f} × {math.sqrt(lead_time):.2f} = {pulmao_bruto:.2f}")
     print(f"    Arredondado para cima: {pulmao_final}")
 
     vm_total = vm_final + pulmao_final

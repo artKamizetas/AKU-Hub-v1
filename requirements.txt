@@ -1,8 +1,9 @@
-streamlit
-pandas
-openpyxl
-pyyaml
-ruamel.yaml
-plotly
-postgrest
-streamlit-authenticator
+# Baseline testada (>= versão instalada). Reveja antes de subir major.
+streamlit>=1.59
+pandas>=3.0
+openpyxl>=3.1
+pyyaml>=6.0
+ruamel.yaml>=0.19
+plotly>=6.8
+postgrest>=2.31
+streamlit-authenticator>=0.4

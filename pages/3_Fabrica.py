@@ -12,6 +12,7 @@ import pandas as pd
 
 from etl.fabrica import processar_fabrica
 from etl.planejamento import calcular_sazonalidade, simular_rodadas
+from etl.demanda import listar_rodadas_selecionaveis
 
 import yaml
 from pathlib import Path
@@ -38,23 +39,22 @@ if not dados["validacao"]["ok"]:
 # =================================================================
 
 @st.cache_data
-def _processar(_dados, _config):
-    return processar_fabrica(_dados, _config, pipeline=None)
+def _processar(_dados, _config, mes_disparo=None, ano_disparo=None, ativo_crescimento=None):
+    return processar_fabrica(
+        _dados, _config, mes_disparo=mes_disparo, ano_disparo=ano_disparo,
+        ativo_crescimento=ativo_crescimento,
+    )
 
-df = _processar(dados, config)
-
-# Enriquecer com Tamanho (vem de detalhes, não está no processar_fabrica)
+# Mapa SKU → Tamanho (vem de detalhes, não está no processar_fabrica)
 detalhes = dados["detalhes"]
 _tam = detalhes[["ID_produto", "Tamanho"]].copy()
 _tam = _tam.rename(columns={"ID_produto": "_id_prod"})
-# Mapear ID_produto → SKU via produtos para fazer o join
 _prod_map = dados["produtos"][["ID", "codigo"]].copy()
 _prod_map["ID"] = _prod_map["ID"].astype(str).str.strip()
 _tam["_id_prod"] = _tam["_id_prod"].astype(str).str.strip()
 _tam = _tam.merge(_prod_map, left_on="_id_prod", right_on="ID", how="left")
 _tam = _tam.dropna(subset=["codigo"]).drop_duplicates(subset=["codigo"])
 _tam_map = _tam.set_index("codigo")["Tamanho"].to_dict()
-df["Tamanho"] = df["SKU"].map(_tam_map).fillna("")
 
 # =================================================================
 # TÍTULO
@@ -84,63 +84,45 @@ MESES_NOME = {
     9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro",
 }
 
+cfg_dem = config.get("demanda", {})
+
 col1, col2, col3 = st.columns(3)
 
 with col1:
-    rodadas_default = cfg_plan.get("rodadas", [3, 7, 11])
+    rodadas_default = cfg_plan.get("rodadas", [7, 10])
     rodadas_sel = st.multiselect(
-        "Meses de disparo",
+        "Meses de disparo (cenário de rodadas)",
         options=list(range(1, 13)),
         default=rodadas_default,
         format_func=lambda x: MESES_NOME[x],
+        help="Simula um calendário de rodadas alternativo. Cada rodada cobre da "
+             "sua chegada até a próxima chegar (política order-up-to).",
     )
 
 with col2:
-    buffer = st.slider(
-        "Buffer de segurança (%)",
-        min_value=0, max_value=50,
-        value=cfg_plan.get("buffer_pct", 10),
-        step=5,
+    ativo_cresc = st.checkbox(
+        "Aplicar crescimento planejado (colégio×grupo)",
+        value=cfg_dem.get("aplicar_crescimento_fabrica", True),
+        help="Liga/desliga o fator de crescimento cadastrado em Configurações → Colégios, "
+             "pra comparar o pedido com e sem crescimento.",
     )
+    st.caption(f"Nível de serviço: alta {cfg_dem.get('nivel_servico_alta', 99)}% · "
+               f"baixa {cfg_dem.get('nivel_servico_baixa', 92)}%")
 
 with col3:
     lt = cfg_plan.get("lead_time_semanas", 4)
     st.metric("Lead Time", f"{lt} semanas")
-    st.caption(f"Crescimento: {cfg_fab.get('crescimento_pct', 10)}%")
+    janela_alta = cfg_dem.get("janela_alta", [12, 1, 2])
+    st.caption("Alta: " + ", ".join(MESES_NOME[m][:3] for m in janela_alta))
 
-# Sliders de distribuição por rodada
 tem_rodadas = len(rodadas_sel) > 0
-pct_rodadas = {}
+rodadas_sorted = sorted(rodadas_sel)
 
-if tem_rodadas:
-    rodadas_sorted = sorted(rodadas_sel)
-    n_rodadas = len(rodadas_sorted)
-    default_pct = round(100 / n_rodadas)
-
-    slider_cols = st.columns(n_rodadas)
-    for i, mes in enumerate(rodadas_sorted):
-        with slider_cols[i]:
-            pct_rodadas[mes] = st.slider(
-                f"R{i+1} ({MESES_NOME[mes]}) — % demanda",
-                min_value=0, max_value=100,
-                value=default_pct,
-                step=5,
-                key=f"pct_rodada_{mes}",
-            )
-
-    total_alocado = sum(pct_rodadas.values())
-
-    col_prog1, col_prog2 = st.columns([3, 1])
-    with col_prog1:
-        st.progress(min(total_alocado, 100) / 100)
-    with col_prog2:
-        st.metric("Total Alocado", f"{total_alocado}%")
-
-    if total_alocado != 100:
-        if total_alocado < 100:
-            st.warning(f"⚠️ Total alocado: {total_alocado}% — cenário conservador ({100 - total_alocado}% abaixo da demanda).")
-        else:
-            st.warning(f"⚠️ Total alocado: {total_alocado}% — produção acima da demanda (+{total_alocado - 100}% extra).")
+st.caption(
+    "📐 Dimensionamento **order-up-to**: cada rodada repõe até o nível-alvo "
+    "(demanda até a próxima chegada + estoque de segurança pelo nível de serviço). "
+    "O tamanho de cada rodada **emerge da projeção de estoque** — não há mais % manual."
+)
 
 st.divider()
 
@@ -156,26 +138,10 @@ with tab_geral:
     if not tem_rodadas:
         st.warning("Selecione pelo menos 1 mês de disparo nos parâmetros acima para ver a simulação.")
     else:
-        # Simulação
+        # Simulação (order-up-to bottom-up)
         sim = simular_rodadas(dados, config, sazonalidade,
                               rodadas_override=rodadas_sorted,
-                              buffer_override=buffer,
-                              pct_por_rodada=pct_rodadas)
-
-        # Info sobre normalização
-        totais = sim["totais"]
-        meses_dados = totais.get("meses_com_dados", list(range(1, 13)))
-        NOMES = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"]
-        nomes_meses_dados = [NOMES[m-1] for m in meses_dados]
-        fator = totais.get("fator_correcao", 1.0)
-        if len(meses_dados) < 12:
-            st.info(
-                f"📊 **Histórico parcial:** dados de vendas em {len(meses_dados)} de 12 meses "
-                f"({', '.join(nomes_meses_dados)}). "
-                f"A demanda dos meses sem dados foi extrapolada pela sazonalidade "
-                f"(fator de correção: {fator:.2f}x). "
-                f"Com mais meses de histórico, a projeção fica mais precisa."
-            )
+                              ativo_crescimento=ativo_cresc)
 
         # KPIs macro
         t = sim["totais"]
@@ -184,19 +150,37 @@ with tab_geral:
         c2.metric("Produção Total", f"{t['producao_total']:,.0f} pçs")
         c3.metric("Investimento Total", f"R$ {t['investimento_total']:,.2f}")
         c4.metric("Custo Médio", f"R$ {t['custo_medio']:.2f}/pç")
+        st.caption(f"Estoque líquido atual da rede (ponto de partida da projeção): "
+                   f"{t.get('estoque_inicial', 0):,.0f} pçs")
 
         # Rodadas detalhadas
         st.subheader("🏭 Rodadas de Produção")
         rodadas_df = pd.DataFrame(sim["rodadas"])
 
         for _, r in rodadas_df.iterrows():
-            with st.expander(f"Rodada {r['rodada']} — {r['nome_disparo']} → chega {r['nome_chegada']}"):
+            with st.expander(f"Rodada {r['rodada']} — {r['nome_disparo']} → chega {r['nome_chegada']}/{r['ano_chegada']}"):
                 cols = st.columns(4)
-                cols[0].metric("Meses cobertos", f"{r['n_meses']}")
-                cols[1].metric("Demanda", f"{r['demanda_periodo']:,.0f}")
-                cols[2].metric("Produção", f"{r['producao']:,.0f}", f"{r['pct_anual']:.0f}% do ano")
+                cols[0].metric("Demanda no período", f"{r['demanda_periodo']:,.0f}")
+                cols[1].metric("Produção", f"{r['producao']:,.0f}", f"{r['pct_anual']:.0f}% da demanda anual")
+                cols[2].metric("Custo médio pond.", f"R$ {r['custo_medio_ponderado']:.2f}")
                 cols[3].metric("Investimento", f"R$ {r['investimento']:,.2f}")
-                st.caption(f"Cobre: **{r['nomes_cobertos']}**")
+
+                # De onde vem a produção — abatimento do estoque explícito
+                st.markdown(
+                    f"**Como se chega na produção:**  \n"
+                    f"Alvo (demanda {r['demanda_periodo']:,.0f} + segurança {r['seguranca']:,.0f}) = **{r['sem_estoque']:,.0f}** "
+                    f"→ (−) estoque existente útil **{r['abate_estoque']:,.0f}** "
+                    f"→ **produção {r['producao']:,.0f} pares**"
+                )
+                st.caption(
+                    "O estoque é abatido SKU a SKU (item×tamanho) — estoque no tamanho errado não abate. "
+                    "Por isso o abatimento é menor que o estoque total da rede."
+                )
+
+                detalhe_col = r["detalhe_por_colegio"]
+                if len(detalhe_col) > 0:
+                    st.caption("Produção por colégio nesta rodada:")
+                    st.dataframe(detalhe_col, hide_index=True, use_container_width=True)
 
         # Demanda vs Produção
         st.subheader("📦 Demanda vs Produção por Mês")
@@ -283,7 +267,7 @@ with tab_geral:
         if len(meses_ruptura) > 0:
             nomes = ", ".join(meses_ruptura["NomeMes"].tolist())
             st.error(f"⚠️ **Ruptura projetada** nos meses: {nomes}. "
-                     f"Considere antecipar uma rodada ou aumentar o buffer.")
+                     f"Considere antecipar/adicionar uma rodada ou elevar o nível de serviço.")
         else:
             st.success("✅ Sem ruptura projetada com esta configuração.")
 
@@ -314,6 +298,29 @@ with tab_geral:
 # TAB: SUGESTÃO POR SKU
 # =================================================================
 with tab_sku:
+    # Seletor de rodada — qual pedido de abastecimento você está montando
+    rodadas_opts = listar_rodadas_selecionaveis(config)
+
+    if rodadas_opts:
+        idx = st.selectbox(
+            "Pedido de qual rodada?",
+            options=list(range(len(rodadas_opts))),
+            format_func=lambda i: rodadas_opts[i]["label"],
+            help="Cada rodada cobre da sua chegada até a rodada seguinte chegar. "
+                 "A primeira opção é a rodada mais próxima de ser disparada.",
+        )
+        sel = rodadas_opts[idx]
+        df = _processar(dados, config, sel["mes_disparo"], sel["ano_disparo"], ativo_cresc)
+    else:
+        df = _processar(dados, config, None, None, ativo_cresc)
+
+    df["Tamanho"] = df["SKU"].map(_tam_map).fillna("")
+
+    # Janela de cobertura — responde "essa sugestão cobre até qual abastecimento?"
+    janela_label = df["JanelaLabel"].iloc[0] if len(df) > 0 else ""
+    st.info(f"📦 {janela_label} — a sugestão abaixo é o pedido dessa rodada "
+            f"(descontando estoque atual e backlog).")
+
     # KPIs
     skus_produzir = df[df["SugestaoProducao"] > 0]
     total_pares = skus_produzir["SugestaoProducao"].sum()
@@ -327,13 +334,21 @@ with tab_sku:
     c4.metric("Backlog (Em Carteira)", f"{backlog_total:,.0f} pçs")
 
     # Parâmetros do cálculo
-    with st.expander("⚙️ Parâmetros do Cálculo (config.yaml)"):
+    with st.expander("⚙️ Metodologia do Cálculo"):
         cfg = config["fabrica"]
-        st.write(f"**Período histórico:** {cfg['data_inicio']} a {cfg['data_fim']}")
-        st.write(f"**Crescimento:** {cfg['crescimento_pct']}%")
-        st.write(f"**Sazonalidade:** {cfg['sazonalidade']}x")
-        st.write(f"**Cobertura:** {cfg['cobertura_meses']} meses")
-        st.write(f"**Correção manual:** {cfg['correcao_manual']}")
+        cfg_d = config.get("demanda", {})
+        janela_alta_m = cfg_d.get("janela_alta", [12, 1, 2])
+        st.write(f"**Rodada:** {janela_label}")
+        st.markdown(
+            "- **Demanda ancorada na alta**: vendas reais da última temporada de alta "
+            f"({', '.join(MESES_NOME[m] for m in janela_alta_m)}) × crescimento; a baixa só adiciona a demanda de baixa (proporção da alta).\n"
+            "- **Política order-up-to**: repõe até o **Estoque-Alvo** (= demanda do período + estoque de segurança), "
+            "descontando o estoque projetado na chegada (projeção forward).\n"
+            f"- **Estoque de segurança** pelo nível de serviço: alta **{cfg_d.get('nivel_servico_alta', 99)}%**, "
+            f"baixa **{cfg_d.get('nivel_servico_baixa', 92)}%** · Variação da Demanda {cfg_d.get('variacao_demanda', 0.25)}.\n"
+            f"- **Crescimento aplicado:** {'sim' if ativo_cresc else 'não (comparação)'} · "
+            f"correção manual global: {cfg.get('correcao_manual', 0)}"
+        )
 
     # Filtros
     col_f1, col_f2 = st.columns(2)
@@ -379,22 +394,39 @@ with tab_sku:
     # Tabela principal
     st.subheader("Sugestão de Produção")
 
+    # Rótulo honesto: a "demanda do período" cobre da chegada desta rodada até
+    # a próxima chegar — o cabeçalho diz o intervalo pra não convidar a
+    # comparação errada com as vendas da alta (3 meses).
+    _cobre = df_filtrado["JanelaLabel"].iloc[0].split("cobre ")[-1] if len(df_filtrado) else "—"
+    st.info(
+        f"📆 **Esta rodada cobre: {_cobre}** — a coluna *Demanda do Período* soma a demanda "
+        f"desse intervalo inteiro (pico **e** baixa), por isso pode ser maior que *Vendas Alta* "
+        f"(que são só os 3 meses de pico da última temporada)."
+    )
+
     st.dataframe(
         df_filtrado[[
-            "SKU", "Produto", "Tamanho", "Colegio", "Categoria", "Grupo",
-            "VendasHist", "MediaMensal",
-            "EstoqueRede", "Backlog", "Pipeline",
-            "DemandaProjetada", "EstoqueMeta", "NecessidadeBruta",
-            "SugestaoProducao", "CustoUnit", "InvestimentoFabril"
+            "SKU", "Produto", "Tamanho", "Colegio", "Grupo", "Categoria",
+            "VendasHist", "EstoqueRede", "Backlog",
+            "DemandaProjetada", "DemandaPeriodoAlta", "DemandaPeriodoBaixa",
+            "EstoqueSeguranca", "EstoqueMeta", "EstoqueProjetado",
+            "SugestaoProducao", "NivelServico", "CustoUnit", "InvestimentoFabril"
         ]],
         use_container_width=True,
         hide_index=True,
+        height=900,  # ~25 linhas visíveis antes de rolar
         column_config={
             "Tamanho": st.column_config.TextColumn("Tam."),
-            "MediaMensal": st.column_config.NumberColumn("Média Mensal", format="%.1f"),
-            "DemandaProjetada": st.column_config.NumberColumn("Demanda Proj.", format="%.1f"),
-            "NecessidadeBruta": st.column_config.NumberColumn("Necessidade", format="%.1f"),
-            "SugestaoProducao": st.column_config.NumberColumn("Sugestão (pares)"),
+            "VendasHist": st.column_config.NumberColumn("Vendas Alta", help="Vendas da última temporada de alta (histórico cru, sem crescimento) — só os meses de pico"),
+            "EstoqueRede": st.column_config.NumberColumn("Est. Rede", help="Saldo físico em todos os depósitos hoje"),
+            "DemandaProjetada": st.column_config.NumberColumn(f"Demanda do Período ({_cobre})", format="%.1f", help="Demanda projetada da chegada desta rodada até a próxima chegar = coluna 'na alta' + 'na baixa'"),
+            "DemandaPeriodoAlta": st.column_config.NumberColumn("· na alta", format="%.1f", help="Parcela da Demanda do Período que cai nos meses de pico (vendas reais × crescimento)"),
+            "DemandaPeriodoBaixa": st.column_config.NumberColumn("· na baixa", format="%.1f", help="Parcela da Demanda do Período que cai nos meses de baixa (demanda de baixa espalhada)"),
+            "EstoqueSeguranca": st.column_config.NumberColumn("Segurança", format="%.1f", help="Estoque de segurança pelo nível de serviço"),
+            "EstoqueMeta": st.column_config.NumberColumn("Alvo (S)", help="Nível-alvo order-up-to = demanda do período + segurança"),
+            "EstoqueProjetado": st.column_config.NumberColumn("Est. Projetado", format="%.1f", help="Estoque projetado na chegada da rodada (já desconta o consumo até lá e chegadas de rodadas anteriores). O estoque de HOJE está em Est. Rede"),
+            "SugestaoProducao": st.column_config.NumberColumn("Sugestão (pares)", help="Pedido = Alvo − Est. Projetado, arredondado a par"),
+            "NivelServico": st.column_config.NumberColumn("NS %", help="Nível de serviço aplicado (alta vs baixa)"),
             "CustoUnit": st.column_config.NumberColumn("Custo Unit (R$)", format="R$ %.2f"),
             "InvestimentoFabril": st.column_config.NumberColumn("Investimento (R$)", format="R$ %.2f"),
         },
@@ -424,38 +456,32 @@ with tab_sku:
     # Export CSV
     st.subheader("Exportar")
 
-    # Monta tabela de exportação com distribuição por rodada
+    # Monta tabela de exportação
     df_export = df_filtrado[[
-        "SKU", "Produto", "Tamanho", "Colegio", "Categoria",
-        "VendasHist", "MediaMensal", "EstoqueRede", "Backlog",
-        "DemandaProjetada", "EstoqueMeta", "NecessidadeBruta",
-        "SugestaoProducao", "CustoUnit", "InvestimentoFabril"
+        "SKU", "Produto", "Tamanho", "Colegio", "Grupo", "Categoria",
+        "VendasHist", "EstoqueRede", "Backlog",
+        "DemandaProjetada", "DemandaPeriodoAlta", "DemandaPeriodoBaixa",
+        "EstoqueSeguranca", "EstoqueMeta", "EstoqueProjetado",
+        "SugestaoProducao", "NivelServico", "CustoUnit", "InvestimentoFabril"
     ]].copy()
 
     df_export = df_export.rename(columns={
         "Produto": "Descrição",
         "Tamanho": "Tam",
         "Colegio": "Colégio",
-        "VendasHist": "Vendas Hist.",
-        "MediaMensal": "Média Mensal",
+        "VendasHist": "Vendas Alta",
         "EstoqueRede": "Estoque Rede",
-        "DemandaProjetada": "Demanda Proj.",
-        "EstoqueMeta": "Estoque Alvo",
-        "NecessidadeBruta": "Necessidade",
+        "DemandaProjetada": f"Demanda do Período ({_cobre})",
+        "DemandaPeriodoAlta": "Demanda na alta",
+        "DemandaPeriodoBaixa": "Demanda na baixa",
+        "EstoqueSeguranca": "Estoque Segurança",
+        "EstoqueMeta": "Alvo (S)",
+        "EstoqueProjetado": "Estoque Projetado",
         "SugestaoProducao": "Sugestão (pares)",
+        "NivelServico": "Nível Serviço (%)",
         "CustoUnit": "Custo Unit (R$)",
         "InvestimentoFabril": "Investimento (R$)",
     })
-
-    # Adiciona colunas de rodada (distribuição proporcional ao %)
-    if tem_rodadas and pct_rodadas:
-        import math as _math
-        for mes in rodadas_sorted:
-            pct = pct_rodadas[mes] / 100
-            nome_col = f"R{rodadas_sorted.index(mes)+1} ({MESES_NOME[mes]})"
-            df_export[nome_col] = (df_export["Sugestão (pares)"] * pct).apply(
-                lambda x: _math.ceil(x) if x > 0 else 0
-            )
 
     # Formata valores monetários para PT-BR
     def _fmt_brl(x):
@@ -465,21 +491,15 @@ with tab_sku:
     df_export["Investimento (R$)"] = df_export["Investimento (R$)"].apply(_fmt_brl)
 
     # Monta cabeçalho com parâmetros da simulação
-    cfg = config["fabrica"]
+    cfg_d = config.get("demanda", {})
+    cfg_p = config.get("planejamento", {})
     linhas_param = []
-    linhas_param.append(f"# Parâmetros da Simulação")
-    linhas_param.append(f"# Período histórico: {cfg['data_inicio']} a {cfg['data_fim']}")
-    linhas_param.append(f"# Crescimento: {cfg['crescimento_pct']}%")
-    linhas_param.append(f"# Sazonalidade: {cfg['sazonalidade']}x")
-    linhas_param.append(f"# Cobertura: {cfg['cobertura_meses']} meses")
-    linhas_param.append(f"# Correção manual: {cfg['correcao_manual']}")
-    if tem_rodadas:
-        rodadas_txt = " | ".join(
-            f"R{i+1} {MESES_NOME[m]} ({pct_rodadas[m]}%)"
-            for i, m in enumerate(rodadas_sorted)
-        )
-        linhas_param.append(f"# Rodadas: {rodadas_txt}")
-        linhas_param.append(f"# Buffer: {buffer}%")
+    linhas_param.append(f"# Sugestão de Produção (order-up-to)")
+    linhas_param.append(f"# {janela_label}")
+    linhas_param.append(f"# Período histórico: {cfg_p.get('periodo_historico_inicio')} a {cfg_p.get('periodo_historico_fim')}")
+    linhas_param.append(f"# Janela de alta: {cfg_d.get('janela_alta')}")
+    linhas_param.append(f"# Nível de serviço: alta {cfg_d.get('nivel_servico_alta', 99)}% / baixa {cfg_d.get('nivel_servico_baixa', 92)}% · Variação da Demanda {cfg_d.get('variacao_demanda', 0.25)}")
+    linhas_param.append(f"# Crescimento aplicado: {'sim' if ativo_cresc else 'nao'}")
     linhas_param.append("")
 
     csv_header = "\n".join(linhas_param)
@@ -528,4 +548,4 @@ with st.expander("📈 Sazonalidade Mensal (Histórico)"):
         st.caption("🟢 Verde = acima da média (alta) | 🔴 Vermelho = abaixo da média (baixa)")
     with col_s2:
         periodo = config.get("planejamento", {})
-        st.caption(f"Período: {periodo.get('sazonalidade_inicio', '?')} a {periodo.get('sazonalidade_fim', '?')}")
+        st.caption(f"Período: {periodo.get('periodo_historico_inicio', '?')} a {periodo.get('periodo_historico_fim', '?')}")

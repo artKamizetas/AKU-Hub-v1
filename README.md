@@ -1,4 +1,4 @@
-# AKU Dashboard — Art Kamizetas
+# AKU Dashboard — AK Uniformes
 
 Dashboard interativo de estoque, PCP e vendas integrado ao Bling ERP.
 Roda localmente via Excel ou na nuvem via Google Sheets + Streamlit Community Cloud.
@@ -225,28 +225,38 @@ Para atualizar o app após mudanças no código: basta fazer `git push` — o re
 ```
 bling_dashboard/
 ├── app.py                         # Ponto de entrada do Streamlit
+├── auth.py                        # Autenticação e controle de acesso por perfil
 ├── config.yaml                    # Metas, IDs e configurações operacionais
 ├── requirements.txt               # Dependências Python
+├── run.bat                        # Atalho Windows: ativa venv e roda o app
 ├── .gitignore                     # Arquivos excluídos do repositório
 ├── README.md                      # Este arquivo
+├── CLAUDE.md                      # Resumo do projeto para agentes
+├── docs/                          # Documentação humana (arquitetura, dados, PCP, decisões)
 ├── .streamlit/
+│   ├── config.toml                # Tema / configurações do Streamlit
 │   ├── secrets.toml               # Credenciais reais (NÃO commitar — está no .gitignore)
 │   └── secrets.toml.example       # Modelo de secrets (commitar este)
 ├── etl/
-│   ├── loader.py                  # Leitura dos dados (Sheets ou Excel — automático)
+│   ├── loader.py                  # Leitura dos dados do Supabase (via PostgREST)
 │   ├── daily.py                   # Lógica de metas comerciais
 │   ├── logistica.py               # Lógica de reposição de loja
-│   ├── fabrica.py                 # Lógica de PCP
+│   ├── demanda.py                 # Motor único de demanda por SKU (base de fábrica + planejamento)
+│   ├── fabrica.py                 # Lógica de PCP (sugestão tática por SKU)
 │   ├── planejamento.py            # Planejamento anual de rodadas
 │   └── vm_dinamico.py             # Cálculo de Visual Merchandising
 ├── pages/
 │   ├── 0_Home.py                  # Visão geral / status
 │   ├── 1_Daily.py                 # Dashboard comercial
 │   ├── 2_Logistica.py             # Reposição de loja
-│   ├── 3_Fabrica.py               # PCP / Estoque de fábrica
+│   ├── 3_Fabrica.py               # PCP / Simulador de produção
 │   └── 5_Configuracoes.py         # ⭐ UI de configuração (admin only)
-└── data/
-    └── Integração Bling ERP.xlsx  # Excel local (não versionado — está no .gitignore)
+├── scripts/                       # Utilitários CLI (rodar da raiz: python scripts/<nome>.py)
+│   ├── exportar_vm.py             # Exporta data/VM_Calculado.xlsx
+│   ├── memoria_calculo.py         # Memória de cálculo do VM Dinâmico (por SKU)
+│   └── memoria_calculo_fabrica.py # Memória de cálculo do PCP (por SKU)
+├── assets/                        # Estáticos (favicon)
+└── data/                          # Saídas locais (ex: VM_Calculado.xlsx — não versionado)
 ```
 
 ---
