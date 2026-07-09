@@ -1,25 +1,25 @@
 # AKU Dashboard — AK Uniformes
 
-Dashboard interativo de estoque, PCP e vendas integrado ao Bling ERP.
-Roda localmente via Excel ou na nuvem via Google Sheets + Streamlit Community Cloud.
+Dashboard interativo de estoque, PCP e vendas da AK Uniformes.
+Lê os dados do **Supabase** (Postgres espelhado da pipeline Bling → Supabase, mantida por outra equipe), processa via pandas e roda no Streamlit — local ou no Streamlit Community Cloud.
+
+> Documentação técnica detalhada em [`docs/`](docs/README.md) (arquitetura, dados, metodologia de PCP e log de decisões) e resumo para agentes em [`CLAUDE.md`](CLAUDE.md).
 
 ---
 
 ## Sumário
 
-1. [Rodar localmente (Excel)](#rodar-localmente)
-2. [Configuração do Sistema](#configuração-do-sistema)
-   - [UI de Configurações (Admin)](#ui-de-configurações-admin)
-   - [Gerenciar Exceções de SKU](#gerenciar-exceções-de-sku)
-   - [Upload de Dados](#upload-de-dados)
-3. [Deploy no Streamlit Cloud (Google Sheets)](#deploy-no-streamlit-community-cloud)
-   - [Passo 1 — Criar a Service Account](#passo-1--criar-a-service-account-no-google-cloud)
-   - [Passo 2 — Compartilhar a planilha](#passo-2--compartilhar-a-planilha-com-a-service-account)
-   - [Passo 3 — Configurar os Secrets](#passo-3--configurar-os-secrets-no-streamlit-cloud)
-   - [Passo 4 — Conectar o repositório](#passo-4--conectar-o-repositório-ao-streamlit-cloud)
-   - [Passo 5 — Acessar e compartilhar o link](#passo-5--acessar-e-compartilhar-o-link-público)
-4. [Estrutura do projeto](#estrutura-do-projeto)
-5. [Atualização dos dados](#atualização-dos-dados)
+1. [Rodar localmente](#rodar-localmente)
+2. [Configuração dos Secrets](#configuração-dos-secrets)
+3. [Configuração do Sistema (UI)](#configuração-do-sistema-ui)
+   - [Aba 1 — Parâmetros Gerais](#aba-1--parâmetros-gerais)
+   - [Aba 2 — Exceções de SKU](#aba-2--exceções-de-sku)
+   - [Aba 3 — Sistema](#aba-3--sistema)
+4. [Deploy no Streamlit Cloud](#deploy-no-streamlit-community-cloud)
+5. [Estrutura do projeto](#estrutura-do-projeto)
+6. [Atualização dos dados](#atualização-dos-dados)
+7. [Utilitários de linha de comando](#utilitários-de-linha-de-comando)
+8. [Dúvidas comuns](#dúvidas-comuns)
 
 ---
 
@@ -28,202 +28,109 @@ Roda localmente via Excel ou na nuvem via Google Sheets + Streamlit Community Cl
 **Pré-requisito:** Python 3.10+
 
 ```bash
-# 1. Ativar o ambiente virtual (Windows)
+# 1. Criar e ativar o ambiente virtual (Windows)
+python -m venv venv
 venv\Scripts\activate
 
 # 2. Instalar dependências (só precisa fazer uma vez)
 pip install -r requirements.txt
 
-# 3. Colocar o Excel na pasta data/
-#    Nome exato: "Integração Bling ERP.xlsx"
+# 3. Configurar os secrets (ver seção abaixo)
+#    Copie .streamlit/secrets.toml.example → .streamlit/secrets.toml e preencha
 
 # 4. Rodar
 streamlit run app.py
 ```
 
-Em modo local, o Excel é lido automaticamente. Nenhuma configuração de Google Sheets é necessária.
+No Windows, `run.bat` faz os passos 1 (ativação) e 4 automaticamente.
+
+Os dados vêm do Supabase — não há mais leitura de Excel local nem de Google Sheets. Basta que os secrets do Supabase estejam configurados.
 
 ---
 
-## Configuração do Sistema
+## Configuração dos Secrets
 
-A partir da versão 2.0, todos os parâmetros operacionais podem ser alterados **diretamente pela UI**, sem necessidade de editar `config.yaml`.
+As credenciais ficam em `.streamlit/secrets.toml` (local) ou em **App Settings → Secrets** (Streamlit Cloud). O arquivo **nunca** é commitado — já está no `.gitignore`. Use [`.streamlit/secrets.toml.example`](.streamlit/secrets.toml.example) como modelo.
 
-### UI de Configurações (Admin)
+```toml
+# Supabase (Project Settings → API). O service_key ignora RLS — uso server-side.
+[supabase]
+url = "https://SEU_PROJECT_REF.supabase.co"
+service_key = "SEU_SERVICE_ROLE_KEY"
+schema = "public"           # opcional (default: public)
 
-Acesse **⚙️ Configurações** (disponível apenas para usuários com `role="admin"`).
+# Autenticação do dashboard
+[auth_config]
+cookie_name = "bling_dashboard_auth"
+cookie_key = "SEU_COOKIE_SECRET"
+cookie_expiry_days = 7
 
-**Aba 1 — Parâmetros Gerais**
-- Metas comerciais (Natal, Mossoró)
-- Parâmetros de Logística (VM padrão, dias de análise, cobertura mínima)
-- Parâmetros de Fábrica (período histórico, crescimento, sazonalidade, cobertura, correção)
-- Parâmetros de Planejamento (meses de rodadas, lead time, buffer, período de sazonalidade)
-- IDs de Status de Pedido (Em Aberto, Em Andamento, Pronto para Retirada)
+[auth_config.credentials.usernames.admin]
+name = "Admin"
+password = "BCRYPT_HASH_AQUI"   # hash bcrypt, não a senha em texto puro
+role = "admin"
+```
 
-**Aba 2 — Exceções de SKU**
-- **Baixar template CSV** com SKUs atuais e seus overrides
-- **Upload de CSV** para aplicar exceções (vm, dias_analise, sazonalidade, correcao_manual)
-- Alterações são salvas automaticamente em `config.yaml`
+**Perfis de acesso** (`role`) controlam quais páginas cada usuário vê: `admin` (tudo), `supervisor` (Daily, Logística), `vendedor` (Home, Daily), `estoque` (Logística).
 
-**Aba 3 — Upload de Dados**
-- Fazer upload de novo arquivo Excel (`Integração Bling ERP.xlsx`)
-- Validação automática de schema antes de aceitar
-- Resumo de registros carregados (pedidos, produtos, estoque)
+---
 
-**Aba 4 — Sistema**
-- Informações de versão (Python, Streamlit, Pandas)
-- Datas de última modificação dos arquivos
-- Botão de "Forçar Recarga de Dados" (limpa cache)
-- Download de backup do `config.yaml` atual
+## Configuração do Sistema (UI)
 
-### Gerenciar Exceções de SKU
+A partir da versão 2.0, os parâmetros operacionais podem ser alterados **pela própria interface**, sem editar `config.yaml` na mão. Acesse **⚙️ Configurações** (disponível apenas para `role="admin"`). Ao salvar, o `config.yaml` é atualizado preservando comentários (`ruamel.yaml`) e o cache do Streamlit é limpo.
 
-Exceções permitem sobrescrever regras globais para produtos específicos (ex: SKU especial com VM diferente ou sazonalidade diferente).
+### Aba 1 — Parâmetros Gerais
 
-1. Acesse **⚙️ Configurações → Exceções de SKU**
-2. Clique em **⬇️ Baixar CSV** para ver template com SKUs atuais
-3. Preencha as colunas desejadas:
-   - `sku` (obrigatório): código do produto
-   - `vm_override`: unidades de exposição (opcional)
-   - `dias_analise`: dias para calcular giro (opcional)
-   - `sazonalidade`: multiplicador de demanda (opcional)
-   - `correcao_manual`: ajuste fixo (opcional)
-4. Salve como CSV e clique em **📤 Fazer Upload**
-5. Valide o preview e clique em **✅ Aplicar Exceções**
+Formulário organizado pelos três subsistemas da metodologia:
+- **Comercial (Daily):** metas (Natal, Mossoró) + IDs de status de pedido
+- **Reposição de Loja:** VM Dinâmico (cobertura, alta temporada, VM mínimo, lead time, nível de serviço) + fallback fixo
+- **Produção (Simulador):** Demanda / order-up-to (níveis de serviço alta/baixa, variação, janela da alta), Planejamento (rodadas, lead time, período histórico) e fallback da Fábrica
 
-### Upload de Dados
+Abaixo do formulário, um editor de **Colégios** permite ajustar taxa de crescimento e nível de serviço por colégio (valores sempre manuais, descobertos dinamicamente dos dados).
 
-Sempre que precisar atualizar os dados do Bling:
+### Aba 2 — Exceções de SKU
 
-1. Exporte o arquivo Excel do Bling (ou atualize a Google Sheets)
-2. Acesse **⚙️ Configurações → Upload de Dados**
-3. Selecione o arquivo Excel (`.xlsx` ou `.xls`)
-4. Confirme no preview → Clique em **💾 Substituir dados**
-5. O dashboard recarregará com os novos dados
+CSV para sobrescrever parâmetros globais por SKU específico. Colunas:
+- `sku` (obrigatório): código do produto
+- `vm_override`: unidades de exposição (opcional)
+- `correcao_manual`: fator de correção do VM/pedido (opcional)
 
-> **Nota:** Todas as alterações são feitas em `config.yaml`, que é versionado no git. Para produção, você pode revisar as mudanças antes de fazer `git push`.
+Baixe o template atual, edite e faça o upload para aplicar. Salvo em `config.yaml["excecoes_sku"]`.
+
+### Aba 3 — Sistema
+
+- Versões (Python, Streamlit, Pandas) e fonte de dados (Supabase)
+- Data da última modificação do `config.yaml`
+- Botão de forçar recarga de cache
+- Download de backup do `config.yaml`
+
+> **Nota:** As alterações são feitas em `config.yaml`, que é versionado no git. Para produção, revise as mudanças antes de fazer `git push`.
 
 ---
 
 ## Deploy no Streamlit Community Cloud
 
-Deploy **100% gratuito**: Streamlit Community Cloud + Google Sheets API (ambos no free tier).
-
-### Passo 1 — Criar a Service Account no Google Cloud
-
-A Service Account é uma conta de serviço que permite ao dashboard ler a planilha sem interação humana.
-
-1. Acesse [console.cloud.google.com](https://console.cloud.google.com/)
-2. Crie um projeto (ou use um existente)
-3. Vá em **APIs e Serviços → Biblioteca** e habilite:
-   - **Google Sheets API**
-   - **Google Drive API**
-4. Vá em **APIs e Serviços → Credenciais → Criar Credenciais → Conta de Serviço**
-5. Nome sugerido: `bling-dashboard` → **Criar e continuar → Concluir**
-6. Clique na conta criada → aba **Chaves → Adicionar Chave → Criar nova chave → JSON**
-7. O arquivo JSON será baixado — guarde com segurança
-
-O JSON tem esta estrutura (você vai precisar de todos os campos):
-```json
-{
-  "type": "service_account",
-  "project_id": "...",
-  "private_key_id": "...",
-  "private_key": "-----BEGIN RSA PRIVATE KEY-----\n...",
-  "client_email": "bling-dashboard@SEU-PROJETO.iam.gserviceaccount.com",
-  ...
-}
-```
-
-> Anote o valor de **`client_email`** — será usado no próximo passo.
-
----
-
-### Passo 2 — Compartilhar a planilha com a Service Account
-
-1. Abra a planilha **Integração Bling ERP** no Google Sheets
-2. Clique em **Compartilhar** (canto superior direito)
-3. Cole o `client_email` da Service Account no campo de e-mail
-4. Defina permissão como **Leitor** (somente leitura é suficiente)
-5. Clique em **Enviar**
-6. Anote o **Sheet ID** — é o trecho da URL entre `/d/` e `/edit`:
-   ```
-   https://docs.google.com/spreadsheets/d/ESTE_É_O_SHEET_ID/edit
-   ```
-
-> **Atenção:** Os nomes das abas devem ser exatamente:
-> `Pedidos`, `Itens`, `Produtos`, `EstoqueV3`, `Produtos_detalhes`,
-> `Vendedores`, `Lojas`, `Situações`, `Depósitos`
-
----
-
-### Passo 3 — Configurar os Secrets no Streamlit Cloud
-
-1. Acesse [share.streamlit.io](https://share.streamlit.io) e faça login
-2. No app, clique em **⋮ (menu) → Settings → Secrets**
-3. Cole o conteúdo abaixo substituindo pelos valores reais do seu JSON:
-
-```toml
-sheet_id = "COLE_O_SHEET_ID_AQUI"
-
-[gcp_service_account]
-type = "service_account"
-project_id = "SEU_PROJECT_ID"
-private_key_id = "SEU_PRIVATE_KEY_ID"
-private_key = "-----BEGIN RSA PRIVATE KEY-----\nSUA_CHAVE_PRIVADA_AQUI\n-----END RSA PRIVATE KEY-----\n"
-client_email = "bling-dashboard@SEU-PROJETO.iam.gserviceaccount.com"
-client_id = "SEU_CLIENT_ID"
-auth_uri = "https://accounts.google.com/o/oauth2/auth"
-token_uri = "https://oauth2.googleapis.com/token"
-auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
-client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/bling-dashboard%40SEU-PROJETO.iam.gserviceaccount.com"
-universe_domain = "googleapis.com"
-```
-
-4. Clique em **Save**
-
-> **Dica:** A `private_key` tem quebras de linha. Copie-a diretamente do JSON — os `\n` devem ser preservados.
-
----
-
-### Passo 4 — Conectar o repositório ao Streamlit Cloud
+Deploy gratuito no [share.streamlit.io](https://share.streamlit.io) — o Supabase está no free tier.
 
 1. Suba o código para um repositório no GitHub (pode ser privado):
    ```bash
-   git init
-   git add .
-   git commit -m "Deploy inicial do Bling Dashboard"
-   git remote add origin https://github.com/SEU_USUARIO/bling-dashboard.git
    git push -u origin main
    ```
-2. Em [share.streamlit.io](https://share.streamlit.io), clique em **New app**
-3. Preencha:
-   - **Repository:** `SEU_USUARIO/bling-dashboard`
+2. Em [share.streamlit.io](https://share.streamlit.io), clique em **New app** e preencha:
+   - **Repository:** `SEU_USUARIO/aku-simulacao`
    - **Branch:** `main`
    - **Main file path:** `app.py`
-4. Clique em **Deploy!**
+3. Em **Advanced settings → Secrets**, cole o conteúdo do seu `secrets.toml` (bloco `[supabase]` + `[auth_config]` da seção acima).
+4. Clique em **Deploy!** — o Streamlit instala o `requirements.txt` e sobe o app em alguns minutos.
 
-O Streamlit Cloud instala as dependências do `requirements.txt` e sobe o app em alguns minutos.
-
----
-
-### Passo 5 — Acessar e compartilhar o link público
-
-O Streamlit Cloud gera uma URL pública no formato:
-```
-https://SEU-USUARIO-bling-dashboard-app-XXXX.streamlit.app
-```
-
-Qualquer pessoa com o link pode acessar. Para restringir acesso por e-mail, use **Share → Invite viewers** no painel do Streamlit Cloud.
-
-Para atualizar o app após mudanças no código: basta fazer `git push` — o redeploy é automático.
+Para atualizar o app após mudanças no código, basta `git push` — o redeploy é automático. Para restringir acesso, use **Share → Invite viewers** no painel do Streamlit Cloud (além da autenticação própria do dashboard).
 
 ---
 
 ## Estrutura do projeto
 
 ```
-bling_dashboard/
+aku-simulacao/
 ├── app.py                         # Ponto de entrada do Streamlit
 ├── auth.py                        # Autenticação e controle de acesso por perfil
 ├── config.yaml                    # Metas, IDs e configurações operacionais
@@ -263,22 +170,34 @@ bling_dashboard/
 
 ## Atualização dos dados
 
-| Modo | Como atualizar |
-|------|----------------|
-| **Local (Excel)** | Substitua `data/Integração Bling ERP.xlsx` e clique em "Recarregar Dados" no app |
-| **Streamlit Cloud (Sheets)** | Atualize a planilha Google Sheets. O cache expira a cada **1 hora** automaticamente. Para forçar, clique em "Recarregar Dados" no app |
+Os dados do Bling são espelhados no Supabase por uma **pipeline externa** (mantida por outra equipe). O dashboard apenas **lê** o Supabase via PostgREST — não escreve nem faz upload de arquivos.
 
-> O cache de 1 hora evita exceder o limite gratuito da Google Sheets API (300 requisições/minuto por projeto).
+O `loader.py` usa `st.cache_data` com **TTL de 1 hora** (3600 s). Para forçar a releitura antes disso, use **⚙️ Configurações → Sistema → Forçar recarga de cache** (ou o botão de recarregar na página inicial).
 
 ---
 
-## Dúvidas Comuns
+## Utilitários de linha de comando
 
-**"Aba ausente: Situações" ou similar**
-→ Verifique se os nomes das abas na planilha Google Sheets estão exatamente iguais aos listados no Passo 2.
+Scripts de auditoria/exportação em `scripts/`, executados a partir da raiz do projeto (precisam dos secrets do Supabase configurados):
 
-**"Erro ao conectar ao Google Sheets"**
-→ Verifique se (1) a planilha foi compartilhada com o `client_email`, (2) os Secrets foram salvos corretamente, (3) as APIs do Google foram habilitadas.
+```bash
+python scripts/exportar_vm.py                          # gera data/VM_Calculado.xlsx (VM + Pulmão de todos os SKUs)
+python scripts/memoria_calculo.py <SKU>                # passo a passo do VM Dinâmico de um SKU
+python scripts/memoria_calculo_fabrica.py <SKU>        # passo a passo do PCP (order-up-to) de um SKU
+```
 
-**"No module named gspread"**
-→ O ambiente virtual não está ativado, ou as dependências não foram instaladas. Rode `pip install -r requirements.txt`.
+---
+
+## Dúvidas comuns
+
+**"Aba ausente" ou erro de validação no carregamento**
+→ A pipeline Bling → Supabase pode não ter populado alguma tabela. Verifique com a equipe responsável pela pipeline; o `loader.py` valida o schema esperado antes de exibir os dados.
+
+**"Erro ao conectar ao Supabase"**
+→ Verifique se `[supabase].url` e `[supabase].service_key` nos secrets estão corretos e se o projeto Supabase está ativo.
+
+**Acesso negado / página não aparece**
+→ Confira o `role` do usuário em `[auth_config]`. Cada perfil vê um subconjunto das páginas (ver [Configuração dos Secrets](#configuração-dos-secrets)).
+
+**"No module named ..."**
+→ O ambiente virtual não está ativado ou as dependências não foram instaladas. Rode `venv\Scripts\activate` e `pip install -r requirements.txt`.
