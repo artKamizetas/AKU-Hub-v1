@@ -34,16 +34,22 @@ etl/
   fabrica.py                # Sugestão tática de produção por SKU (PCP)
   planejamento.py           # Simulação estratégica de rodadas de produção anuais (bottom-up, a partir de demanda.py)
   vm_dinamico.py            # Cálculo de VM (Visual Merchandising) dinâmico — reposição de loja
+pedidos/                    # Domínio TRANSACIONAL de Pedidos de Compra (etl/ segue analítico read-only)
+  estados.py                # Máquina de estados pura do pedido (RASCUNHO→PRONTO→..., badges)
+  builder.py                # Puro: DataFrame do processar_fabrica → snapshot + grupos Colégio×SuperCategoria
+  repositorio.py            # ÚNICA porta de escrita/leitura do schema `app` do Supabase (gravável)
 pages/
   0_Home.py                 # Tela inicial / status do sistema
   1_Daily.py                # Dashboard Comercial (metas, vendedores, lojas)
   2_Logistica.py            # Reposição de Loja (sugestões de transferência)
-  3_Fabrica.py              # "Simulador de Produção" — PCP tático (Sugestão por SKU) + planejamento anual (Visão Geral/rodadas), ambos usando etl/demanda.py como base comum
+  3_Fabrica.py              # "Simulador de Produção" — PCP tático (Sugestão por SKU) + planejamento anual (Visão Geral/rodadas), ambos usando etl/demanda.py como base comum; botão admin "Congelar rodada" → pedidos/
+  4_Pedidos.py              # (Admin) Pedidos de Compra — rodadas congeladas, rascunhos, edição, PRONTO
   5_Configuracoes.py        # (Admin) Configuração de parâmetros, exceções SKU e sistema
 scripts/                    # Utilitários de linha de comando (rodar da raiz: python scripts/<nome>.py)
   exportar_vm.py            # Exporta data/VM_Calculado.xlsx (VM + Pulmão de todos os SKUs)
   memoria_calculo.py        # Memória de cálculo passo a passo do VM Dinâmico p/ um SKU
   memoria_calculo_fabrica.py# Memória de cálculo passo a passo do PCP (order-up-to) p/ um SKU
+docs/sql/                   # DDL versionada do schema `app` (aplicar manual no SQL Editor do Supabase)
 ```
 
 ## Fluxo de dados padrão
@@ -95,7 +101,40 @@ Fonte única usada tanto pela aba tática ("Sugestão por SKU") quanto pela estr
 - **Crescimento por (colégio × série)** (`taxa_crescimento_efetiva(colegio, config, grupo, ativo, observado)`): cascata híbrida (manual do planejador SEMPRE vence os dados): `crescimento_grupos[grupo] (manual) → taxa_crescimento colégio (manual) → observado colégio×segmento → observado colégio → 1+fabrica.crescimento_pct/100`. A **camada observada** (`calcular_crescimento_observado`) mede o crescimento realizado nas ALTAS (alta-sobre-alta, sinal limpo — a baixa tem ruptura), por colégio e por segmento, clamp [0.5,2.0], gate de volume ≥30. O mapa grupo→segmento (`mapa_grupo_segmento(config)`) tem default no código (`SEGMENTO_POR_GRUPO`) sobrescrito por `config["grupo_segmento"]` — editável na página de Configurações (baldes atuais: Infantil, Inf+Fund, Fundamental, Médio, Tempo Integral, Diário, Ed. Física, Esporte, Outros). Desligável em `config["demanda"]["crescimento_observado_ativo"]` (→ volta ao +10% cego). `ativo=False` desliga tudo (toggle p/ comparar). Vale p/ fábrica e VM logística. Não muda o total da rede (~+11%), **redistribui** para o mix certo (ex: NEV Médio +51% vs LMN −29%).
 - **Política order-up-to** (`simular_politica_reabastecimento`): motor comum. Por SKU, caminha as rodadas mantendo estoque projetado (`estoque − backlog`, consumido mês a mês, reabastecido a cada chegada). Em cada rodada r: `DemandaPeriodo` = demanda até a próxima chegar; `EstoqueSeguranca = estoque_seguranca(DemandaPeriodo, contém_alta, config)` (Fator de Serviço × Variação da Demanda × DemandaPeriodo); `EstoqueAlvo = DemandaPeriodo + EstoqueSeguranca`; `Pedido = par_ceil(EstoqueAlvo − EstoqueProjetado_na_chegada)`. As colunas do DataFrame retornado usam esses nomes (`DemandaPeriodo`/`EstoqueSeguranca`/`EstoqueAlvo`/`EstoqueProjetado`; antes eram `DI`/`SS`/`S`/`OH`). Sugestão por SKU = Pedido da rodada selecionada; Visão Geral = soma por rodada.
 - **Nível de serviço** (`config["demanda"]["nivel_servico_alta"/"nivel_servico_baixa"/"variacao_demanda"]`): alta ~99% ("não pode faltar"), baixa ~92%. Fator de Serviço pela criticidade do intervalo.
-- `planejamento.periodo_historico_inicio`/`fim` = período histórico único (sazonalidade agregada + distribuição mensal da baixa + base dos SKUs só-de-baixa). Define o FORMATO do ano, não o tamanho do pico. Calendário de rodadas: `planejamento.rodadas_datas` (datas ISO explícitas, este ano + próximo, SEM repetição anual — a última data só fecha o intervalo da penúltima; recomendado) com fallback em `planejamento.rodadas` (meses fixos que repetem todo ano). Override p/ cenários aceita meses e/ou datas em `rodadas_meses`. A simulação expõe `DemandaPeriodoAlta`/`DemandaPeriodoBaixa`/`MesesIntervalo`/`data_chegada_seguinte` (split pico/baixa usado pela UI da Sugestão por SKU).
+- `planejamento.periodo_historico_inicio`/`fim` = período histórico único (sazonalidade agregada + distribuição mensal da baixa + base dos SKUs só-de-baixa). Define o FORMATO do ano, não o tamanho do pico. Calendário de rodadas: `planejamento.rodadas_datas` (datas ISO explícitas de disparo, este ano + próximo, SEM repetição anual — a última data só fecha o intervalo da penúltima; 2+ datas obrigatórias) é a **fonte única**. O antigo fallback mensal (`planejamento.rodadas`, meses fixos que repetiam todo ano) e o override `rodadas_meses` foram removidos — havia duas metodologias divergindo na UI (Visão Geral por meses × Sugestão por SKU por datas). Sem `rodadas_datas`, a Visão Geral só avisa e a Sugestão por SKU cai na cobertura fixa (`fabrica.cobertura_meses`). A simulação expõe `DemandaPeriodoAlta`/`DemandaPeriodoBaixa`/`MesesIntervalo`/`data_chegada_seguinte` (split pico/baixa usado pela UI da Sugestão por SKU).
+
+## Pedidos de Compra (pedidos/ + pages/4_Pedidos.py) — Fase 0
+
+Ponte Simulador → Bling. Fluxo: na 3_Fabrica (admin), **"Congelar rodada"** recalcula
+`processar_fabrica` FRESCO (nunca o cache — o motor ancora em `Timestamp.now()`),
+tira **snapshot imutável** (resultado integral por SKU + config completo + data de
+referência) e gera **pedidos rascunho por Colégio × SuperCategoria** (1 pedido nosso ↔
+1 futuro pedido de compra no Bling). Revisão/edição na página 4_Pedidos:
+`quantidade_sugerida` (imutável, snapshot) vs `quantidade_final` (editável só em
+RASCUNHO — trigger no banco é a trava real), depois PRONTO.
+
+- **Persistência**: schema **`app`** do Supabase (gravável) — `rodada_congelada`
+  (snapshot, jsonb), `pedido_compra`, `pedido_compra_item`. DDL em
+  `docs/sql/001_app_pedidos.sql` (aplicar manual no SQL Editor + expor `app` em
+  Settings → API → Exposed schemas). O `public` segue 100% espelho read-only da
+  pipeline externa. Secrets: `st.secrets["supabase"]["schema_app"]` (default "app").
+- **Escrita no Supabase SÓ via `pedidos/repositorio.py`** (única porta; client
+  próprio `_conn_app`). Consistência sem transação: unique parcial = 1 congelamento
+  vivo por rodada (mês×ano) → trava anti duplo-clique (23505 → `RodadaJaCongelada`);
+  `CONGELANDO`→`ABERTA` é o commit lógico; transições por compare-and-swap
+  (`transicionar_pedido` retorna False = corrida perdida); falha no meio → delete
+  compensatório, resto fica `CONGELANDO` (UI oferece limpeza).
+- **Estados** (`pedidos/estados.py`): RASCUNHO→PRONTO (↔reabrir) →CANCELADO;
+  EMITINDO/EMITIDO/SINCRONIZADO já reservados p/ as fases futuras (emissão OAuth2 +
+  API v3 do Bling; sincronizador contra o espelho `public.pedidos_compra` do roadmap
+  do outro time). App no portal developer do Bling ainda NÃO registrado (pré-requisito
+  da emissão).
+- **Observações internas do Bling padronizadas**: `pedido_compra.titulo`
+  (`AKU-PC · COLÉGIO · SUPERCAT · Rmm/aaaa`) persistido; bloco completo SEMPRE
+  recomposto por `builder.montar_observacoes_bling` no momento do uso (nunca
+  pré-gravado — envelheceria ao editar quantidades). `ref: <uuid>` no texto = chave de
+  reconciliação com o espelho futuro. Na Fase 0 a ponte é manual: preview na UI +
+  cabeçalho do CSV do pedido.
 
 ## Página de Configuração (5_Configuracoes.py)
 
@@ -137,6 +176,8 @@ Informações do sistema:
 - Alterar a estrutura de retorno de `loader.py::carregar_dados()` (quebra todas as páginas)
 - Renomear colunas dos DataFrames
 - Adicionar dependências ao `requirements.txt`
+- Escrever no Supabase fora de `pedidos/repositorio.py` (única porta de escrita; o schema `public` é read-only SEMPRE)
+- Alterar o DDL do schema `app` sem criar um novo arquivo numerado em `docs/sql/` (migrations são manuais e versionadas)
 
 ---
 
@@ -156,6 +197,11 @@ streamlit-authenticator
 
 ---
 
+## Testes (`tests/`)
+Suíte `pytest` focada no **motor de demanda/PCP** (`etl/demanda.py`), nos utilitários do `loader.py` e no **domínio de pedidos** (`pedidos/` — builder e estados puros; repositório testado com fake do gateway `_inserir/_atualizar/_selecionar/_deletar`, sem Supabase) — sem Supabase/secrets. Instalar dev deps com `uv pip install -r requirements-dev.txt` (o venv usa **uv**, não pip) e rodar `pytest` na raiz. `tests/conftest.py` monta `config` e `dados` sintéticos; o determinismo vem de ancorar as altas em `now()` de forma constante e desligar o crescimento (ver docstring do conftest). Ao mexer no motor, rode a suíte e atualize os testes junto.
+
+---
+
 ## Secrets esperados (streamlit/secrets.toml)
 ```toml
 # Supabase (Project Settings → API)
@@ -163,6 +209,7 @@ streamlit-authenticator
 url = "https://<PROJECT_REF>.supabase.co"
 service_key = "<SERVICE_ROLE_KEY>"
 schema = "public"
+schema_app = "app"   # schema gravável (pedidos de compra) — requer DDL aplicado + schema exposto na Data API
 
 # Autenticação
 [auth_config]

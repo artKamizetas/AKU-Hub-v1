@@ -9,6 +9,51 @@ Records). Adicione no topo as mais recentes.
 
 ---
 
+## 2026-07 · Pedidos de Compra Fase 0: congelar rodada + rascunhos no schema `app`
+Primeira fase da ponte Simulador → Bling: o output do `processar_fabrica` deixa de
+morrer no CSV e vira documento. **Congelar rodada** = snapshot imutável (resultado
+integral por SKU + config completo + data de referência — o motor ancora em
+`Timestamp.now()`, recalcular depois diverge, então sem snapshot não há conferência
+pedido × cálculo). Do snapshot nascem **pedidos de compra em rascunho** agrupados por
+**Colégio × Super Categoria** (1 pedido nosso ↔ 1 futuro pedido de compra no Bling),
+com `quantidade_sugerida` imutável vs `quantidade_final` editável (delta = auditoria).
+**Onde:** schema **`app`** novo no mesmo Supabase (gravável; DDL em
+`docs/sql/001_app_pedidos.sql`) — separado do `public` porque o `public` é o espelho
+read-only da pipeline externa, e quando o espelho de `pedidos_compra` do Bling chegar
+(roadmap do outro time), `app.pedido_compra` (intenção) × `public.pedidos_compra`
+(realidade) ficam autoexplicáveis para o sincronizador futuro. **Consistência sem
+transação PostgREST:** unique parcial (1 congelamento vivo por rodada mês×ano) como
+trava anti duplo-clique do Streamlit; estado `CONGELANDO`→`ABERTA` como commit lógico;
+transições por compare-and-swap; trigger no banco impede editar itens fora de RASCUNHO.
+**Novo pacote `pedidos/`** (domínio transacional — `etl/` segue analítico/puro):
+`estados.py` (máquina de estados; EMITINDO/EMITIDO/SINCRONIZADO já reservados),
+`builder.py` (puro), `repositorio.py` (ÚNICA porta de escrita do Supabase). Página
+nova `4_Pedidos.py` (admin). **Observações internas do Bling padronizadas** desde já:
+`titulo` (`AKU-PC · COLÉGIO · SUPERCAT · Rmm/aaaa`) persistido + bloco completo sempre
+recomposto por `montar_observacoes_bling` no momento do uso (totais refletem edições;
+`ref: <uuid>` = chave de reconciliação com o espelho futuro). **Fora de escopo (fases
+seguintes):** OAuth2 + emissão via API v3 (app no portal developer do Bling ainda não
+registrado — pré-requisito; confirmar nome exato do campo `observacoesInternas`) e
+sincronizador contra o espelho.
+
+## 2026-07 · Calendário de rodadas: fonte única (fallback mensal removido)
+O **fallback mensal** (`planejamento.rodadas`, meses 1–12 que repetiam todo ano) e o
+override `rodadas_meses` foram **removidos**. O calendário explícito de datas
+(`rodadas_datas`) passa a ser a **fonte única**. **Por quê:** as duas metodologias
+rodavam em paralelo e **divergiam na UI** — a Visão Geral do Simulador simulava por
+**meses fixos** (o multiselect "cenário de rodadas" default `[7, 10]`), enquanto a
+Sugestão por SKU já lia as **datas explícitas**. Ao abrir "Sugestão por SKU" a tela
+piscava as rodadas por data e revertia para as fixas, além de confundir (duas telas
+ofereciam configurar meses fixos, metodologia antiga). Mudanças: `_candidatas_rodadas`
+/ `_sequencia_rodadas` / `simular_politica_reabastecimento` / `simular_rodadas` perderam
+o caminho mensal e o parâmetro de override; multiselects de meses fixos removidos das
+páginas Simulador e Configurações; chave `rodadas` retirada do `config.yaml`. Sem
+`rodadas_datas` (2+ datas), a Visão Geral só avisa e a Sugestão por SKU cai na cobertura
+fixa (`fabrica.cobertura_meses`) — esse fallback de cobertura **permanece** (é outro
+mecanismo, não a metodologia antiga). Suíte de testes atualizada. **Perda aceita:** o
+"what-if" de antecipar rodada saiu junto; se voltar, deve ser um editor de **datas**
+temporário, não meses fixos.
+
 ## 2026-07 · v1 vai ao ar com persistência via config.yaml (migração Supabase deferida)
 Decisão consciente: subir a v1 com as configs no `config.yaml` **mesmo sabendo que no
 Streamlit Cloud a escrita não persiste no redeploy** (filesystem efêmero). A migração

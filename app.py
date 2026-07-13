@@ -29,6 +29,7 @@ pages_all = [
     st.Page("pages/1_Daily.py", title="Daily", icon="📈"),
     st.Page("pages/2_Logistica.py", title="Logística", icon="📦"),
     st.Page("pages/3_Fabrica.py", title="Simulador de Produção", icon="🏭"),
+    st.Page("pages/4_Pedidos.py", title="Pedidos de Compra", icon="🧾"),
     st.Page("pages/5_Configuracoes.py", title="Configurações", icon="⚙️"),
 ]
 
