@@ -1,0 +1,4 @@
+# Dependências de desenvolvimento (testes) — separadas das de produção.
+# Instalar com:  uv pip install -r requirements-dev.txt   (ou pip install -r ...)
+-r requirements.txt
+pytest>=8

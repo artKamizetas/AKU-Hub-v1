@@ -285,11 +285,10 @@ with tab1:
 
         st.markdown("**Planejamento — calendário de rodadas**")
         st.caption(
-            "**Calendário explícito (recomendado):** datas reais de disparo deste ano E do "
-            "próximo — nada se repete automaticamente; permite rodada atrasada este ano e "
-            "antecipada no próximo. A **última data só fecha o intervalo da penúltima** "
-            "(inclua sempre a primeira rodada do ano seguinte). Deixe a tabela vazia para "
-            "usar os meses fixos (que se repetem todo ano)."
+            "Datas reais de disparo deste ano E do próximo — nada se repete "
+            "automaticamente; permite rodada atrasada este ano e antecipada no próximo. "
+            "A **última data só fecha o intervalo da penúltima** (inclua sempre a primeira "
+            "rodada do ano seguinte). São necessárias **2+ datas**."
         )
         _datas_atuais = config["planejamento"].get("rodadas_datas") or []
         df_rodadas_datas = pd.DataFrame({
@@ -309,12 +308,6 @@ with tab1:
 
         col_p1, col_p2, col_p3 = st.columns(3)
         with col_p1:
-            rodadas = st.multiselect(
-                "Meses fixos (fallback, repetem todo ano)",
-                options=_meses_opts,
-                default=config["planejamento"]["rodadas"],
-                help="Usados apenas quando o calendário explícito acima está vazio.",
-            )
             lead_time = st.number_input(
                 "Lead time de produção (semanas)",
                 value=int(config["planejamento"]["lead_time_semanas"]), min_value=1,
@@ -386,7 +379,6 @@ with tab1:
         config["fabrica"]["crescimento_pct"] = crescimento
         config["fabrica"]["cobertura_meses"] = cobertura_meses
         config["fabrica"]["correcao_manual"] = correcao_manual
-        config["planejamento"]["rodadas"] = sorted(list(set(rodadas)))
         _datas_novas = sorted(
             pd.Timestamp(d).date().isoformat()
             for d in df_rodadas_datas_edit["data_disparo"].dropna()
@@ -409,20 +401,84 @@ with tab1:
             st.success("✅ Configurações salvas com sucesso!")
             st.info("💡 Cache limpo. Os dados serão recarregados na próxima visualização das páginas.")
 
+    # =================================================================
+    # Normalização de Colégios (de-para Marca_sku cru → nome de exibição)
+    # =================================================================
+    st.markdown("---")
+    st.subheader("Normalização de Colégios")
+    st.markdown(
+        "O colégio é extraído automaticamente da SKU e às vezes sai **errado** "
+        "(ex: `27`, códigos soltos). Aqui você define **como cada valor cru aparece** "
+        "em todo o sistema (VM, Fábrica, filtros). Deixe **igual** para manter; escreva "
+        "**`Outros`** (ou outro nome) para renomear/agrupar o ruído. Só o que você "
+        "mudar vira regra — o resto segue como está. A coluna _Sugestão_ é só uma dica."
+    )
+
+    from etl.demanda import colegio_efetivo, parece_ruido
+
+    config, caminho_config, yaml_handler = carregar_config()
+    alias_atual = config.get("colegios_alias") or {}
+    dados_colegios = carregar_dados()
+
+    _crus = dados_colegios["detalhes"]["Marca_sku"].fillna("").astype(str).str.strip()
+    _crus = _crus[(_crus != "") & (_crus.str.lower() != "nan")]
+    _contagem = _crus.value_counts()
+
+    df_alias = pd.DataFrame([
+        {
+            "marca_sku": raw,
+            "skus": int(n),
+            "colegio": str(alias_atual.get(raw, raw)),
+            "sugestao": "Outros" if parece_ruido(raw) else "",
+        }
+        for raw, n in _contagem.items()
+    ])
+    n_ruido = int((df_alias["sugestao"] == "Outros").sum()) if len(df_alias) else 0
+    if n_ruido:
+        st.caption(f"⚠️ {n_ruido} valor(es) cru(s) parecem ruído (sem letra) — sugeridos como _Outros_.")
+
+    df_alias_edit = st.data_editor(
+        df_alias,
+        column_config={
+            "marca_sku": st.column_config.TextColumn("Valor cru (da SKU)", disabled=True),
+            "skus": st.column_config.NumberColumn("SKUs", disabled=True),
+            "colegio": st.column_config.TextColumn("Colégio (exibição)",
+                                                   help="Deixe igual p/ manter; escreva 'Outros' para agrupar ruído"),
+            "sugestao": st.column_config.TextColumn("Sugestão", disabled=True,
+                                                    help="Heurística: valor sem letra parece ruído → sugere 'Outros'"),
+        },
+        hide_index=True, width="stretch", height=400, key="editor_colegios_alias",
+    )
+    if st.button("💾 Salvar Normalização de Colégios", key="btn_salvar_alias", type="primary"):
+        novo_alias = {}
+        for _, row in df_alias_edit.iterrows():
+            raw = str(row["marca_sku"]).strip()
+            disp = str(row["colegio"]).strip()
+            if raw and disp and disp != raw:      # só grava o que MUDA (identidade = default)
+                novo_alias[raw] = disp
+        config["colegios_alias"] = novo_alias
+        salvar_config(config, caminho_config, yaml_handler)
+        st.cache_data.clear()
+        n_outros = sum(1 for v in novo_alias.values() if v == "Outros")
+        st.success(f"✅ {len(novo_alias)} regra(s) de colégio salva(s) ({n_outros} → Outros). Cache limpo.")
+
     st.markdown("---")
     st.subheader("Parâmetros por Colégio")
     st.markdown(
         "Taxa de crescimento **base** e nível de serviço por colégio (usados por VM e Fábrica). "
-        "Colégio sem linha usa taxa 1.0 e o nível de serviço padrão."
+        "Colégio sem linha usa taxa 1.0 e o nível de serviço padrão. "
+        "Os nomes abaixo já são os **normalizados** (pós de-para acima)."
     )
 
     config, caminho_config, yaml_handler = carregar_config()
     cfg_colegios = config.get("colegios") or {}
     ns_default_atual = int(config.get("vm", {}).get("nivel_servico_default", 95))
 
-    dados_colegios = carregar_dados()
     det_cfg = dados_colegios["detalhes"][["Marca_sku", "Grupo"]].copy()
-    det_cfg["Colegio"] = det_cfg["Marca_sku"].fillna("").astype(str).str.strip()
+    det_cfg["Colegio"] = (
+        det_cfg["Marca_sku"].fillna("").astype(str).str.strip()
+        .map(lambda v: colegio_efetivo(v, config))
+    )
     det_cfg["GrupoC"] = det_cfg["Grupo"].fillna("").astype(str).str.strip()
     det_cfg = det_cfg[(det_cfg["Colegio"] != "") & (det_cfg["Colegio"] != "nan")]
 
@@ -458,7 +514,7 @@ with tab1:
                                                              help=f"Cauda da baixa vs alta. Global (default) = {prop_global}"),
         },
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         key="editor_colegios",
     )
 
@@ -531,7 +587,7 @@ with tab1:
                                                   help="manual = você definiu · medido = dos dados · padrão = fallback global"),
         },
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         height=500,
         key="editor_matriz_grupo",
     )
@@ -588,7 +644,7 @@ with tab1:
             "skus": st.column_config.NumberColumn("SKUs", disabled=True),
             "segmento": st.column_config.TextColumn("Segmento", help="Nome do balde — pode reutilizar ou criar novos"),
         },
-        hide_index=True, use_container_width=True, height=500, key="editor_grupo_seg",
+        hide_index=True, width="stretch", height=500, key="editor_grupo_seg",
     )
     if st.button("💾 Salvar Agrupamento de Segmentos", key="btn_salvar_seg", type="primary"):
         novo_seg = dict(config.get("grupo_segmento") or {})
@@ -672,7 +728,7 @@ with tab2:
                 if not all(col in df_novo.columns for col in colunas_obrigatorias):
                     st.error(f"❌ Colunas obrigatórias: {', '.join(colunas_obrigatorias)}")
                 else:
-                    st.dataframe(df_novo, use_container_width=True)
+                    st.dataframe(df_novo, width="stretch")
 
                     if st.button("✅ Aplicar Exceções", key="btn_aplicar_sku", type="primary"):
                         # Converter para dict

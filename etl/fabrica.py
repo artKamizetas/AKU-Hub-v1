@@ -37,7 +37,7 @@ def processar_fabrica(dados: dict, config: dict, pipeline: pd.DataFrame = None,
         InvestimentoFabril, JanelaLabel
     """
     produtos = dados["produtos"]
-    detalhes = dados["detalhes"]
+    detalhes = demanda.aplicar_alias_colegio(dados["detalhes"], config)
     estoque = dados["estoque"]
 
     # Demanda + simulação order-up-to (uma vez cada)

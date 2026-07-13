@@ -56,7 +56,7 @@ st.dataframe(
     dados["depositos"][["ID", "descricao"]].rename(
         columns={"ID": "ID", "descricao": "Nome"}
     ),
-    use_container_width=True, hide_index=True,
+    width="stretch", hide_index=True,
 )
 
 # Estoque por depósito
@@ -71,11 +71,11 @@ est_dep = (
     .rename(columns={"saldoFisico": "Total Peças"})
     .sort_values("Total Peças", ascending=False)
 )
-st.dataframe(est_dep, use_container_width=True, hide_index=True)
+st.dataframe(est_dep, width="stretch", hide_index=True)
 
 st.divider()
 st.caption(f"Fonte: {config['fonte']['nome']}")
 
-if st.button("🔄 Recarregar Dados", use_container_width=False):
+if st.button("🔄 Recarregar Dados", width="content"):
     st.cache_data.clear()
     st.rerun()

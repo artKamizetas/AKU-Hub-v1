@@ -12,6 +12,8 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 
+from etl import demanda
+
 
 def processar_logistica(dados: dict, config: dict, vm_map: dict = None) -> pd.DataFrame:
     cfg_log = config["logistica"]
@@ -26,7 +28,7 @@ def processar_logistica(dados: dict, config: dict, vm_map: dict = None) -> pd.Da
     estoque = dados["estoque"]
     itens = dados["itens"]
     pedidos = dados["pedidos"]
-    detalhes = dados["detalhes"]
+    detalhes = demanda.aplicar_alias_colegio(dados["detalhes"], config)
 
     # =================================================================
     # PRÉ-CÁLCULOS VETORIZADOS

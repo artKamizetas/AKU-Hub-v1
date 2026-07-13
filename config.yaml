@@ -52,6 +52,22 @@ colegios:
   #   taxa_crescimento: 1.1
   #   nivel_servico: 95
 
+# --- NORMALIZAÇÃO DE COLÉGIOS (de-para do Marca_sku cru → nome de exibição) ---
+# O colégio chega cru do Supabase (extração por string da SKU na pipeline
+# externa) e gera ruído em SKUs fora de padrão (ex: "27"). Este de-para
+# renomeia/agrupa esses valores SEM tocar na origem. Só liste o que MUDA —
+# valor ausente mantém o cru (identidade). Use "Outros" para juntar o ruído.
+# Editável na página de Configurações. Ver docs/requisitos/normalizacao-colegios.md
+colegios_alias:
+  '28': Outros
+  '33': Outros
+  '32': Outros
+  '27': Outros
+  # Exemplo:
+  # "27": "Outros"
+  # "31": "Outros"
+  # "NEV": "Nova Era"
+
 # --- DAILY (Comercial / Metas) ---
 daily:
   # IDs de situação que contam como VENDA EFETIVA
@@ -72,7 +88,7 @@ daily:
 # --- PCP / FÁBRICA ---
 fabrica:
   crescimento_pct: 10.0      # % de crescimento — fallback para colégios sem taxa própria em config["colegios"]
-  cobertura_meses: 2         # Fallback: cobertura de estoque (meses) quando planejamento.rodadas está vazio
+  cobertura_meses: 2         # Fallback: cobertura de estoque (meses) quando planejamento.rodadas_datas está vazio
   correcao_manual: 0         # Ajuste fixo somado à demanda projetada de TODO SKU (global)
 
   # IDs de situação que representam BACKLOG (consomem estoque sem faturar)
@@ -144,25 +160,24 @@ grupo_segmento:
 # até a próxima rodada chegar. A margem de segurança vem do nível de
 # serviço (order-up-to), não de um buffer percentual.
 planejamento:
-  # ===== CALENDÁRIO EXPLÍCITO (recomendado) =====
+  # ===== CALENDÁRIO DE RODADAS =====
   # Datas REAIS de disparo, deste ano E do próximo — nada se repete
   # automaticamente. Permite rodada atrasada este ano e antecipada no próximo.
   # A ÚLTIMA data só serve para fechar o intervalo da penúltima (inclua sempre
-  # a primeira rodada do ano seguinte). Vazio = usa "rodadas" mensais abaixo.
+  # a primeira rodada do ano seguinte). São necessárias 2+ datas.
   # Exemplo:
   # rodadas_datas: ["2026-07-20", "2026-10-01", "2027-02-01", "2027-06-15"]
   # Este ano: Jul, Out. Ano que vem: Mar, Jun, Out. A última data (Mar/2028) só
   # fecha o intervalo do Out/2027 (não gera pedido próprio).
-  rodadas_datas: ["2026-07-01", "2026-10-01", "2027-03-01", "2027-06-01", "2027-10-01", "2028-03-01"]
-
-  # ===== FALLBACK MENSAL (comportamento clássico) =====
-  # Meses em que os pedidos são disparados para a fábrica, repetidos todo ano.
-  # Só é usado se rodadas_datas estiver vazio.
-  rodadas:                      # Julho, Outubro (2 rodadas este ano; pico chega em Nov)
+  rodadas_datas:
+  - '2026-07-01'
+  - '2026-10-01'
+  - '2027-03-01'
+  - '2027-06-01'
+  - '2027-10-01'
+  - '2028-03-01'
 
   # Lead time de produção (semanas) — tempo entre disparar e receber
-  - 7
-  - 10
   lead_time_semanas: 4
 
   # Período histórico único: a janela de vendas passadas que ensina o FORMATO
@@ -170,8 +185,8 @@ planejamento:
   # NÃO define o tamanho do pico — esse vem das vendas reais da última alta.
   # IMPORTANTE: Use o período mais amplo possível (ideal: 12+ meses, incluindo
   # meses de baixa). Com mais histórico = projeção mais precisa.
-  periodo_historico_inicio: "2025-12-01"
-  periodo_historico_fim: "2026-02-28"
+  periodo_historico_inicio: "2025-01-01"
+  periodo_historico_fim: "2025-12-31"
 
 # --- EXCEÇÕES POR SKU ---
 # Sobrescreve regras globais para produtos específicos.

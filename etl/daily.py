@@ -13,6 +13,8 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
+from etl import demanda
+
 
 def processar_daily(dados: dict, config: dict) -> tuple:
     """
@@ -34,7 +36,7 @@ def processar_daily(dados: dict, config: dict) -> tuple:
     vendedores = dados["vendedores"]
     lojas = dados["lojas"]
     situacoes = dados["situacoes"]
-    detalhes = dados["detalhes"]
+    detalhes = demanda.aplicar_alias_colegio(dados["detalhes"], config)
 
     # ---------------------------------------------------------------
     # 1. Mapeamentos

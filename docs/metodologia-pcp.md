@@ -194,15 +194,18 @@ agrupa as siglas em células mais gordas/estáveis. Mapa em `config.grupo_segmen
 ## 5. Rodadas de produção
 
 Cada rodada dispara um pedido que cobre da sua chegada até a **próxima** chegar.
-Dois modos de calendário (`_candidatas_rodadas` / `_sequencia_rodadas`):
+Calendário único (`_candidatas_rodadas` / `_sequencia_rodadas`):
 
-- **Calendário explícito (recomendado)** — `config.planejamento.rodadas_datas`:
-  lista de **datas ISO reais**, deste ano E do próximo, **sem repetição
-  automática**. Permite rodada atrasada este ano e antecipada no próximo. A **última
-  data só fecha o intervalo da penúltima** (não gera pedido próprio). Chegada =
-  disparo + `lead_time_semanas` × 7 dias.
-- **Fallback mensal** — `config.planejamento.rodadas` (meses 1–12 que repetem todo
-  ano). Só usado se `rodadas_datas` estiver vazio. Chegada em meses.
+- **Calendário explícito** — `config.planejamento.rodadas_datas`: lista de **datas
+  ISO reais** de disparo, deste ano E do próximo, **sem repetição automática**.
+  Permite rodada atrasada este ano e antecipada no próximo. São necessárias **2+
+  datas**: a **última só fecha o intervalo da penúltima** (não gera pedido próprio).
+  Chegada = disparo + `lead_time_semanas` × 7 dias.
+
+Sem `rodadas_datas` configurado, a Visão Geral apenas avisa (não simula) e a
+Sugestão por SKU cai na cobertura fixa (`fabrica.cobertura_meses`). O antigo
+*fallback mensal* (`rodadas`, meses 1–12 que repetiam todo ano) foi **removido** —
+havia duas metodologias divergentes rodando em paralelo (ver `docs/decisoes.md`).
 
 ### Conceito-chave: mais rodadas fatiam o mesmo bolo
 
@@ -282,7 +285,6 @@ grupo_segmento:                        # mapa grupo→segmento (editável na tel
 
 planejamento:
   rodadas_datas: ["2026-07-01","2026-10-01","2027-03-01","2027-06-01","2027-10-01","2028-03-01"]
-  rodadas: [7, 10]                     # fallback mensal (só se rodadas_datas vazio)
   lead_time_semanas: 4
   periodo_historico_inicio: "2025-03-01"   # janela LARGA (formato do ano, §6)
   periodo_historico_fim:    "2026-02-28"

@@ -67,8 +67,8 @@ Nunca cruzar Loja ID com Depósito ID. IDs em [dados.md](dados.md).
 - **Fábrica própria**, lead time ~4 semanas (controlável; até 6-7 só em incidente).
 - Capacidade ~20k peças/mês **não é gargalo** (demanda anual ~20k). O desafio é
   **timing, margem e concentração de risco**, não capacidade.
-- Produção é planejada em **rodadas** (`config["planejamento"]["rodadas"]`, meses de
-  disparo). Cada rodada dispara um pedido à fábrica.
+- Produção é planejada em **rodadas** (`config["planejamento"]["rodadas_datas"]`, datas
+  reais de disparo). Cada rodada dispara um pedido à fábrica.
 - Regra de arredondamento: pedidos são arredondados para cima e forçados a **número
   par** (produção em pares).
 - **Pipeline** (ordens já em produção) não é alimentado — sempre 0 (pendência conhecida).

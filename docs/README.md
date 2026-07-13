@@ -19,6 +19,7 @@ Art Kamizetas (aparece nos contextos de produção/PCP).
 | [decisoes.md](decisoes.md) | Log cronológico de decisões (o "porquê" de cada escolha) |
 | [migracao-supabase.md](migracao-supabase.md) | **Decisões congeladas** da futura migração das configs (persistência) para o Supabase — a implementar |
 | [glossario.md](glossario.md) | Termos técnicos e de negócio |
+| [requisitos/normalizacao-colegios.md](requisitos/normalizacao-colegios.md) | **Requisito (proposta)** — tabela configurável para normalizar o colégio (`Marca_sku`), jogando ruído em `Outros` |
 
 ## Mapa rápido do código
 

@@ -15,6 +15,11 @@ __pycache__/
 *.pyo
 *.pyd
 
+# Testes
+.pytest_cache/
+.coverage
+htmlcov/
+
 # Ambientes virtuais
 venv/
 .venv/

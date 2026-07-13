@@ -56,7 +56,7 @@ Muda quase nunca, anda com o código, serve de **default** do merge:
 - `vm.*` (dias_cobertura, inicio/fim_alta, mult_pa, vm_minimo, lead_time, nivel_servico_default, aplicar_crescimento)
 - `fabrica.crescimento_pct`, `cobertura_meses`, `correcao_manual`
 - `demanda.*` (nivel_servico_alta/baixa, variacao_demanda, janela_alta, aplicar_crescimento_fabrica, crescimento_observado_ativo)
-- `planejamento.rodadas_datas`, `rodadas`, `lead_time_semanas`, `periodo_historico_inicio/fim`
+- `planejamento.rodadas_datas`, `lead_time_semanas`, `periodo_historico_inicio/fim`
 - **`colegios.*`** (taxa_crescimento, nivel_servico, `crescimento_grupos`, `proporcao_baixa`) — **cresce com o tempo**, é o maior candidato: são os overrides que o gestor acumula
 - **`grupo_segmento`** (mapa grupo→segmento)
 - **`excecoes_sku.*`** (vm, correcao, proporcao_baixa)

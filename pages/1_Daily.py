@@ -264,7 +264,7 @@ fig_gauge = go.Figure(go.Indicator(
     },
 ))
 fig_gauge.update_layout(height=260, margin=dict(t=60, b=10, l=30, r=30))
-st.plotly_chart(fig_gauge, use_container_width=True)
+st.plotly_chart(fig_gauge, width="stretch")
 
 # =================================================================
 # GRÁFICO COMBINADO — Período selecionado
@@ -326,7 +326,7 @@ if len(df_vendas_periodo) > 0:
         margin=dict(t=40, b=40),
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 else:
     st.info("Sem vendas no período selecionado.")
 
@@ -361,7 +361,7 @@ if len(df_vendas_periodo) > 0:
 
     st.dataframe(
         perf_v,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "Valor Vendido (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
@@ -410,7 +410,7 @@ if len(df_vendas_periodo) > 0:
 
     st.dataframe(
         perf_c,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "Valor Vendido (R$)": st.column_config.NumberColumn(format="R$ %.2f"),

@@ -46,6 +46,18 @@ No Windows, `run.bat` faz os passos 1 (ativação) e 4 automaticamente.
 
 Os dados vêm do Supabase — não há mais leitura de Excel local nem de Google Sheets. Basta que os secrets do Supabase estejam configurados.
 
+### Testes
+
+A suíte cobre o motor de demanda / PCP (`etl/demanda.py`) e os utilitários do loader. Não depende do Supabase nem de secrets.
+
+```bash
+# Instalar dependências de desenvolvimento (inclui pytest)
+uv pip install -r requirements-dev.txt   # ou: pip install -r requirements-dev.txt
+
+# Rodar a suíte (a partir da raiz)
+pytest
+```
+
 ---
 
 ## Configuração dos Secrets
@@ -134,7 +146,9 @@ aku-simulacao/
 ├── app.py                         # Ponto de entrada do Streamlit
 ├── auth.py                        # Autenticação e controle de acesso por perfil
 ├── config.yaml                    # Metas, IDs e configurações operacionais
-├── requirements.txt               # Dependências Python
+├── requirements.txt               # Dependências Python (produção)
+├── requirements-dev.txt           # Dependências de desenvolvimento (pytest)
+├── pytest.ini                     # Configuração da suíte de testes
 ├── run.bat                        # Atalho Windows: ativa venv e roda o app
 ├── .gitignore                     # Arquivos excluídos do repositório
 ├── README.md                      # Este arquivo
@@ -162,6 +176,12 @@ aku-simulacao/
 │   ├── exportar_vm.py             # Exporta data/VM_Calculado.xlsx
 │   ├── memoria_calculo.py         # Memória de cálculo do VM Dinâmico (por SKU)
 │   └── memoria_calculo_fabrica.py # Memória de cálculo do PCP (por SKU)
+├── tests/                         # Suíte pytest (motor de demanda + utilitários)
+│   ├── conftest.py                # Fixtures (config + dados sintéticos)
+│   ├── test_demanda_helpers.py    # Funções puras do motor
+│   ├── test_demanda_engine.py     # Demanda por SKU + política order-up-to
+│   ├── test_rodadas.py            # Calendário de rodadas de produção
+│   └── test_loader_utils.py       # limpar_id / converter_data_flexivel
 ├── assets/                        # Estáticos (favicon)
 └── data/                          # Saídas locais (ex: VM_Calculado.xlsx — não versionado)
 ```

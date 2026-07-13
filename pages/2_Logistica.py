@@ -148,7 +148,7 @@ def _verde_sugestao(val):
 
 styled = df_exibir.style.map(_verde_sugestao, subset=["Sugestão Qtd"])
 
-st.dataframe(styled, use_container_width=True, hide_index=True)
+st.dataframe(styled, width="stretch", hide_index=True)
 
 st.caption(f"**{len(df_filtrado)}** SKUs exibidos")
 
@@ -170,7 +170,7 @@ with st.expander("🔍 Diagnóstico VM Dinâmico — Detalhes do Cálculo"):
 
     st.dataframe(
         df_diag,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "Pulmao": st.column_config.NumberColumn("Pulmão"),
@@ -203,7 +203,7 @@ fig_acao = px.bar(
 )
 fig_acao.update_layout(showlegend=False, height=350)
 fig_acao.update_traces(textposition="outside")
-st.plotly_chart(fig_acao, use_container_width=True)
+st.plotly_chart(fig_acao, width="stretch")
 
 # Pareto por Categoria
 if df_filtrado["Categoria"].notna().any() and df_filtrado["Categoria"].str.strip().ne("").any():
@@ -231,4 +231,4 @@ if df_filtrado["Categoria"].notna().any() and df_filtrado["Categoria"].str.strip
             yaxis2=dict(title="% Acumulado", overlaying="y", side="right", range=[0, 110]),
             showlegend=False, height=400,
         )
-        st.plotly_chart(fig_pareto, use_container_width=True)
+        st.plotly_chart(fig_pareto, width="stretch")

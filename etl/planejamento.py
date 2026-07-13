@@ -24,12 +24,12 @@ calcular_sazonalidade = _demanda.calcular_sazonalidade_empresa
 
 
 def simular_rodadas(dados: dict, config: dict, sazonalidade: pd.DataFrame,
-                    rodadas_override: list = None, buffer_override: float = None,
+                    buffer_override: float = None,
                     pct_por_rodada: dict = None, ativo_crescimento: bool = None) -> dict:
     """
     Simula as rodadas de produção agregando a política order-up-to por SKU.
 
-    rodadas_override: calendário alternativo (meses de disparo) p/ cenários.
+    O calendário vem sempre de config["planejamento"]["rodadas_datas"].
     ativo_crescimento: liga/desliga o fator de crescimento (toggle).
     buffer_override/pct_por_rodada: aceitos por compatibilidade de assinatura;
         não usados no modelo order-up-to (a margem vem do nível de serviço, e
@@ -41,9 +41,7 @@ def simular_rodadas(dados: dict, config: dict, sazonalidade: pd.DataFrame,
 
     # Demanda mensal por SKU + simulação order-up-to (bottom-up)
     dem = _demanda.calcular_demanda_mensal_por_sku(dados, config, ativo_crescimento)
-    sim = _demanda.simular_politica_reabastecimento(
-        dados, config, dem=dem, rodadas_meses=rodadas_override
-    )
+    sim = _demanda.simular_politica_reabastecimento(dados, config, dem=dem)
 
     df_demanda = _demanda.agregar_demanda_mensal_total(dem, sazonalidade)
     demanda_dict = df_demanda.set_index("Mes")["Demanda"].to_dict()
@@ -93,6 +91,7 @@ def simular_rodadas(dados: dict, config: dict, sazonalidade: pd.DataFrame,
             resultado_rodadas.append({
                 "rodada": int(meta["rodada"]),
                 "mes_disparo": int(meta["mes_disparo"]),
+                "ano_disparo": int(meta["ano_disparo"]),
                 "nome_disparo": NOMES_MES[int(meta["mes_disparo"]) - 1],
                 "mes_chegada": chegada.month,
                 "nome_chegada": NOMES_MES[chegada.month - 1],
@@ -141,7 +140,10 @@ def simular_rodadas(dados: dict, config: dict, sazonalidade: pd.DataFrame,
         estoque_atual += entrada - demanda_mes
         estoque_proj.append({
             "Mes": m,
+            "Ano": dt.year,
+            "Data": dt,
             "NomeMes": NOMES_MES[m - 1],
+            "Rotulo": f"{NOMES_MES[m - 1][:3]}/{dt.strftime('%y')}",   # "Jul/26" — janela real datada
             "Entrada": round(entrada),
             "Demanda": round(demanda_mes),
             "EstoqueFinal": round(estoque_atual),

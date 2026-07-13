@@ -135,7 +135,7 @@ def calcular_sazonalidade_por_colegio(dados: dict, config: dict) -> pd.DataFrame
     dt_fim = pd.Timestamp(str(cfg.get("periodo_historico_fim", "2026-02-28")))
 
     itens = dados["itens"]
-    detalhes = dados["detalhes"]
+    detalhes = aplicar_alias_colegio(dados["detalhes"], config)
     det_map = detalhes.set_index("ID_produto")["Marca_sku"].to_dict()
 
     colegios_cadastrados = sorted(
@@ -242,6 +242,58 @@ def segmento_do_grupo(grupo, config: dict = None) -> str:
     return mapa_grupo_segmento(config).get(str(grupo).strip(), "Outros")
 
 
+# --- Normalização de colégio (Marca_sku cru → nome canônico) ---------------
+# O colégio chega cru do Supabase (extração por string da SKU na pipeline
+# externa) e produz ruído em SKUs fora de padrão (ex: "27"). Este de-para,
+# configurável em config["colegios_alias"], normaliza o nome sem tocar na
+# origem. Espelha mapa_grupo_segmento. Ver docs/requisitos/normalizacao-colegios.md.
+def mapa_colegio(config: dict = None) -> dict:
+    """
+    De-para EFETIVO Marca_sku(cru) → colégio canônico (config["colegios_alias"]).
+    Contém só o que MUDA — valor ausente mantém o cru (identidade, decisão D1=A).
+    """
+    m = {}
+    if config and config.get("colegios_alias"):
+        m.update({str(k).strip(): str(v).strip() for k, v in config["colegios_alias"].items()})
+    return m
+
+
+def colegio_efetivo(marca_sku, config: dict = None) -> str:
+    """Colégio canônico (aplica o de-para). Default = identidade (mantém o cru)."""
+    raw = str(marca_sku or "").strip()
+    return mapa_colegio(config).get(raw, raw)
+
+
+def aplicar_alias_colegio(detalhes: pd.DataFrame, config: dict = None) -> pd.DataFrame:
+    """
+    Cópia de `detalhes` com Marca_sku normalizada para o colégio canônico,
+    preservando o valor cru em Marca_sku_raw. No-op se não houver Marca_sku ou
+    de-para. Normalização única chamada no topo de cada entrypoint ETL — assim
+    todo consumidor (cálculo, coluna de saída, filtro de tela) vê o mesmo nome.
+    """
+    if "Marca_sku" not in detalhes.columns:
+        return detalhes
+    alias = mapa_colegio(config)
+    if not alias:
+        return detalhes
+    out = detalhes.copy()
+    if "Marca_sku_raw" not in out.columns:
+        out["Marca_sku_raw"] = out["Marca_sku"]
+    out["Marca_sku"] = out["Marca_sku"].map(
+        lambda v: alias.get(str(v or "").strip(), str(v or "").strip()))
+    return out
+
+
+def parece_ruido(marca_sku) -> bool:
+    """
+    Heurística p/ SUGERIR (nunca aplicar sozinho) que um colégio cru é ruído:
+    nenhum caractere alfabético (ex: "27", "31"). Só orienta o editor da UI —
+    a decisão continua manual (D1=A).
+    """
+    s = str(marca_sku or "").strip()
+    return bool(s) and not any(c.isalpha() for c in s)
+
+
 def calcular_crescimento_observado(dados: dict, config: dict, data_hoje=None) -> dict:
     """
     Camada OBSERVADA do crescimento (modelo híbrido): mede o crescimento realizado
@@ -263,7 +315,7 @@ def calcular_crescimento_observado(dados: dict, config: dict, data_hoje=None) ->
     ult = janela[-1]
     janela_set = set(janela)
 
-    det = dados["detalhes"]
+    det = aplicar_alias_colegio(dados["detalhes"], config)
     colg = det.set_index("ID_produto")["Marca_sku"].to_dict()
     grp = det.set_index("ID_produto")["Grupo"].to_dict()
 
@@ -486,7 +538,7 @@ def calcular_demanda_mensal_por_sku(dados: dict, config: dict, ativo_crescimento
 
     produtos = dados["produtos"]
     itens = dados["itens"]
-    detalhes = dados["detalhes"]
+    detalhes = aplicar_alias_colegio(dados["detalhes"], config)
 
     col_map = detalhes.set_index("ID_produto")["Marca_sku"].to_dict()
     grp_map = detalhes.set_index("ID_produto")["Grupo"].to_dict()
@@ -630,68 +682,33 @@ def fracionar_janela_por_mes(janela_inicio: pd.Timestamp, janela_fim: pd.Timesta
     return resultado
 
 
-def _candidatas_rodadas(config: dict, data_hoje: pd.Timestamp, rodadas_meses: list = None) -> list:
+def _candidatas_rodadas(config: dict, data_hoje: pd.Timestamp) -> list:
     """
     Todas as ocorrências de rodada (disparo → chegada), ordenadas por data de
     chegada. Retorna [] se não houver rodadas configuradas.
 
-    Dois modos de calendário:
-      - EXPLÍCITO (config["planejamento"]["rodadas_datas"], lista de datas ISO
-        de disparo, ex ["2026-07-20", "2026-10-01", "2027-02-01"]): cada data é
-        UMA ocorrência real — nada se repete no ano seguinte. É o modo
-        recomendado: enxerga este ano E o próximo como eles realmente são
-        (rodada atrasada este ano, antecipada no próximo). A ÚLTIMA data serve
-        de fecho do intervalo da penúltima. Chegada = disparo + lead time em
-        DIAS (semanas × 7).
-      - MENSAL (config["planejamento"]["rodadas"], meses 1-12): repete todo
-        ano (comportamento clássico). Chegada = disparo + lead time em meses.
-
-    rodadas_meses: override do calendário p/ cenários. Aceita meses (int) e/ou
-    datas (str ISO / Timestamp) — datas viram ocorrências únicas.
-    None = usa rodadas_datas do config (se houver), senão rodadas mensais.
+    Calendário EXPLÍCITO (config["planejamento"]["rodadas_datas"], lista de
+    datas ISO de disparo, ex ["2026-07-20", "2026-10-01", "2027-02-01"]): cada
+    data é UMA ocorrência real — nada se repete no ano seguinte. Enxerga este
+    ano E o próximo como eles realmente são (rodada atrasada este ano,
+    antecipada no próximo). A ÚLTIMA data serve de fecho do intervalo da
+    penúltima. Chegada = disparo + lead time em DIAS (semanas × 7).
     """
     cfg_plan = config.get("planejamento", {})
     lt_semanas = cfg_plan.get("lead_time_semanas", 4)
-    lt_meses = math.ceil(lt_semanas / 4)
 
-    if rodadas_meses is None:
-        entradas = cfg_plan.get("rodadas_datas") or cfg_plan.get("rodadas") or []
-    else:
-        entradas = rodadas_meses
-
-    meses, datas = [], []
-    for e in entradas:
-        if isinstance(e, int) or (isinstance(e, float) and float(e).is_integer()):
-            meses.append(int(e))
-        else:
-            datas.append(pd.Timestamp(str(e)))   # str(): tolera DoubleQuotedScalarString (ruamel)
+    # str(): tolera DoubleQuotedScalarString (ruamel)
+    datas = sorted(pd.Timestamp(str(e)).normalize()
+                   for e in (cfg_plan.get("rodadas_datas") or []))
 
     candidatas = []
-    # Datas explícitas: uma ocorrência cada, chegada em dias corridos
-    for d in sorted(datas):
+    for i, d in enumerate(datas):
         candidatas.append({
-            "numero": 0,  # renumerado após ordenação
+            "numero": i + 1,
             "mes_disparo": d.month, "ano_disparo": d.year,
-            "data_disparo": d.normalize(),
-            "data_chegada": d.normalize() + pd.Timedelta(days=lt_semanas * 7),
-            "explicita": True,
+            "data_disparo": d,
+            "data_chegada": d + pd.Timedelta(days=lt_semanas * 7),
         })
-    # Meses: repetem nos próximos anos (comportamento clássico)
-    for ano in (data_hoje.year, data_hoje.year + 1, data_hoje.year + 2):
-        for i, mes_disparo in enumerate(sorted(set(meses))):
-            data_disparo = pd.Timestamp(year=ano, month=mes_disparo, day=1)
-            candidatas.append({
-                "numero": i + 1, "mes_disparo": mes_disparo, "ano_disparo": ano,
-                "data_disparo": data_disparo,
-                "data_chegada": data_disparo + pd.DateOffset(months=lt_meses),
-                "explicita": False,
-            })
-
-    candidatas.sort(key=lambda c: c["data_chegada"])
-    if datas:
-        # Calendário explícito (ou misto): numeração cronológica global
-        for i, c in enumerate(candidatas):
-            c["numero"] = i + 1
     return candidatas
 
 
@@ -813,31 +830,30 @@ def proxima_janela_cobertura(config: dict, data_hoje=None) -> dict:
     }
 
 
-def _sequencia_rodadas(config: dict, data_hoje: pd.Timestamp, horizonte_meses: int = 12,
-                       rodadas_meses: list = None) -> list:
+def _sequencia_rodadas(config: dict, data_hoje: pd.Timestamp) -> list:
     """
-    Sequência cronológica de rodadas cuja CHEGADA está no horizonte
-    [hoje, hoje+horizonte_meses], cada uma com a data de chegada da rodada
-    seguinte (fim do intervalo de proteção). Base da simulação order-up-to.
-
-    Rodadas de calendário EXPLÍCITO (rodadas_datas) ignoram o teto do
-    horizonte — são finitas e deliberadas (este ano + próximo); só o corte
-    de chegadas no passado se aplica.
+    Sequência cronológica de rodadas cuja CHEGADA é hoje ou no futuro, cada uma
+    com a data de chegada da rodada seguinte (fim do intervalo de proteção).
+    Base da simulação order-up-to. O calendário explícito é finito e deliberado
+    (este ano + próximo); a última data configurada não gera pedido próprio —
+    só fecha o intervalo da penúltima.
     """
-    candidatas = _candidatas_rodadas(config, data_hoje, rodadas_meses)
+    candidatas = _candidatas_rodadas(config, data_hoje)
     if not candidatas:
         return []
-    limite = data_hoje + pd.DateOffset(months=horizonte_meses)
     seq = []
     for i, c in enumerate(candidatas):
         if c["data_chegada"] < data_hoje:
-            continue
-        if not c.get("explicita") and c["data_chegada"] > limite:
             continue
         if i + 1 >= len(candidatas):
             continue
         seq.append({**c, "data_chegada_seguinte": candidatas[i + 1]["data_chegada"]})
     return seq
+
+
+# Alias público — usado por pedidos/builder.py p/ resolver a identidade
+# absoluta (datas de disparo/chegada) de uma rodada no congelamento.
+sequencia_rodadas = _sequencia_rodadas
 
 
 def _par_ceil(x: float) -> int:
@@ -848,8 +864,7 @@ def _par_ceil(x: float) -> int:
 
 def simular_politica_reabastecimento(dados: dict, config: dict,
                                      ativo_crescimento: bool = None,
-                                     data_hoje=None, dem: pd.DataFrame = None,
-                                     rodadas_meses: list = None) -> pd.DataFrame:
+                                     data_hoje=None, dem: pd.DataFrame = None) -> pd.DataFrame:
     """
     Política de revisão periódica order-up-to (R,S) com PROJEÇÃO FORWARD por SKU.
 
@@ -888,7 +903,7 @@ def simular_politica_reabastecimento(dados: dict, config: dict,
     it["_sit"] = it["ID_pedido"].map(map_ped_sit)
     backlog = it[it["_sit"].isin(sit_backlog)].groupby("ID_produto")["Quantidade"].sum().to_dict()
 
-    seq = _sequencia_rodadas(config, data_hoje, rodadas_meses=rodadas_meses)
+    seq = _sequencia_rodadas(config, data_hoje)
     if not seq:
         return pd.DataFrame(columns=[
             "SKU", "ID_produto", "rodada", "mes_disparo", "ano_disparo",

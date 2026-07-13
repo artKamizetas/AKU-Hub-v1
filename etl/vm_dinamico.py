@@ -49,7 +49,7 @@ def calcular_vm_por_sku(dados: dict, config: dict) -> dict:
 
     itens = dados["itens"]
     produtos = dados["produtos"]
-    detalhes = dados["detalhes"]
+    detalhes = demanda.aplicar_alias_colegio(dados["detalhes"], config)
 
     map_id_colegio = detalhes.set_index("ID_produto")["Marca_sku"].to_dict()
     map_id_grupo = detalhes.set_index("ID_produto")["Grupo"].to_dict()

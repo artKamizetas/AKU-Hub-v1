@@ -59,8 +59,31 @@ def main():
           ", ".join(f"{demanda.NOMES_MES[m-1]}/{ts.year}" for m, ts in sorted(temporada.items())))
 
     ativo = config.get("demanda", {}).get("aplicar_crescimento_fabrica", True)
-    taxa = demanda.taxa_crescimento_efetiva(colegio, config, grupo, ativo)
-    print(f"  Crescimento efetivo (colégio×grupo): {taxa:.3f}x (ativo={ativo})")
+    # A camada OBSERVADA precisa ser passada aqui igual o motor faz em
+    # calcular_demanda_mensal_por_sku — sem ela, a taxa cai no fallback cego
+    # (+10%) e não bate com a demanda das etapas seguintes.
+    obs = (demanda.calcular_crescimento_observado(dados, config)
+           if config.get("demanda", {}).get("crescimento_observado_ativo", True) else None)
+    taxa = demanda.taxa_crescimento_efetiva(colegio, config, grupo, ativo, obs)
+
+    # Origem do fator (mesma cascata de taxa_crescimento_efetiva) — deixa
+    # explícito DE ONDE veio o crescimento e não confunde com o fallback.
+    col_cfg = (config.get("colegios") or {}).get(colegio) or {}
+    seg = demanda.segmento_do_grupo(grupo, config)
+    obs_col = (obs or {}).get(colegio, {}) if obs else {}
+    if not ativo:
+        origem_cresc = "toggle desligado"
+    elif grupo in (col_cfg.get("crescimento_grupos") or {}):
+        origem_cresc = f"manual grupo {grupo}"
+    elif "taxa_crescimento" in col_cfg:
+        origem_cresc = f"manual colégio {colegio}"
+    elif (obs_col.get("segmentos") or {}).get(seg) is not None:
+        origem_cresc = f"observado {colegio}×{seg}"
+    elif obs_col.get("__geral__") is not None:
+        origem_cresc = f"observado {colegio} (geral)"
+    else:
+        origem_cresc = f"fallback +{config.get('fabrica', {}).get('crescimento_pct', 0):.0f}%"
+    print(f"  Crescimento efetivo (colégio×grupo): {taxa:.3f}x  [{origem_cresc}]  (ativo={ativo})")
 
     itens = dados["itens"]
     sub("Vendas reais na última alta")
