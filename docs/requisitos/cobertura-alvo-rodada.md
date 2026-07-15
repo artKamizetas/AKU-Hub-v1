@@ -1,6 +1,13 @@
 # Especificação — Cobertura Alvo por Rodada ("engordar" uma rodada)
 
-**Status:** proposta · **Autor:** planejamento (Diogo) + assistente · **Alvo:** `etl/demanda.py`, `etl/planejamento.py`, `pages/3_Fabrica.py`, `config.yaml`
+**Status:** ✅ IMPLEMENTADA (jul/2026) · **Autor:** planejamento (Diogo) + assistente · **Alvo:** `etl/demanda.py`, `etl/planejamento.py`, `pages/3_Fabrica.py`
+
+> Nota de implementação: a persistência saiu do `config.yaml` e foi para o
+> Supabase (`app.parametros`, chave `planejamento.cobertura_override`) — a
+> migração de parâmetros (docs/migracao-supabase.md) foi executada junto desta
+> feature. Testes em `tests/test_cobertura_alvo.py`. Smoke com dados reais:
+> R1 11%→39% (cobre até 12/Jan/27), R2 75%→47%, R3-R5 intactas, Σ produção
+> conservada (43.452 pçs).
 
 ## 1. Problema
 
@@ -186,17 +193,28 @@ Na tabela "Rodadas de Produção":
 - **Curva de estoque projetado** (`resultado["estoque_projetado"]`): mostrar a
   curva com override sobreposta à natural — o platô sobe após a chegada da R1 e
   **reconverge exatamente na chegada da R2** (visualiza a absorção).
-- Botão **"Salvar antecipação"**: grava `config.yaml["planejamento"]["cobertura_override"]`
-  via `ruamel.yaml` (preserva comentários) + `st.cache_data.clear()`. Segue a
-  regra do projeto: config só muda pela UI.
+- Botão **"💾 Salvar plano"** (admin): grava `rodadas_datas` + `cobertura_override`
+  juntos em `app.parametros` (Supabase) via `etl/config_store.py` +
+  `st.cache_data.clear()`. Preview de sessão vence o salvo até então. (A gravação
+  migrou de `config.yaml`/ruamel para o Supabase — ver nota no topo.)
 
 ### 5.3. Sugestão por SKU
 
-**Zero mudança de lógica** — `processar_fabrica` chama o mesmo
-`simular_politica_reabastecimento`, então já reflete o override salvo. Adicionar
-apenas um selo informativo no cabeçalho quando a rodada selecionada tem override
-(ex: *"Rodada 1 · antecipação ativa (alvo 40% da demanda anual)"*), lendo de
-`config`.
+**Zero mudança na lógica de cálculo** — `processar_fabrica` chama o mesmo
+`simular_politica_reabastecimento` sem passar `cobertura_override`, então o motor
+lê o do `config` e a aba **reflete o override SALVO automaticamente** (verificado
+com dados reais — SES015CAMDIA-PP, R1: **56 → 292** pares após salvar 50%; o NS
+sobe de 92% para 99% porque a janela estendida passa a conter a alta).
+
+**Aviso de preview não salvo (jul/2026):** esta aba lê o plano **salvo** (é a
+superfície de "Congelar rodada"), então um preview de antecipação/calendário ainda
+**não salvo** na Visão Geral não aparece aqui — o que surpreendia o planejador
+("mudei a cobertura e a sugestão não reagiu"). Um banner `st.warning` no topo da
+aba avisa quando há alterações pendentes (flags `_tem_preview*` hoisted da Visão
+Geral para ficarem sempre definidos), instruindo a **Salvar plano** para refleti-las
+na sugestão **e** no congelamento. O preview **não** vaza para cá de propósito: o
+congelamento recalcula do `config` salvo, então exibir o preview divergiria do que
+seria efetivamente congelado.
 
 ## 6. Regras e casos-limite
 

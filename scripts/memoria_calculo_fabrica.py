@@ -10,13 +10,12 @@ Uso (a partir da raiz do projeto):
 """
 
 import sys
-import yaml
 import pandas as pd
 from pathlib import Path
 
 RAIZ = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RAIZ))
-from etl.loader import carregar_dados
+from etl.loader import carregar_dados, carregar_config
 from etl import demanda
 
 
@@ -28,8 +27,7 @@ def sub(t):
 
 
 def main():
-    with open(RAIZ / "config.yaml", "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+    config = carregar_config()   # yaml (defaults) + app.parametros (Supabase)
     dados = carregar_dados()
     produtos = dados["produtos"]
 

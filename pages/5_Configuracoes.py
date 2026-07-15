@@ -11,14 +11,14 @@ import streamlit as st
 from auth import exigir_login
 exigir_login()
 
-from pathlib import Path
 import yaml
-from ruamel.yaml import YAML
 from datetime import datetime, date
 import pandas as pd
-import io
 
-from etl.loader import carregar_dados
+from etl.loader import carregar_dados, carregar_config
+from etl.config_store import extrair_parametros, obter_repositorio_parametros
+from pedidos.integracoes.repositorio import obter_repositorio_integracoes
+from pedidos.integracoes import oauth, bling as cliente_bling, olist as cliente_olist
 
 # Pega as credenciais do session_state (setado em auth.py)
 # Busca o role no secrets.toml baseado no username
@@ -32,6 +32,35 @@ if role != "admin":
     st.error("⛔ Acesso negado. Apenas administradores podem acessar esta página.")
     st.stop()
 
+# =================================================================
+# CALLBACK OAUTH (integrações) — roda ANTES das abas
+# A plataforma devolve o navegador para .../configuracoes?code=&state=.
+# O state foi persistido no banco (a sessão do Streamlit morre no redirect),
+# então buscamos por ele para saber de qual plataforma é o retorno.
+# =================================================================
+_qp = st.query_params
+if "code" in _qp and "state" in _qp:
+    _code, _state = _qp["code"], _qp["state"]
+    try:
+        _repo_int = obter_repositorio_integracoes()
+        _integ = _repo_int.buscar_por_state(_state)
+        if not _integ:
+            st.error("Retorno OAuth com state inválido ou expirado. Refaça a conexão.")
+        else:
+            _plat = _integ["id"]
+            _tokens = oauth.trocar_code(
+                _plat, _integ.get("client_id", ""), _integ.get("client_secret", ""),
+                _code, _integ.get("redirect_uri", ""))
+            _repo_int.concluir_oauth(_plat, _tokens["access_token"],
+                                     _tokens["refresh_token"], _tokens["expira_em"],
+                                     username or "admin")
+            _repo_int.registrar_evento(_plat, "oauth_conectar", True, usuario=username)
+            st.success(f"✅ {_plat.capitalize()} conectado com sucesso!")
+    except Exception as _exc:
+        st.error(f"Falha ao concluir a conexão OAuth: {_exc}")
+    finally:
+        st.query_params.clear()
+
 MESES_NOME_CFG = {
     1: "Janeiro", 2: "Fevereiro", 3: "Março", 4: "Abril", 5: "Maio", 6: "Junho",
     7: "Julho", 8: "Agosto", 9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro",
@@ -41,21 +70,20 @@ MESES_NOME_CFG = {
 # FUNÇÕES AUXILIARES
 # =================================================================
 
-def carregar_config():
-    """Carrega config.yaml com ruamel.yaml para preservar comentários."""
-    caminho_config = Path(__file__).parent.parent / "config.yaml"
-    yaml_handler = YAML()
-    yaml_handler.preserve_quotes = True
-    yaml_handler.default_flow_style = False
-    with open(caminho_config, "r", encoding="utf-8") as f:
-        config = yaml_handler.load(f)
-    return config, caminho_config, yaml_handler
-
-
-def salvar_config(config, caminho_config, yaml_handler):
-    """Salva config.yaml preservando comentários."""
-    with open(caminho_config, "w", encoding="utf-8") as f:
-        yaml_handler.dump(config, f)
+def salvar_parametros(config) -> bool:
+    """
+    Grava a Categoria B do config no Supabase (app.parametros + histórico de
+    auditoria). Substitui o antigo save em config.yaml — que era efêmero no
+    Streamlit Cloud (evaporava a cada redeploy). O config.yaml do git segue
+    como fonte dos defaults; carregar_config() mescla os dois.
+    """
+    try:
+        obter_repositorio_parametros().salvar(
+            extrair_parametros(config), usuario=username or "admin")
+        return True
+    except Exception as e:
+        st.error(f"❌ Falha ao salvar parâmetros no Supabase: {e}")
+        return False
 
 
 def validar_config(config):
@@ -117,9 +145,10 @@ def validar_config(config):
 st.title("⚙️ Configurações do Sistema")
 st.markdown("_Gerenciar parâmetros de produção, exceções de SKU e sistema._")
 
-tab1, tab2, tab3 = st.tabs([
+tab1, tab2, tab_int, tab3 = st.tabs([
     "📋 Parâmetros Gerais",
     "📦 Exceções de SKU",
+    "🔌 Integrações",
     "ℹ️ Sistema"
 ])
 
@@ -128,7 +157,7 @@ tab1, tab2, tab3 = st.tabs([
 # =================================================================
 
 with tab1:
-    config, caminho_config, yaml_handler = carregar_config()
+    config = carregar_config()
 
     st.subheader("Parâmetros de Operação")
 
@@ -284,27 +313,17 @@ with tab1:
             )
 
         st.markdown("**Planejamento — calendário de rodadas**")
-        st.caption(
-            "Datas reais de disparo deste ano E do próximo — nada se repete "
-            "automaticamente; permite rodada atrasada este ano e antecipada no próximo. "
-            "A **última data só fecha o intervalo da penúltima** (inclua sempre a primeira "
-            "rodada do ano seguinte). São necessárias **2+ datas**."
+        st.info(
+            "📅 O calendário de rodadas agora é editado no **Simulador de Produção → "
+            "Visão Geral**, junto com as coberturas alvo — lá o efeito de cada data na "
+            "produção aparece ao vivo. Datas e coberturas formam um plano só."
         )
-        _datas_atuais = config["planejamento"].get("rodadas_datas") or []
-        df_rodadas_datas = pd.DataFrame({
-            "data_disparo": [pd.Timestamp(str(d)).date() for d in _datas_atuais]  # str(): ruamel devolve DoubleQuotedScalarString
-        }) if _datas_atuais else pd.DataFrame({"data_disparo": pd.Series(dtype="object")})
-        df_rodadas_datas_edit = st.data_editor(
-            df_rodadas_datas,
-            column_config={
-                "data_disparo": st.column_config.DateColumn(
-                    "Data de disparo", format="DD/MM/YYYY", required=True,
-                ),
-            },
-            num_rows="dynamic",
-            hide_index=True,
-            key="editor_rodadas_datas",
-        )
+        _datas_atuais = sorted(config["planejamento"].get("rodadas_datas") or [])
+        if _datas_atuais:
+            _rot = ", ".join(pd.Timestamp(str(d)).strftime("%d/%m/%Y") for d in _datas_atuais)
+            st.caption(f"Datas configuradas atualmente: {_rot}")
+        else:
+            st.caption("Nenhuma data configurada ainda — defina no Simulador de Produção.")
 
         col_p1, col_p2, col_p3 = st.columns(3)
         with col_p1:
@@ -379,11 +398,8 @@ with tab1:
         config["fabrica"]["crescimento_pct"] = crescimento
         config["fabrica"]["cobertura_meses"] = cobertura_meses
         config["fabrica"]["correcao_manual"] = correcao_manual
-        _datas_novas = sorted(
-            pd.Timestamp(d).date().isoformat()
-            for d in df_rodadas_datas_edit["data_disparo"].dropna()
-        )
-        config["planejamento"]["rodadas_datas"] = _datas_novas or None
+        # rodadas_datas NÃO é mais editado aqui (vive no Simulador → Visão Geral);
+        # o valor carregado apenas trafega de volta no save (extrair_parametros).
         config["planejamento"]["lead_time_semanas"] = lead_time
         config["planejamento"]["periodo_historico_inicio"] = periodo_hist_ini.isoformat()
         config["planejamento"]["periodo_historico_fim"] = periodo_hist_fim.isoformat()
@@ -396,7 +412,8 @@ with tab1:
                 st.write(f"- {erro}")
         else:
             # Salvar
-            salvar_config(config, caminho_config, yaml_handler)
+            if not salvar_parametros(config):
+                st.stop()
             st.cache_data.clear()
             st.success("✅ Configurações salvas com sucesso!")
             st.info("💡 Cache limpo. Os dados serão recarregados na próxima visualização das páginas.")
@@ -416,7 +433,7 @@ with tab1:
 
     from etl.demanda import colegio_efetivo, parece_ruido
 
-    config, caminho_config, yaml_handler = carregar_config()
+    config = carregar_config()
     alias_atual = config.get("colegios_alias") or {}
     dados_colegios = carregar_dados()
 
@@ -457,7 +474,8 @@ with tab1:
             if raw and disp and disp != raw:      # só grava o que MUDA (identidade = default)
                 novo_alias[raw] = disp
         config["colegios_alias"] = novo_alias
-        salvar_config(config, caminho_config, yaml_handler)
+        if not salvar_parametros(config):
+            st.stop()
         st.cache_data.clear()
         n_outros = sum(1 for v in novo_alias.values() if v == "Outros")
         st.success(f"✅ {len(novo_alias)} regra(s) de colégio salva(s) ({n_outros} → Outros). Cache limpo.")
@@ -470,7 +488,7 @@ with tab1:
         "Os nomes abaixo já são os **normalizados** (pós de-para acima)."
     )
 
-    config, caminho_config, yaml_handler = carregar_config()
+    config = carregar_config()
     cfg_colegios = config.get("colegios") or {}
     ns_default_atual = int(config.get("vm", {}).get("nivel_servico_default", 95))
 
@@ -532,7 +550,8 @@ with tab1:
                 entry.pop("proporcao_baixa", None)
             novo_colegios[c] = entry
         config["colegios"] = novo_colegios
-        salvar_config(config, caminho_config, yaml_handler)
+        if not salvar_parametros(config):
+            st.stop()
         st.cache_data.clear()
         st.success(f"✅ Taxa base de {len(df_colegios_editado)} colégio(s) salva!")
 
@@ -611,7 +630,8 @@ with tab1:
                 entry.pop("crescimento_grupos", None)
             novo_colegios[c] = entry
         config["colegios"] = novo_colegios
-        salvar_config(config, caminho_config, yaml_handler)
+        if not salvar_parametros(config):
+            st.stop()
         st.cache_data.clear()
         n = sum(len(v) for v in grupos_por_col.values())
         st.success(f"✅ {n} override(s) manual(is) salvos — o resto segue o observado (vivo).")
@@ -654,7 +674,8 @@ with tab1:
             if g and s:
                 novo_seg[g] = s
         config["grupo_segmento"] = novo_seg
-        salvar_config(config, caminho_config, yaml_handler)
+        if not salvar_parametros(config):
+            st.stop()
         st.cache_data.clear()
         st.success(f"✅ Agrupamento salvo — {len(set(novo_seg.values()))} segmento(s).")
 
@@ -663,7 +684,7 @@ with tab1:
 # =================================================================
 
 with tab2:
-    config, caminho_config, yaml_handler = carregar_config()
+    config = carregar_config()
 
     st.subheader("Gerenciar Exceções de SKU")
     st.markdown(
@@ -749,12 +770,171 @@ with tab2:
 
                         # Salvar
                         config["excecoes_sku"] = excecoes_novo
-                        salvar_config(config, caminho_config, yaml_handler)
+                        if not salvar_parametros(config):
+                            st.stop()
                         st.cache_data.clear()
                         st.success(f"✅ {len(excecoes_novo)} exceção(ões) aplicada(s)!")
 
             except Exception as e:
                 st.error(f"❌ Erro ao processar CSV: {e}")
+
+# =================================================================
+# ABA — INTEGRAÇÕES (Bling = compra AK · Olist = venda Art Kamizetas)
+# =================================================================
+
+with tab_int:
+    st.subheader("Integrações com os ERPs")
+    st.caption(
+        "Conecte o **Bling** (pedido de compra da AK Uniformes) e o **Olist** "
+        "(pedido de venda da Art Kamizetas). As chaves ficam no Supabase, não no "
+        "código. A emissão em si acontece na página Pedidos de Compra."
+    )
+
+    # `ler` devolve {} quando o DDL 003 não foi aplicado (o schema `app` degrada a
+    # leitura para vazio em vez de estourar) — logo, dict vazio == emissão ainda não
+    # ativada. As linhas bling/olist são semeadas pelo próprio DDL, então uma linha
+    # presente é sinal confiável de que a migração rodou. Sem esse gate, os cards e o
+    # expander de eventos tentariam ler tabelas inexistentes e derrubariam a página.
+    _integracoes_disponivel = bool(obter_repositorio_integracoes().ler("bling"))
+    if not _integracoes_disponivel:
+        st.warning(
+            "Tabela `app.integracao` não encontrada — a emissão ainda não está "
+            "ativada. Aplique o DDL `docs/sql/003_app_integracoes.sql` no SQL Editor "
+            "do Supabase (cria as tabelas e semeia as linhas bling/olist) e recarregue "
+            "a página."
+        )
+
+    def _card_integracao(plataforma: str, titulo: str, campos_negocio: list):
+        """Card de configuração + conexão OAuth de uma plataforma."""
+        repo_int = obter_repositorio_integracoes()
+        integ = repo_int.ler(plataforma) or {}
+        conectado = bool(integ.get("refresh_token"))
+        rotulo = f"{titulo}   ·   {'✅ conectado' if conectado else '❌ não conectado'}"
+        # Card retrátil: aberto durante o setup (sem conexão), recolhido depois — o
+        # status vai no cabeçalho, para ler de relance sem precisar expandir.
+        with st.expander(rotulo, expanded=not conectado):
+
+            # -- 1. Chaves do app OAuth --
+            with st.form(f"chaves_{plataforma}"):
+                st.markdown("**Credenciais do aplicativo (OAuth2)**")
+                cid = st.text_input("Client ID", value=integ.get("client_id") or "",
+                                    key=f"cid_{plataforma}")
+                tem_secret = bool(integ.get("client_secret"))
+                csecret = st.text_input(
+                    "Client Secret", value="", type="password",
+                    placeholder="••• salvo (deixe em branco p/ manter)" if tem_secret else "",
+                    key=f"csec_{plataforma}")
+                redir = st.text_input(
+                    "URL de redirecionamento", value=integ.get("redirect_uri") or "",
+                    help="Registre esta MESMA URL no portal da plataforma. "
+                         "Deve ser a URL pública do app + /configuracoes.",
+                    key=f"redir_{plataforma}")
+                if st.form_submit_button("💾 Salvar credenciais"):
+                    repo_int.salvar_chaves(plataforma, cid, csecret, redir,
+                                           username or "admin")
+                    st.success("Credenciais salvas.")
+                    st.rerun()
+
+            if integ.get("redirect_uri"):
+                st.caption("Redirect a registrar no portal:")
+                st.code(integ["redirect_uri"], language=None)
+
+            # -- 2. Conexão --
+            st.markdown("**Conexão**")
+            if conectado:
+                validade = "?"
+                if integ.get("token_expira_em"):
+                    exp = pd.Timestamp(str(integ["token_expira_em"]))
+                    validade = exp.strftime("%d/%m/%Y %H:%M")
+                st.success(f"✅ Conectado por {integ.get('conectado_por','?')} · "
+                           f"token expira {validade}")
+            else:
+                st.info("❌ Não conectado.")
+
+            cc1, cc2 = st.columns(2)
+            with cc1:
+                pronto_p_conectar = bool(integ.get("client_id") and integ.get("redirect_uri"))
+                if pronto_p_conectar:
+                    state = oauth.gerar_state()
+                    repo_int.salvar_state_oauth(plataforma, state, username or "admin")
+                    url = oauth.montar_authorize_url(
+                        plataforma, integ["client_id"], integ["redirect_uri"], state)
+                    st.link_button("🔗 Conectar / Reconectar", url, use_container_width=True)
+                else:
+                    st.button("🔗 Conectar", disabled=True, use_container_width=True,
+                              help="Salve Client ID e URL de redirecionamento primeiro.",
+                              key=f"conn_disabled_{plataforma}")
+            with cc2:
+                if st.button("🧪 Testar conexão", key=f"testar_{plataforma}",
+                             disabled=not conectado, use_container_width=True):
+                    try:
+                        token = oauth.obter_access_token(plataforma, repo_int)
+                        testar = (cliente_bling.testar_conexao if plataforma == "bling"
+                                  else cliente_olist.testar_conexao)
+                        ok, msg = testar(token)
+                        repo_int.registrar_evento(plataforma, "testar_conexao", ok,
+                                                  detalhe={"msg": msg}, usuario=username)
+                        st.success(msg) if ok else st.error(msg)
+                    except Exception as exc:
+                        st.error(f"Falha: {exc}")
+
+            # -- 3. IDs de negócio --
+            with st.form(f"negocio_{plataforma}"):
+                st.markdown("**IDs de negócio**")
+                cfg = integ.get("config") or {}
+                valores = {}
+                for chave, rotulo, ajuda in campos_negocio:
+                    valores[chave] = st.text_input(
+                        rotulo, value=str(cfg.get(chave, "") or ""),
+                        help=ajuda, key=f"neg_{plataforma}_{chave}")
+                if st.form_submit_button("💾 Salvar IDs de negócio"):
+                    novo = {k: v.strip() for k, v in valores.items() if v.strip()}
+                    if plataforma == "olist" and "situacao" not in novo:
+                        novo["situacao"] = 0
+                    repo_int.salvar_config(plataforma, novo, username or "admin")
+                    st.success("IDs de negócio salvos.")
+                    st.rerun()
+
+            # -- 4. Só Bling: validar contrato do POST via GET (sem escrita) --
+            if plataforma == "bling" and conectado:
+                if st.button("📋 Validar contrato (GET pedido exemplo)",
+                             key="contrato_bling"):
+                    try:
+                        token = oauth.obter_access_token("bling", repo_int)
+                        exemplo = cliente_bling.obter_pedido_compra_exemplo(token)
+                        repo_int.registrar_evento("bling", "contrato_get", True,
+                                                  usuario=username)
+                        if exemplo:
+                            st.caption("Shape real de um pedido de compra do Bling "
+                                       "(confira contra o payload de emissão):")
+                            st.json(exemplo, expanded=False)
+                        else:
+                            st.info("A conta ainda não tem pedidos de compra p/ inspecionar.")
+                    except Exception as exc:
+                        st.error(f"Falha: {exc}")
+
+    if _integracoes_disponivel:
+        _card_integracao(
+            "bling", "🛒 Bling — Pedido de Compra (AK Uniformes)",
+            [("fornecedor_id", "ID do fornecedor (Art Kamizetas)",
+              "Cadastros → Fornecedores no Bling")],
+        )
+        _card_integracao(
+            "olist", "🏭 Olist — Pedido de Venda (Art Kamizetas)",
+            [("contato_id", "ID do contato/cliente (AK Uniformes)", "Contato no Olist"),
+             ("vendedor_id", "ID do vendedor", "Obrigatório na API do Olist"),
+             ("deposito_id", "ID do depósito", "Obrigatório na API do Olist"),
+             ("situacao", "Situação inicial (0 = Aberta)", "Código de situação do pedido")],
+        )
+
+        with st.expander("📜 Últimos eventos de integração"):
+            _eventos = obter_repositorio_integracoes().listar_eventos(20)
+            if len(_eventos):
+                _cols = [c for c in ["criado_em", "plataforma", "acao", "sucesso", "criado_por"]
+                         if c in _eventos.columns]
+                st.dataframe(_eventos[_cols], width="stretch", hide_index=True)
+            else:
+                st.caption("Nenhum evento ainda.")
 
 # =================================================================
 # ABA 3 — INFORMAÇÕES DO SISTEMA
@@ -777,11 +957,16 @@ with tab3:
         st.write("**Cache:** Recarregado a cada 1 hora (ou ao clicar 🔄)")
 
         try:
-            caminho_config = Path(__file__).parent.parent / "config.yaml"
-            mod_time = datetime.fromtimestamp(caminho_config.stat().st_mtime)
-            st.write(f"**Config:** {mod_time.strftime('%d/%m/%Y %H:%M')}")
-        except:
-            st.write("**Config:** Erro ao ler")
+            # Última gravação de parâmetros no Supabase (app.parametros)
+            meta = obter_repositorio_parametros().ler_metadados()
+            if meta:
+                _quando = pd.Timestamp(meta["atualizado_em"]).tz_convert("America/Fortaleza")
+                _quem = meta.get("atualizado_por") or "—"
+                st.write(f"**Parâmetros:** {_quando:%d/%m/%Y %H:%M} por {_quem}")
+            else:
+                st.write("**Parâmetros:** ainda não semeados (rode scripts/seed_parametros.py)")
+        except Exception:
+            st.write("**Parâmetros:** Supabase indisponível — usando defaults do config.yaml")
 
     st.markdown("---")
 
@@ -793,13 +978,12 @@ with tab3:
             st.success("✅ Cache limpo. Próxima página vai recarregar os dados.")
 
     with col4:
-        config, _, yaml_handler = carregar_config()
-        config_yaml = io.StringIO()
-        yaml_handler.dump(config, config_yaml)
-
+        # Backup do config EFETIVO (yaml defaults + parâmetros do Supabase
+        # mesclados) — o que os motores realmente usam agora.
+        config_efetivo = carregar_config()
         st.download_button(
-            label="💾 Backup config.yaml",
-            data=config_yaml.getvalue(),
+            label="💾 Backup config efetivo",
+            data=yaml.safe_dump(config_efetivo, allow_unicode=True, sort_keys=False),
             file_name=f"config_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.yaml",
             mime="text/plain",
         )

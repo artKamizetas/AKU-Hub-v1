@@ -21,15 +21,11 @@ from etl.demanda import listar_rodadas_selecionaveis
 from pedidos import builder as pedidos_builder
 from pedidos.repositorio import obter_repositorio, RodadaJaCongelada
 
-import yaml
-from pathlib import Path
-from etl.loader import carregar_dados
+from etl.loader import carregar_dados, carregar_config
 
 
 def _carregar():
-    caminho_config = Path(__file__).parent.parent / "config.yaml"
-    with open(caminho_config, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+    config = carregar_config()   # yaml (defaults) + app.parametros (Supabase)
     dados = carregar_dados()
     return dados, config
 
@@ -153,86 +149,264 @@ with st.container(border=True):
             f"Período: {cfg_plan.get('periodo_historico_inicio', '?')} a {cfg_plan.get('periodo_historico_fim', '?')}"
         )
 
-    # --- Calendário de rodadas (definido em Configurações → Produção) ---
-    datas_rodadas = sorted(str(d) for d in (cfg_plan.get("rodadas_datas") or []))
+    # === Plano de rodadas — cockpit único (datas + coberturas juntos) ===
+    # Datas E coberturas formam "o plano": editam-se JUNTOS aqui, onde o efeito
+    # (produção migrando entre rodadas) é visível ao vivo. Preview de sessão
+    # vence o salvo até "Salvar plano". Ver docs/requisitos/cobertura-alvo-rodada.md.
+    _role = (dict(st.secrets.get("auth_config", {}))
+             .get("credentials", {}).get("usernames", {})
+             .get(st.session_state.get("username", ""), {}).get("role", ""))
+    _is_admin = _role == "admin"
+
+    # Placeholders p/ ordenar a tela: KPIs (topo) → Calendário → Rodadas (inline).
+    # O calendário é preenchido PRIMEIRO no código (define as datas da simulação),
+    # mas aparece abaixo dos KPIs porque seu container foi criado depois.
+    _ph_kpi = st.container()
+    _ph_cal = st.container()
+
+    # --- Calendário de disparos — multiselect de mês/ano (pills que crescem) ---
+    # As datas de disparo são sempre 1º-de-mês (o motor consome em resolução de
+    # mês e o cobertura_override é keyed pela data ISO), então o conjunto de opções
+    # é finito: cada mês do horizonte vira uma pill selecionável. O widget guarda o
+    # próprio estado (key); salvar/descartar apaga a key → resemeia do valor salvo.
+    _datas_salvas = sorted({
+        pd.Timestamp(str(d)).replace(day=1).strftime("%Y-%m-%d")
+        for d in (cfg_plan.get("rodadas_datas") or [])
+    })
+    _CAL_KEY = "cal_datas_multiselect"
+
+    # Horizonte de opções: do ano mais antigo (salvo ou atual) até atual + 2
+    _ano_hoje = pd.Timestamp.now().year
+    _anos_ref = [pd.Timestamp(i).year for i in _datas_salvas]
+    _label_iso, _iso_label, _opcoes = {}, {}, []
+    for _ano in range(min([_ano_hoje] + _anos_ref), max([_ano_hoje + 2] + _anos_ref) + 1):
+        for _mes in range(1, 13):
+            _iso = f"{_ano}-{_mes:02d}-01"
+            _lab = f"{MESES_NOME[_mes][:3]}/{_ano}"
+            _opcoes.append(_lab)
+            _label_iso[_lab] = _iso
+            _iso_label[_iso] = _lab
+
+    with _ph_cal:
+        st.markdown("**⚙️ Calendário de disparos**")
+        st.caption(
+            "Cada mês selecionado dispara uma **rodada** na tabela abaixo. Selecione "
+            "os disparos deste ano E do próximo — a **última data só fecha o intervalo "
+            "da penúltima** (inclua a 1ª rodada do ano seguinte). Mínimo **2**."
+        )
+        if _is_admin:
+            _sel = st.multiselect(
+                "Datas de disparo", options=_opcoes,
+                default=[_iso_label[i] for i in _datas_salvas if i in _iso_label],
+                key=_CAL_KEY, label_visibility="collapsed",
+                placeholder="Escolha os meses de disparo…",
+                help="Cada pill é uma rodada. Adicione/remova meses e a simulação "
+                     "recalcula ao vivo.")
+            _datas_ativas = sorted({_label_iso[l] for l in _sel})
+        else:
+            _datas_ativas = list(_datas_salvas)
+            if _datas_ativas:
+                st.caption("📅 " + " · ".join(_iso_label[i] for i in _datas_ativas))
+            st.caption("🔒 Somente admin edita o calendário e as coberturas alvo.")
+
+    datas_rodadas = _datas_ativas
     tem_rodadas = len(datas_rodadas) >= 2
 
-    if datas_rodadas:
-        rotulos = ", ".join(pd.Timestamp(d).strftime("%b/%y") for d in datas_rodadas)
-        st.caption(f"📅 **Calendário de rodadas:** {rotulos}  ·  edite em "
-                   "*Configurações → Produção → calendário de rodadas*.")
+    # Config efetivo p/ a simulação: datas editadas (ainda não salvas) entram aqui
+    config_sim = config
+    if _datas_ativas != _datas_salvas:
+        config_sim = dict(config)
+        config_sim["planejamento"] = {**cfg_plan, "rodadas_datas": _datas_ativas}
+
+    # --- Cobertura alvo — preview de sessão vence o salvo (default fora do else) ---
+    _cob_salvo = {str(k): float(v)
+                  for k, v in (cfg_plan.get("cobertura_override") or {}).items()}
+    _cob_preview = st.session_state.get("cobertura_alvo_preview")
+    _cob_ativo = _cob_preview if _cob_preview is not None else _cob_salvo
+    _cob_editado = _cob_ativo   # substituído pelo editor quando há rodadas
+
+    # Flags de "plano não salvo" (preview de sessão ≠ salvo) — SEMPRE definidos
+    # (fora do if/else) porque a aba "Sugestão por SKU" abaixo também os lê para
+    # avisar que ela reflete o plano SALVO, não o preview em edição.
+    _tem_preview_cob = (_cob_preview is not None and _cob_preview != _cob_salvo)
+    _tem_preview_datas = (_datas_ativas != _datas_salvas)
+    _tem_preview = _tem_preview_cob or _tem_preview_datas
 
     if not tem_rodadas:
-        st.warning(
-            "Calendário de rodadas não configurado (são necessárias 2+ datas — a última "
-            "só fecha o intervalo da penúltima). Defina em "
-            "**Configurações → Produção → calendário de rodadas**."
-        )
+        st.warning("Adicione **2+ datas** no calendário acima para simular as rodadas.")
     else:
-        sim = simular_rodadas(dados, config, sazonalidade, ativo_crescimento=ativo_cresc)
+        sim = simular_rodadas(dados, config_sim, sazonalidade,
+                              cobertura_override=_cob_ativo,
+                              ativo_crescimento=ativo_cresc)
 
-        # --- KPIs macro: dois grupos (deste ano × total dos anos planejados) ---
+        # Simulação NATURAL (sem overrides) só quando há antecipação ativa —
+        # referência p/ o planejador ver a gordura migrando entre rodadas
+        sim_nat = (simular_rodadas(dados, config_sim, sazonalidade,
+                                   cobertura_override={},
+                                   ativo_crescimento=ativo_cresc)
+                   if _cob_ativo else sim)
+
+        # --- KPIs macro (renderizados no topo, em _ph_kpi): dois grupos ---
         # Agregados por ANO DE CHEGADA das rodadas — cada rodada contribui pro
         # seu ano. Os intervalos order-up-to são consecutivos e não se sobrepõem,
         # então somar demanda_periodo não duplica (cobre a linha do tempo inteira).
-        rodadas = sim["rodadas"]
-        ano_atual = pd.Timestamp.now().year
-        anos_plano = sorted({r["ano_chegada"] for r in rodadas})
+        with _ph_kpi:
+            rodadas = sim["rodadas"]
+            ano_atual = pd.Timestamp.now().year
+            anos_plano = sorted({r["ano_chegada"] for r in rodadas})
 
-        def _kpis(rods):
-            dem = sum(r["demanda_periodo"] for r in rods)
-            prod = sum(r["producao"] for r in rods)
-            inv = sum(r["investimento"] for r in rods)
-            custo = (inv / prod) if prod else 0.0
-            cob = (prod / dem * 100) if dem else 0.0
-            return dem, prod, inv, custo, cob
+            def _kpis(rods):
+                dem = sum(r["demanda_periodo"] for r in rods)
+                prod = sum(r["producao"] for r in rods)
+                inv = sum(r["investimento"] for r in rods)
+                custo = (inv / prod) if prod else 0.0
+                cob = (prod / dem * 100) if dem else 0.0
+                return dem, prod, inv, custo, cob
 
-        def _bloco_kpis(rods):
-            dem, prod, inv, custo, cob = _kpis(rods)
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Demanda", f"{dem:,.0f} pçs")
-            k2.metric("Produção", f"{prod:,.0f} pçs",
-                      delta=f"cobre {cob:.0f}% da demanda", delta_color="off")
-            k3.metric("Investimento", f"R$ {inv:,.2f}")
-            k4.metric("Custo Médio", f"R$ {custo:.2f}/pç")
+            def _bloco_kpis(rods):
+                dem, prod, inv, custo, cob = _kpis(rods)
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("Demanda", f"{dem:,.0f} pçs")
+                k2.metric("Produção", f"{prod:,.0f} pçs",
+                          delta=f"cobre {cob:.0f}% da demanda", delta_color="off")
+                k3.metric("Investimento", f"R$ {inv:,.2f}")
+                k4.metric("Custo Médio", f"R$ {custo:.2f}/pç")
 
-        rodadas_ano = [r for r in rodadas if r["ano_chegada"] == ano_atual]
+            rodadas_ano = [r for r in rodadas if r["ano_chegada"] == ano_atual]
 
-        st.markdown(f"**📅 Deste ano ({ano_atual})** — rodadas que chegam em {ano_atual}")
-        if rodadas_ano:
-            _bloco_kpis(rodadas_ano)
-        else:
-            st.caption(f"Nenhuma rodada chega em {ano_atual}.")
+            st.markdown(f"**📅 Deste ano ({ano_atual})** — rodadas que chegam em {ano_atual}")
+            if rodadas_ano:
+                _bloco_kpis(rodadas_ano)
+            else:
+                st.caption(f"Nenhuma rodada chega em {ano_atual}.")
 
-        span = f"{anos_plano[0]}" if len(anos_plano) <= 1 else f"{anos_plano[0]}–{anos_plano[-1]}"
-        st.markdown(f"**📊 Total planejado ({span})** — somatório de todas as {len(rodadas)} rodadas")
-        _bloco_kpis(rodadas)
+            span = f"{anos_plano[0]}" if len(anos_plano) <= 1 else f"{anos_plano[0]}–{anos_plano[-1]}"
+            st.markdown(f"**📊 Total planejado ({span})** — somatório de todas as {len(rodadas)} rodadas")
+            _bloco_kpis(rodadas)
 
-        st.caption(f"Estoque líquido atual da rede (ponto de partida da projeção): "
-                   f"{sim['totais'].get('estoque_inicial', 0):,.0f} pçs")
+            st.caption(f"Estoque líquido atual da rede (ponto de partida da projeção): "
+                       f"{sim['totais'].get('estoque_inicial', 0):,.0f} pçs")
 
         # --- Resumo das rodadas (comparação de relance) ANTES do detalhe ---
         st.subheader("🏭 Rodadas de Produção")
         rodadas_df = pd.DataFrame(sim["rodadas"])
 
+        # Cobertura NATURAL de cada rodada (demanda do intervalo ÷ demanda
+        # anual) = piso do editor: abaixo disso o motor clampa (no-op)
+        _dem_anual_rede = max(float(sim["totais"].get("demanda_anual", 0)), 1.0)
+        _nat_por_iso = {
+            r["data_disparo_iso"]: r["demanda_periodo"] / _dem_anual_rede
+            for r in sim_nat["rodadas"]
+        }
+
         resumo = pd.DataFrame([{
             "Rodada": r["rodada"],
+            "_iso": r["data_disparo_iso"],
             "Disparo → Chegada": f"{r['nome_disparo']} → {r['nome_chegada']}/{r['ano_chegada']}",
             "Demanda": r["demanda_periodo"],
             "Produção": r["producao"],
             "% anual": r["pct_anual"],
+            "Cobertura natural": float(round(_nat_por_iso.get(r["data_disparo_iso"], 0) * 100)),
+            # NaN (não None) quando NÃO há antecipação → célula VAZIA no editor.
+            # None numa coluna mista viraria dtype object e o Streamlit mostraria "None".
+            "Cobertura alvo": (float(round(r["cobertura_pct"] * 100))
+                               if r["cobertura_pct"] > 0 else float("nan")),
+            "Cobre até": pd.Timestamp(r["fim_cobertura"]).strftime("%d/%m/%y")
+                         + (" ⬆" if r["cobertura_pct"] > 0 else ""),
             "Investimento": r["investimento"],
         } for _, r in rodadas_df.iterrows()])
-        st.dataframe(
-            resumo, hide_index=True, width="stretch",
+
+        # Não-admin: coluna de alvo também travada (só leitura)
+        _cols_ro = ["Rodada", "Disparo → Chegada", "Demanda", "Produção",
+                    "% anual", "Cobertura natural", "Cobre até", "Investimento"]
+        if not _is_admin:
+            _cols_ro = _cols_ro + ["Cobertura alvo"]
+
+        resumo_edit = st.data_editor(
+            resumo, hide_index=True, width="stretch", key="editor_cobertura_alvo",
+            disabled=_cols_ro,
             column_config={
                 "Rodada": st.column_config.NumberColumn("R", width="small"),
+                "_iso": None,   # coluna técnica (chave do override) — oculta
                 "Demanda": st.column_config.NumberColumn("Demanda (pçs)", format="%.0f"),
                 "Produção": st.column_config.NumberColumn("Produção (pçs)", format="%.0f"),
                 "% anual": st.column_config.NumberColumn("% da demanda anual", format="%.0f%%"),
+                "Cobertura natural": st.column_config.NumberColumn(
+                    "Cobertura natural (%)", format="%.0f%%",
+                    help="O que a rodada cobre sozinha (demanda do intervalo ÷ demanda "
+                         "anual da rede). É o piso — abaixo disso o alvo não tem efeito."),
+                "Cobertura alvo": st.column_config.NumberColumn(
+                    "Cobertura alvo (%) ✏️", min_value=0, max_value=100, step=1,
+                    format="%.0f%%",
+                    help="Antecipação deliberada. Deixe VAZIO para automático (segue o "
+                         "natural). Preencha só onde quer que esta rodada cubra MAIS que "
+                         "o natural: a janela de proteção estende e a rodada SEGUINTE "
+                         "encolhe sozinha (order-up-to). Abaixo do natural não tem efeito."),
+                "Cobre até": st.column_config.TextColumn(
+                    "Cobre até 🔒", help="Fim da proteção — natural, ou estendido (⬆) pela cobertura alvo"),
                 "Investimento": st.column_config.NumberColumn("Investimento", format="R$ %.2f"),
             },
         )
+
+        # Editor → override: só entra o que fica ACIMA do natural (+1pt de folga).
+        # Célula vazia = None/NaN → 0 (sem antecipação).
+        _cob_editado = {}
+        for _, row in resumo_edit.iterrows():
+            val = row["Cobertura alvo"]
+            pct = (float(val) / 100.0) if pd.notna(val) else 0.0
+            nat = _nat_por_iso.get(row["_iso"], 0)
+            if pct > nat + 0.01:
+                _cob_editado[row["_iso"]] = round(pct, 4)
+
+        if _cob_editado != _cob_ativo:
+            st.session_state["cobertura_alvo_preview"] = _cob_editado
+            st.rerun()
+
+        if _cob_ativo:
+            st.info(
+                f"⚖️ **Antecipação ativa em {len(_cob_ativo)} rodada(s)** — a produção "
+                f"total do horizonte se conserva: o que a rodada engordada produz a mais, "
+                f"a(s) seguinte(s) produz(em) a menos."
+                + (" _(preview — ainda não salvo)_" if _tem_preview_cob else "")
+            )
+
+        # --- Salvar / descartar o PLANO (datas + coberturas) — admin ---
+        # Um botão só: persiste rodadas_datas + cobertura_override juntos.
+        if _tem_preview:
+            _mud = []
+            if _tem_preview_datas:
+                _mud.append("calendário de disparos")
+            if _tem_preview_cob:
+                _mud.append("coberturas alvo")
+            st.warning(f"📝 Alterações não salvas no plano: {' e '.join(_mud)}.")
+            col_s1, col_s2, _ = st.columns([1.4, 1.2, 3])
+            with col_s1:
+                if _is_admin and st.button("💾 Salvar plano", type="primary"):
+                    from etl.config_store import extrair_parametros, obter_repositorio_parametros
+                    try:
+                        _cfg_novo = dict(config)
+                        _cfg_novo["planejamento"] = dict(config.get("planejamento") or {})
+                        _cfg_novo["planejamento"]["rodadas_datas"] = _datas_ativas or None
+                        if _cob_editado:
+                            _cfg_novo["planejamento"]["cobertura_override"] = _cob_editado
+                        else:
+                            _cfg_novo["planejamento"].pop("cobertura_override", None)
+                        obter_repositorio_parametros().salvar(
+                            extrair_parametros(_cfg_novo),
+                            usuario=st.session_state.get("username", "") or "admin")
+                        st.session_state.pop("cobertura_alvo_preview", None)
+                        st.session_state.pop(_CAL_KEY, None)   # resemeia calendário do salvo
+                        st.cache_data.clear()
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"❌ Falha ao salvar plano: {exc}")
+                elif not _is_admin:
+                    st.caption("Somente admin pode salvar o plano.")
+            with col_s2:
+                if st.button("↩️ Descartar alterações"):
+                    st.session_state.pop("cobertura_alvo_preview", None)
+                    st.session_state.pop(_CAL_KEY, None)
+                    st.rerun()
 
         st.caption("Abra cada rodada para ver **como se chega no número** (alvo − estoque útil).")
         for _, r in rodadas_df.iterrows():
@@ -310,6 +484,15 @@ with st.container(border=True):
         fig_est.add_hline(y=0, line_dash="dash", line_color=COR_ALERTA,
                           annotation_text="⚠️ Ruptura", annotation_position="bottom right")
 
+        # Com antecipação ativa: curva SEM override tracejada por trás —
+        # o platô sobe na rodada engordada e reconverge na chegada da seguinte
+        if _cob_ativo:
+            df_est_nat = sim_nat["estoque_projetado"]
+            fig_est.add_trace(go.Scatter(
+                x=df_est_nat["Rotulo"], y=df_est_nat["EstoqueFinal"],
+                mode="lines", name="Sem antecipação",
+                line=dict(color="gray", width=2, dash="dash"),
+            ))
         rotulos_meses = list(df_est["Rotulo"])
         for r in sim["rodadas"]:
             rotulo_disp = f"{r['nome_disparo'][:3]}/{str(r['ano_disparo'])[2:]}"
@@ -322,7 +505,8 @@ with st.container(border=True):
                                        text=f"Disparo R{r['rodada']}", showarrow=False,
                                        font=dict(size=10, color="orange"))
         fig_est.update_layout(height=400, yaxis_title="Peças em estoque",
-                              showlegend=False, margin=dict(t=50))
+                              showlegend=bool(_cob_ativo), margin=dict(t=50),
+                              legend=dict(orientation="h", yanchor="bottom", y=1.1))
         st.plotly_chart(fig_est, width="stretch")
 
         meses_ruptura = df_est[df_est["EstoqueFinal"] < 0]
@@ -372,6 +556,20 @@ COLS_FULL = [
 
 with st.container(border=True):
     st.subheader("📋 Sugestão por SKU — pedido de uma rodada")
+
+    # Esta aba lê o plano SALVO (processar_fabrica → config). Se houver
+    # antecipação/calendário em PREVIEW não salvo na Visão Geral, avisa — senão o
+    # planejador estranha a sugestão "não reagir". É a superfície de congelamento,
+    # então reflete o plano salvo de propósito. Ver docs/requisitos/cobertura-alvo-rodada.md.
+    if _tem_preview:
+        _mud_sku = ((["cobertura alvo"] if _tem_preview_cob else [])
+                    + (["calendário de disparos"] if _tem_preview_datas else []))
+        st.warning(
+            f"⚠️ Há **alterações não salvas** na Visão Geral ({' e '.join(_mud_sku)}). "
+            "Esta aba usa o **plano salvo** — a sugestão abaixo (e o congelamento) só "
+            "refletem a antecipação depois de **💾 Salvar plano** na Visão Geral."
+        )
+
     # Seletor de rodada — qual pedido de abastecimento você está montando
     rodadas_opts = listar_rodadas_selecionaveis(config)
     if rodadas_opts:

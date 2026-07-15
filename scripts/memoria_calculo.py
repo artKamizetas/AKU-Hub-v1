@@ -9,7 +9,6 @@ Uso (a partir da raiz do projeto):
 """
 
 import sys
-import yaml
 import math
 import pandas as pd
 import numpy as np
@@ -18,7 +17,7 @@ from datetime import datetime, timedelta
 
 RAIZ = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RAIZ))
-from etl.loader import carregar_dados
+from etl.loader import carregar_dados, carregar_config
 
 
 # ==============================
@@ -44,9 +43,7 @@ def calc(nome, formula, resultado):
 def main():
     sku_alvo = sys.argv[1] if len(sys.argv) > 1 else "TESTENUM"
 
-    caminho_config = RAIZ / "config.yaml"
-    with open(caminho_config, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+    config = carregar_config()   # yaml (defaults) + app.parametros (Supabase)
 
     dados = carregar_dados()
 

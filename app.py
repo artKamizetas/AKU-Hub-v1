@@ -30,7 +30,10 @@ pages_all = [
     st.Page("pages/2_Logistica.py", title="Logística", icon="📦"),
     st.Page("pages/3_Fabrica.py", title="Simulador de Produção", icon="🏭"),
     st.Page("pages/4_Pedidos.py", title="Pedidos de Compra", icon="🧾"),
-    st.Page("pages/5_Configuracoes.py", title="Configurações", icon="⚙️"),
+    # url_path fixo: é o redirect_uri do OAuth das integrações (a plataforma
+    # devolve o navegador para .../configuracoes com ?code&state).
+    st.Page("pages/5_Configuracoes.py", title="Configurações", icon="⚙️",
+            url_path="configuracoes"),
 ]
 
 # Perfis de acesso

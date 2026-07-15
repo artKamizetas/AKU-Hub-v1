@@ -2,9 +2,10 @@
 Página: Pedidos de Compra (Admin Only)
 
 Rodadas congeladas do Simulador de Produção → pedidos de compra em rascunho
-por Colégio × Super Categoria → revisão/edição de quantidades → PRONTO.
-A emissão no Bling é fase futura; até lá, o CSV do pedido (com as observações
-internas padronizadas no cabeçalho) é a ponte manual para digitar no Bling.
+por Colégio × Super Categoria → revisão/edição de quantidades → PRONTO →
+emissão em DOIS momentos: compra no Bling (AK Uniformes), depois venda no
+Olist (Art Kamizetas). Conexão/chaves das integrações ficam na aba
+Integrações de Configurações.
 
 Três níveis: rodadas congeladas → pedidos da rodada → itens do pedido.
 Leituras do schema `app` sem st.cache_data (tabelas pequenas; cache
@@ -17,10 +18,11 @@ exigir_login()
 
 import pandas as pd
 
-from pedidos import builder, estados
+from pedidos import builder, estados, emissor
 from pedidos.repositorio import (
     obter_repositorio, TransicaoInvalida, PedidoNaoEditavel,
 )
+from pedidos.integracoes.repositorio import obter_repositorio_integracoes
 
 # Gate explícito de role (mesmo padrão de 5_Configuracoes.py)
 username = st.session_state.get("username", "")
@@ -169,13 +171,19 @@ with st.container(border=True):
     view_ped = pedidos.copy()
     view_ped["Status"] = view_ped["status"].map(estados.ROTULOS_BADGE)
     view_ped["Δ"] = view_ped["qtd_final"] - view_ped["qtd_sugerida"]
+    # bling_numero/olist_numero podem não existir se o DDL 003 não foi aplicado
+    for _col in ("bling_numero", "olist_numero"):
+        if _col not in view_ped.columns:
+            view_ped[_col] = ""
     st.dataframe(
         view_ped[["titulo", "colegio", "super_categoria", "Status", "n_itens",
-                  "qtd_sugerida", "qtd_final", "Δ", "investimento_final"]]
+                  "qtd_sugerida", "qtd_final", "Δ", "investimento_final",
+                  "bling_numero", "olist_numero"]]
         .rename(columns={
             "titulo": "Título", "colegio": "Colégio", "super_categoria": "Super Categoria",
             "n_itens": "Itens", "qtd_sugerida": "Qtd Sugerida", "qtd_final": "Qtd Final",
             "investimento_final": "Investimento (R$)",
+            "bling_numero": "Nº Bling", "olist_numero": "Nº Olist",
         }),
         width="stretch", hide_index=True,
         column_config={
@@ -283,13 +291,24 @@ with st.container(border=True):
 
     elif pedido_sel["status"] == estados.PRONTO:
         with ac1:
-            if st.button("↩️ Reabrir rascunho"):
+            if st.button("📤 Emitir compra (Bling)", type="primary",
+                         key=f"emit_compra_{pedido_id}"):
+                try:
+                    res = emissor.emitir_compra_bling(
+                        pedido_id, username, repo, obter_repositorio_integracoes())
+                    _flash("success",
+                           f"Compra emitida no Bling · nº **{res['bling_numero']}**.")
+                except emissor.EmissaoFalhou as exc:
+                    _flash("error", f"Emissão da compra falhou: {exc}")
+                st.rerun()
+        with ac2:
+            if st.button("↩️ Reabrir rascunho", key=f"reabrir_{pedido_id}"):
                 ok = repo.transicionar_pedido(
                     pedido_id, estados.PRONTO, estados.RASCUNHO, username)
                 _flash("success", "Pedido reaberto para edição.") if ok else _flash(
                     "warning", "O pedido mudou de estado em outra sessão — recarregado.")
                 st.rerun()
-        with ac2:
+        with ac3:
             with st.popover("🚫 Cancelar pedido"):
                 if st.button("Confirmar cancelamento", key=f"cancelp_{pedido_id}"):
                     ok = repo.transicionar_pedido(
@@ -297,6 +316,84 @@ with st.container(border=True):
                     _flash("success", "Pedido cancelado.") if ok else _flash(
                         "warning", "O pedido mudou de estado em outra sessão — recarregado.")
                     st.rerun()
+
+    elif pedido_sel["status"] == estados.COMPRA_EMITIDA:
+        st.success(f"🛒 Compra emitida no Bling · nº **{pedido_sel.get('bling_numero','?')}** "
+                   "— falta emitir a venda no Olist.")
+        # Pré-validação do mapeamento SKU→id Olist (não bloqueia a tela se o
+        # Olist estiver fora — só desabilita o botão com o motivo)
+        _mapa, _faltantes, _erro_map = {}, [], None
+        try:
+            from pedidos.integracoes import oauth as _oauth, olist as _olist
+            _repo_int = obter_repositorio_integracoes()
+            _cfg_olist = (_repo_int.ler("olist") or {}).get("config") or {}
+            _token = _oauth.obter_access_token("olist", _repo_int)
+            _skus = itens[itens["quantidade_final"] > 0]["sku"].tolist()
+            _mapa, _faltantes = _olist.mapear_produtos_por_sku(_token, _skus)
+        except Exception as exc:
+            _erro_map = str(exc)
+
+        _erros_pre = emissor.validar_pre_emissao_olist(itens, _cfg_olist if not _erro_map else {}, _mapa)
+        if _erro_map:
+            st.warning(f"Não foi possível checar o catálogo do Olist agora: {_erro_map}")
+        elif _erros_pre:
+            for _e in _erros_pre:
+                st.warning(_e)
+
+        with ac1:
+            if st.button("📤 Emitir venda (Olist)", type="primary",
+                         disabled=bool(_erro_map or _erros_pre),
+                         key=f"emit_venda_{pedido_id}"):
+                try:
+                    res = emissor.emitir_venda_olist(
+                        pedido_id, username, repo, obter_repositorio_integracoes(),
+                        mapa_sku=_mapa)
+                    _flash("success",
+                           f"Venda emitida no Olist · nº **{res['olist_numero']}**.")
+                except emissor.EmissaoFalhou as exc:
+                    _flash("error", f"Emissão da venda falhou: {exc}")
+                st.rerun()
+
+    elif estados.emitindo(pedido_sel["status"]):
+        st.warning(
+            "⏳ **Emissão interrompida.** Este pedido ficou travado durante uma "
+            "emissão (falha entre criar no ERP e confirmar aqui). **Confira no ERP "
+            "se o pedido foi criado** antes de destravar e tentar de novo."
+        )
+        with ac1:
+            with st.popover("🔓 Destravar"):
+                st.caption("Volta o pedido ao estado anterior. Confirme antes que o "
+                           "pedido NÃO foi criado no ERP (senão vira duplicata).")
+                if st.button("Confirmar destravamento", key=f"destr_{pedido_id}"):
+                    ok = emissor.destravar(pedido_id, username, repo,
+                                           obter_repositorio_integracoes())
+                    _flash("success", "Pedido destravado.") if ok else _flash(
+                        "warning", "O estado mudou em outra sessão — recarregado.")
+                    st.rerun()
+
+    elif pedido_sel["status"] == estados.EMITIDO:
+        st.success(
+            f"📨 Emitido nos dois ERPs · compra Bling **{pedido_sel.get('bling_numero','?')}** "
+            f"· venda Olist **{pedido_sel.get('olist_numero','?')}**."
+        )
+
+    # --- Preview dos payloads de emissão (verificação humana, sem escrita) ---
+    if pedido_sel["status"] in (estados.PRONTO, estados.COMPRA_EMITIDA):
+        with st.expander("🔍 Preview dos payloads de emissão"):
+            st.caption("O JSON exato que será enviado aos ERPs — confira antes de emitir.")
+            try:
+                _prev = emissor.preview_payloads(
+                    pedido_id, repo, obter_repositorio_integracoes(),
+                    mapa_sku=locals().get("_mapa"))
+                cpv, vpv = st.columns(2)
+                with cpv:
+                    st.markdown("**Compra (Bling)**")
+                    st.json(_prev["compra"], expanded=False)
+                with vpv:
+                    st.markdown("**Venda (Olist)**")
+                    st.json(_prev["venda"], expanded=False)
+            except Exception as exc:
+                st.caption(f"Preview indisponível: {exc}")
 
     # --- Observações padronizadas p/ o Bling (sempre recompostas — refletem
     # as quantidades finais salvas, nunca texto pré-gravado) ---

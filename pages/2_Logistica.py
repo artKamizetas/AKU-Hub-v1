@@ -11,15 +11,11 @@ import pandas as pd
 from etl.logistica import processar_logistica
 from etl.vm_dinamico import calcular_vm_por_sku
 
-import yaml
-from pathlib import Path
-from etl.loader import carregar_dados
+from etl.loader import carregar_dados, carregar_config
 
 
 def _carregar():
-    caminho_config = Path(__file__).parent.parent / "config.yaml"
-    with open(caminho_config, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+    config = carregar_config()   # yaml (defaults) + app.parametros (Supabase)
     dados = carregar_dados()
     return dados, config
 

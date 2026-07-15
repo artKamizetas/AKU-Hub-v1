@@ -88,6 +88,6 @@ Requer `.streamlit/secrets.toml` com as credenciais do Supabase e da autenticaç
 
 ## Dependências principais
 
-`streamlit`, `pandas`, `plotly`, `postgrest`, `pyyaml`, `ruamel.yaml`
+`streamlit`, `pandas`, `plotly`, `postgrest`, `pyyaml`
 (preserva comentários ao salvar `config.yaml`), `streamlit-authenticator`,
 `openpyxl` (só para exportar `data/VM_Calculado.xlsx`).

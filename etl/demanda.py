@@ -862,26 +862,66 @@ def _par_ceil(x: float) -> int:
     return q + 1 if q % 2 != 0 else q
 
 
+def _data_por_demanda_acumulada(inicio, alvo_unid: float, demanda_rede_mes: dict,
+                                horizonte_meses: int = 24) -> pd.Timestamp:
+    """
+    Menor data >= inicio em que a demanda acumulada da REDE (curva mensal
+    `demanda_rede_mes`, mês-calendário → unidades) atinge `alvo_unid`.
+
+    É a tradução do knob da Cobertura Alvo: o planejador declara "% da
+    demanda anual" e esta função responde "até que data isso cobre" —
+    respeitando a sazonalidade (um % que cruza a alta compra pouco tempo;
+    na baixa, compra muitos meses). Mesma convenção de frações de mês do
+    fracionar_janela_por_mes (dias proporcionais). Cap no horizonte para
+    não fugir do calendário planejável.
+    """
+    cursor = pd.Timestamp(inicio).normalize()
+    acumulado = 0.0
+    for _ in range(horizonte_meses):
+        inicio_mes = cursor.replace(day=1)
+        proximo_mes = inicio_mes + pd.DateOffset(months=1)
+        dias_trecho = (proximo_mes - cursor).days
+        dias_do_mes = (proximo_mes - inicio_mes).days
+        contrib = demanda_rede_mes.get(cursor.month, 0.0) * (dias_trecho / dias_do_mes)
+        if contrib > 0 and acumulado + contrib >= alvo_unid:
+            falta = alvo_unid - acumulado
+            dias_necessarios = math.ceil(dias_trecho * falta / contrib)
+            return cursor + pd.Timedelta(days=max(dias_necessarios, 0))
+        acumulado += contrib
+        cursor = proximo_mes
+    return cursor
+
+
 def simular_politica_reabastecimento(dados: dict, config: dict,
                                      ativo_crescimento: bool = None,
-                                     data_hoje=None, dem: pd.DataFrame = None) -> pd.DataFrame:
+                                     data_hoje=None, dem: pd.DataFrame = None,
+                                     cobertura_override: dict = None) -> pd.DataFrame:
     """
     Política de revisão periódica order-up-to (R,S) com PROJEÇÃO FORWARD por SKU.
 
     Para cada SKU, caminha as rodadas em ordem cronológica mantendo o estoque
     projetado (estoque atual − backlog, consumido mês a mês e reabastecido a
     cada chegada). Em cada rodada r:
-        DemandaPeriodo_r   = demanda no intervalo [chegada_r, chegada_{r+1})
+        DemandaPeriodo_r   = demanda no intervalo [chegada_r, fim_protecao_r)
         EstoqueSeguranca_r = Fator de Serviço × Variação da Demanda × DemandaPeriodo_r
         EstoqueAlvo_r      = DemandaPeriodo_r + EstoqueSeguranca_r
         Pedido_r           = arredonda_par(máx(EstoqueAlvo_r − EstoqueProjetado_na_chegada, 0))
+
+    fim_protecao_r é normalmente a chegada da rodada seguinte. COBERTURA ALVO
+    (`cobertura_override`, {data_disparo ISO → fração 0-1 da demanda anual da
+    rede}; None = lê config["planejamento"]["cobertura_override"]): antecipação
+    deliberada do planejador — estende o fim de proteção da rodada até a
+    demanda acumulada da rede atingir o alvo (clamp: nunca antes do natural).
+    A rodada seguinte encolhe SOZINHA (vê estoque projetado mais alto); a
+    produção total do horizonte se conserva — antecipar redistribui, não infla.
+    Ver docs/requisitos/cobertura-alvo-rodada.md.
 
     É o motor comum: a Sugestão por SKU é o Pedido da rodada selecionada; a
     Visão Geral é a soma por rodada. Retorna uma linha por (SKU, rodada) com
     [SKU, ID_produto, rodada, mes_disparo, ano_disparo, data_disparo,
      data_chegada, data_chegada_seguinte, MesesIntervalo, DemandaPeriodo,
      DemandaPeriodoAlta, DemandaPeriodoBaixa, EstoqueSeguranca, EstoqueAlvo,
-     EstoqueProjetado, Pedido, contem_alta].
+     EstoqueProjetado, Pedido, contem_alta, FimCobertura, CoberturaPct].
     """
     data_hoje = pd.Timestamp.now().normalize() if data_hoje is None else pd.Timestamp(data_hoje)
 
@@ -911,7 +951,41 @@ def simular_politica_reabastecimento(dados: dict, config: dict,
             "MesesIntervalo", "DemandaPeriodo", "DemandaPeriodoAlta",
             "DemandaPeriodoBaixa", "EstoqueSeguranca",
             "EstoqueAlvo", "EstoqueProjetado", "Pedido", "contem_alta",
+            "FimCobertura", "CoberturaPct",
         ])
+
+    # ------------------------------------------------------------------
+    # Cobertura Alvo: converte "% da demanda anual da rede" por rodada em
+    # um fim de proteção ESTENDIDO (a consumação entre rodadas continua na
+    # chegada real — só o alvo da rodada é dimensionado na janela maior).
+    # ------------------------------------------------------------------
+    if cobertura_override is None:
+        cobertura_override = (config.get("planejamento", {}) or {}).get(
+            "cobertura_override", {}) or {}
+
+    demanda_rede_mes = {}
+    for dpm in demanda_por_sku.values():
+        for m, v in dpm.items():
+            demanda_rede_mes[m] = demanda_rede_mes.get(m, 0.0) + v
+    demanda_anual_rede = sum(demanda_rede_mes.values())
+
+    fim_protecao, pct_aplicado = {}, {}
+    for r in seq:
+        fim_natural = r["data_chegada_seguinte"]
+        chave = pd.Timestamp(r["data_disparo"]).strftime("%Y-%m-%d")
+        pct = min(max(float(cobertura_override.get(chave, 0) or 0), 0.0), 1.0)
+        fim, aplicado = fim_natural, 0.0
+        if pct > 0 and demanda_anual_rede > 0:
+            alvo_unid = pct * demanda_anual_rede
+            natural_unid = sum(
+                demanda_rede_mes.get(m, 0) * f
+                for m, f in fracionar_janela_por_mes(r["data_chegada"], fim_natural))
+            if alvo_unid > natural_unid:   # clamp: nunca cobre menos que o natural
+                fim = max(_data_por_demanda_acumulada(
+                    r["data_chegada"], alvo_unid, demanda_rede_mes), fim_natural)
+                aplicado = pct
+        fim_protecao[r["numero"]] = fim
+        pct_aplicado[r["numero"]] = aplicado
 
     rows = []
     for sku, dem_mes in demanda_por_sku.items():
@@ -927,8 +1001,10 @@ def simular_politica_reabastecimento(dados: dict, config: dict,
                 stock -= dem_mes.get(m, 0) * frac
             estoque_projetado = stock
 
-            # Intervalo de proteção: desta chegada até a próxima
-            meses_int = fracionar_janela_por_mes(A, r["data_chegada_seguinte"])
+            # Intervalo de proteção: desta chegada até a próxima (ou até o
+            # fim ESTENDIDO quando a rodada tem Cobertura Alvo)
+            fim_int = fim_protecao[r["numero"]]
+            meses_int = fracionar_janela_por_mes(A, fim_int)
             demanda_periodo_alta = sum(
                 dem_mes.get(m, 0) * frac for m, frac in meses_int if m in janela_alta)
             demanda_periodo_baixa = sum(
@@ -958,6 +1034,8 @@ def simular_politica_reabastecimento(dados: dict, config: dict,
                 "EstoqueAlvo": estoque_alvo, "EstoqueProjetado": estoque_projetado,
                 "Pedido": pedido, "PedidoSemEstoque": pedido_sem_estoque,
                 "contem_alta": contem_alta,
+                "FimCobertura": fim_int,
+                "CoberturaPct": pct_aplicado[r["numero"]],
             })
             prev = A
 

@@ -9,6 +9,121 @@ Records). Adicione no topo as mais recentes.
 
 ---
 
+## 2026-07 · Migrações DDL por script (Management API), não mais copiar-e-colar
+As migrações do schema `app` (`docs/sql/00N_*.sql`) deixam de ser aplicadas à mão no
+SQL Editor: `python scripts/migrar.py aplicar` roda as pendentes e registra num ledger
+`app.schema_migrations` (idempotente). **Por que não a `service_key` que o app já tem:**
+ela fala com o **PostgREST**, que faz CRUD e **não roda DDL** — não é falta de permissão,
+o verbo `CREATE/ALTER TABLE` não existe nessa API. DDL exige credencial de outro plano.
+Escolhida a **Management API** (`POST /v1/projects/{ref}/database/query`) com um **Personal
+Access Token**, em vez de conexão Postgres direta (`psycopg`): zero dependência nova
+(`httpx` já existe) e o token é literalmente uma chave de API. **Trade-off aceito:** o PAT
+é de CONTA (alcança todos os projetos do dono), enquanto a senha do banco seria escopada
+ao projeto — mitigado mantendo o PAT **só no ambiente de quem migra** (env
+`SUPABASE_ACCESS_TOKEN`), nunca no secrets.toml. **Por que fora do runtime do app** (script,
+não botão no dashboard): (1) **menor privilégio** — o processo que atende cliques não pode
+carregar uma credencial capaz de `DROP TABLE`; (2) o Streamlit reexecuta o script a cada
+rerun, o que exigiria guardas para não migrar em loop. O project ref (não é segredo) sai de
+`SUPABASE_PROJECT_REF` ou da `[supabase].url`. Comando `marcar` faz **baseline** das
+migrações já aplicadas à mão (001/002) — registra sem rodar, senão o runner tentaria
+recriar objetos existentes. Migrações precisam ser transaction-safe (o runner envolve cada
+uma em `begin/commit` junto do registro no ledger — atômico).
+
+## 2026-07 · Emissão de pedidos: Bling (compra) + Olist (venda), dois momentos
+A ponte Simulador → ERPs deixa de ser manual (CSV). Um pedido nosso PRONTO agora vira
+**pedido de COMPRA no Bling** (conta AK Uniformes, API v3 `POST /pedidos/compras`,
+fornecedor = Art Kamizetas) e, num **segundo momento explícito**, **pedido de VENDA no
+Olist/Tiny** (conta Art Kamizetas — a fábrica NÃO usa Bling; `POST /pedidos`,
+`numeroOrdemCompra` = nº do Bling, cliente = AK Uniformes). **Por quê dois momentos e
+não um botão só:** decisão do usuário — a compra é aprovada/emitida primeiro (gera o nº
+que amarra a venda) e a venda pode ser disparada depois, possivelmente por outra pessoa.
+**Ordem obrigatória** Bling→Olist é natural (a amarração depende do nº do Bling).
+Descartada a ideia de importação por planilha: o Bling não importa pedidos de COMPRA por
+planilha, e o Olist tem API v3 boa. **Estados** (evolução dos reservados na Fase 0, DDL
+`003`): RASCUNHO→PRONTO→COMPRA_EMITINDO→COMPRA_EMITIDA→VENDA_EMITINDO→EMITIDO; os
+`*_EMITINDO` são locks CAS anti duplo-clique (mesmo padrão do CONGELANDO). **Falha ANTES
+do POST** → rollback ao estado anterior; **falha DEPOIS** (POST ok, gravar id falhou) →
+fica travado em `*_EMITINDO`, UI oferece "Destravar" + aviso de conferir no ERP (a
+idempotência por `bling_id`/`olist_id` não cobre esse caso — o id não chegou a ser
+gravado). **Chaves e tokens no Supabase** (`app.integracao`, NÃO secrets.toml — filesystem
+do Cloud é efêmero), geridos na aba **Integrações** de Configurações; OAuth2
+authorization_code com `state` anti-CSRF **persistido no banco** (a sessão do Streamlit
+morre no redirect) e callback no topo da 5_Configuracoes (`?code&state`); redirect_uri =
+URL do app + `/configuracoes` (`url_path` fixo). SKUs idênticos nos 2 sistemas → mapa
+SKU→id Olist via `GET /produtos` (a API do Olist referencia produto por id interno, não
+SKU), com pré-validação de faltantes. Módulos: `pedidos/integracoes/` (repositorio, oauth,
+bling, olist — clientes com `http` injetável; payloads PUROS) + `pedidos/emissor.py`;
+auditoria em `app.integracao_evento` (nunca grava tokens). **Verificação sem escrita nos
+ERPs** (decisão do usuário): preview do JSON na UI + GET de contrato do Bling + CAS que
+bloqueia a 2ª sessão antes do POST. **Pré-requisitos externos pendentes:** registrar o app
+no portal developer do Bling e criar o aplicativo no Olist (ambos com o redirect real);
+coletar os IDs de negócio. `httpx` virou dependência explícita.
+
+## 2026-07 · Visão Geral vira o cockpit único do plano de rodadas
+A edição do **calendário de rodadas** (`rodadas_datas`) saiu de Configurações →
+Produção e passou para a **Visão Geral do Simulador**, ao lado das coberturas alvo;
+em Configurações fica só um ponteiro read-only mostrando as datas atuais. **Por
+quê:** ao adicionar a coluna editável de cobertura alvo, "o plano de rodadas" ficou
+partido em duas telas (datas num lugar, coberturas noutro) — conflito de arquitetura
+de informação levantado pelo usuário. O princípio decisivo foi **editar onde se vê o
+efeito**: cobertura E data mudam a simulação inteira, então ambas pertencem à tela
+que mostra o resultado ao vivo (tela de Configuração é para parâmetros sem feedback
+imediato). Datas e coberturas agora têm **preview de sessão** e um único botão
+**"Salvar plano"** (admin) que persiste `rodadas_datas` + `cobertura_override`
+juntos via `config_store` (o merge trata `rodadas_datas` como lista→substitui e
+`planejamento` como deep-merge por chave). `lead_time` e `período histórico` seguem
+em Configurações (parâmetros do motor, não "o plano"). O calendário usa um
+**`st.multiselect` de mês/ano** (pills), não uma tabela: os disparos são sempre
+1º-de-mês (o motor consome em resolução de mês e o `cobertura_override` é keyed
+pela ISO), então o conjunto de opções é finito e as datas ficam normalizadas ao
+dia 1 — trocou a lista longa de date-pickers por uma linha de pills que cresce. Segundo ajuste no mesmo
+passo: a coluna de cobertura deixou de **pré-preencher todas as rodadas com a
+cobertura natural** (parecia que o usuário tinha antecipado todas) — virou DUAS
+colunas: "Cobertura natural (%)" read-only + "Cobertura alvo (%)" editável e **vazia
+por padrão**, preenchida só onde há antecipação deliberada. Não-admin vê tudo com
+editores travados.
+
+## 2026-07 · Cobertura Alvo por rodada (antecipação deliberada de produção)
+O planejador pode "engordar" uma rodada além da sua cobertura natural: coluna
+editável **Cobertura alvo (%)** na Visão Geral (% da demanda ANUAL da rede). O
+motor converte o % em extensão da janela de proteção (`_data_por_demanda_acumulada`
+caminha a curva de demanda da rede até acumular o alvo) e dimensiona o
+`EstoqueAlvo` sobre a janela maior; a rodada SEGUINTE encolhe sozinha pela
+projeção forward (order-up-to é auto-liquidante) — a produção total do horizonte
+se conserva (antecipar redistribui, não infla). **Por quê:** caso real de
+jul/2026 — abastecimento atrasado; a diretoria quis puxar volume da R2 (Out, 75%)
+para a R1 (Jul, 11%) sem mexer nas datas das rodadas. Decisões: knob em **%** e
+não em tempo (a sazonalidade torna tempo não-linear — o motor converte % → data);
+piso na cobertura natural e teto em 100%; keyed por `data_disparo` ISO (estável à
+renumeração das rodadas); persistido em `planejamento.cobertura_override` junto
+dos demais parâmetros. Preview ao vivo na UI (tabela + curva de estoque com a
+linha "sem antecipação" tracejada) antes de salvar (admin). Smoke com dados
+reais: R1 11%→39% (cobre até 12/Jan/27 — entra na alta → SS sobe p/ 99%), R2
+75%→47%, R3–R5 intactas, Σ produção idêntica (43.452). Spec:
+[requisitos/cobertura-alvo-rodada.md](requisitos/cobertura-alvo-rodada.md).
+
+## 2026-07 · Parâmetros migrados do config.yaml para o Supabase (app.parametros)
+Executada a migração deferida (ver "v1 vai ao ar…"): tudo que a página de
+Configurações edita (**Categoria B** — metas, vm, logistica, demanda, colégios,
+alias, segmentos, exceções, planejamento) vive em **`app.parametros`** (JSONB, 1
+linha `default`) com auditoria append-only em **`app.parametros_historico`**
+(quem/quando/estado completo). **`loader.carregar_config()`** é o ponto único de
+leitura de config do app (páginas E scripts): `deep_merge(config.yaml ←
+Supabase)`, cache 5 min, **degradação graciosa** (Supabase fora → yaml puro +
+aviso). Regra do merge: dicts mesclam chave a chave, MAS coleções que o gestor
+possui por inteiro (`colegios`, `colegios_alias`, `grupo_segmento`,
+`excecoes_sku`, `planejamento.cobertura_override`) **substituem o bloco** — item
+apagado na UI não ressuscita do default do yaml. **Por quê:** filesystem efêmero
+do Streamlit Cloud — o save no config.yaml evaporava a cada redeploy, invalidando
+a camada "gestor decide". O `config.yaml` segue no git como fonte dos defaults
+(Categoria A: IDs de depósito, situações, thresholds); `ruamel.yaml` saiu do
+caminho de escrita (e do requirements — nenhum código a importa mais). A tabela
+`planejamentos` do plano congelado **não foi criada**: `app.rodada_congelada`
+(Pedidos Fase 0) já cumpre o papel de cenário salvo. Porta de acesso:
+`etl/config_store.py` (mesmo padrão de gateway testável do
+`pedidos/repositorio.py`). DDL: `docs/sql/002_app_parametros.sql`; seed único:
+`scripts/seed_parametros.py`.
+
 ## 2026-07 · Pedidos de Compra Fase 0: congelar rodada + rascunhos no schema `app`
 Primeira fase da ponte Simulador → Bling: o output do `processar_fabrica` deixa de
 morrer no CSV e vira documento. **Congelar rodada** = snapshot imutável (resultado
@@ -54,7 +169,8 @@ mecanismo, não a metodologia antiga). Suíte de testes atualizada. **Perda acei
 "what-if" de antecipar rodada saiu junto; se voltar, deve ser um editor de **datas**
 temporário, não meses fixos.
 
-## 2026-07 · v1 vai ao ar com persistência via config.yaml (migração Supabase deferida)
+## ~~2026-07 · v1 vai ao ar com persistência via config.yaml (migração Supabase deferida)~~
+> Superada pela entrada "Parâmetros migrados do config.yaml para o Supabase" acima.
 Decisão consciente: subir a v1 com as configs no `config.yaml` **mesmo sabendo que no
 Streamlit Cloud a escrita não persiste no redeploy** (filesystem efêmero). A migração
 pro Supabase (retenção + cenários + auditoria) fica pra uma fase seguinte, para ir ao

@@ -286,6 +286,17 @@ class RepositorioPedidos:
             df = df.sort_values("sku").reset_index(drop=True)
         return df
 
+    def obter_pedido(self, pedido_id: str) -> dict:
+        """Linha única do pedido ({} se não existe) — usado pelo emissor."""
+        linhas = self._selecionar(TAB_PEDIDO, {"id": pedido_id})
+        return linhas[0] if linhas else {}
+
+    def obter_rodada_leve(self, rodada_id: str) -> dict:
+        """Rodada SEM os jsonb (payload de emissão só precisa das datas/metadados)."""
+        linhas = self._selecionar(TAB_RODADA, {"id": rodada_id},
+                                  colunas=_COLS_RODADA_LEVE)
+        return linhas[0] if linhas else {}
+
     # -----------------------------------------------------------------
     # Escrita operacional
     # -----------------------------------------------------------------
@@ -317,6 +328,19 @@ class RepositorioPedidos:
             self._atualizar(TAB_PEDIDO, {"id": pedido_id},
                             {"atualizado_em": agora, "atualizado_por": usuario})
         return atualizados
+
+    def registrar_ids_emissao(self, pedido_id: str, campos: dict, usuario: str) -> None:
+        """
+        Grava os identificadores devolvidos pelo ERP na emissão
+        (bling_id/bling_numero ou olist_id/olist_numero). Whitelist de
+        colunas — nada além dos ids de emissão passa por aqui.
+        """
+        permitidos = {"bling_id", "bling_numero", "olist_id", "olist_numero"}
+        valores = {k: str(v) for k, v in campos.items() if k in permitidos}
+        if not valores:
+            return
+        valores.update({"atualizado_em": _agora_iso(), "atualizado_por": usuario})
+        self._atualizar(TAB_PEDIDO, {"id": pedido_id}, valores)
 
     def transicionar_pedido(self, pedido_id: str, de: str, para: str, usuario: str) -> bool:
         """

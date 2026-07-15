@@ -25,15 +25,19 @@ calcular_sazonalidade = _demanda.calcular_sazonalidade_empresa
 
 def simular_rodadas(dados: dict, config: dict, sazonalidade: pd.DataFrame,
                     buffer_override: float = None,
-                    pct_por_rodada: dict = None, ativo_crescimento: bool = None) -> dict:
+                    cobertura_override: dict = None,
+                    ativo_crescimento: bool = None) -> dict:
     """
     Simula as rodadas de produção agregando a política order-up-to por SKU.
 
     O calendário vem sempre de config["planejamento"]["rodadas_datas"].
     ativo_crescimento: liga/desliga o fator de crescimento (toggle).
-    buffer_override/pct_por_rodada: aceitos por compatibilidade de assinatura;
-        não usados no modelo order-up-to (a margem vem do nível de serviço, e
-        o tamanho de cada rodada emerge da projeção forward, não de um %).
+    cobertura_override: {data_disparo ISO → fração 0-1 da demanda anual} —
+        Cobertura Alvo por rodada (antecipação deliberada; ver
+        docs/requisitos/cobertura-alvo-rodada.md). None = lê do config;
+        passar um dict permite preview ao vivo na UI sem salvar.
+    buffer_override: aceito por compatibilidade de assinatura; não usado no
+        modelo order-up-to (a margem vem do nível de serviço).
 
     Retorna dict com: demanda_mensal, rodadas, totais, estoque_projetado.
     """
@@ -41,7 +45,8 @@ def simular_rodadas(dados: dict, config: dict, sazonalidade: pd.DataFrame,
 
     # Demanda mensal por SKU + simulação order-up-to (bottom-up)
     dem = _demanda.calcular_demanda_mensal_por_sku(dados, config, ativo_crescimento)
-    sim = _demanda.simular_politica_reabastecimento(dados, config, dem=dem)
+    sim = _demanda.simular_politica_reabastecimento(
+        dados, config, dem=dem, cobertura_override=cobertura_override)
 
     df_demanda = _demanda.agregar_demanda_mensal_total(dem, sazonalidade)
     demanda_dict = df_demanda.set_index("Mes")["Demanda"].to_dict()
@@ -81,6 +86,11 @@ def simular_rodadas(dados: dict, config: dict, sazonalidade: pd.DataFrame,
             chegada = pd.Timestamp(meta["data_chegada"])
             pct_anual = (producao / demanda_anual * 100) if demanda_anual > 0 else 0
 
+            # Cobertura Alvo (mesma p/ todos os SKUs da rodada): % aplicado
+            # e até quando a proteção vai (fim natural ou estendido)
+            cobertura_pct = float(s["CoberturaPct"].iloc[0]) if len(s) > 0 else 0.0
+            fim_cobertura = pd.Timestamp(s["FimCobertura"].iloc[0]) if len(s) > 0 else chegada
+
             detalhe_col = (
                 s[s["Pedido"] > 0].groupby("Colegio")["Pedido"].sum()
                 .round().astype(int).reset_index()
@@ -90,6 +100,9 @@ def simular_rodadas(dados: dict, config: dict, sazonalidade: pd.DataFrame,
 
             resultado_rodadas.append({
                 "rodada": int(meta["rodada"]),
+                "data_disparo_iso": pd.Timestamp(meta["data_disparo"]).strftime("%Y-%m-%d"),
+                "cobertura_pct": round(cobertura_pct, 4),          # 0 = sem override
+                "fim_cobertura": fim_cobertura,                    # fim da proteção (natural/estendido)
                 "mes_disparo": int(meta["mes_disparo"]),
                 "ano_disparo": int(meta["ano_disparo"]),
                 "nome_disparo": NOMES_MES[int(meta["mes_disparo"]) - 1],

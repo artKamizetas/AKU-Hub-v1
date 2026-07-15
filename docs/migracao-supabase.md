@@ -1,9 +1,19 @@
-# Migração das Configurações para Supabase — Decisões (a implementar)
+# Migração das Configurações para Supabase — Decisões
 
-> **STATUS: DEFERIDO / NÃO IMPLEMENTADO.** A v1 roda com persistência via
-> `config.yaml` (ruim no Streamlit Cloud — ver abaixo), **deliberadamente**, pra ir
-> pro ar mais rápido. Este documento congela as decisões já tomadas para que o plano
-> de implementação futuro **não precise re-discutir nada** — só executar.
+> **STATUS: ✅ IMPLEMENTADO (jul/2026) — Fases 0 e 1.** O plano congelado abaixo
+> foi executado como especificado, com três ajustes registrados em
+> [decisoes.md](decisoes.md):
+> 1. **Tabelas no schema `app`** (criado pela Fase 0 de Pedidos de Compra), não
+>    no `public` — DDL em `docs/sql/002_app_parametros.sql`, seed em
+>    `scripts/seed_parametros.py`.
+> 2. **`planejamentos` (Categoria C) não foi criada** — `app.rodada_congelada`
+>    (001) já cumpre o papel de cenário salvo. Fase 2 considerada entregue.
+> 3. **Merge com substituição de coleções**: `colegios`, `colegios_alias`,
+>    `grupo_segmento`, `excecoes_sku` e `planejamento.cobertura_override`
+>    substituem o bloco inteiro no merge (item apagado na UI não ressuscita do
+>    yaml). Implementação: `etl/config_store.py` + `loader.carregar_config()`.
+>
+> O texto original segue abaixo como registro das decisões.
 
 ---
 

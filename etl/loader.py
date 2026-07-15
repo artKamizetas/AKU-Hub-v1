@@ -132,6 +132,47 @@ def converter_data_flexivel(valor):
 _PAGE_SIZE = 1000  # limite default do PostgREST por request
 
 
+@st.cache_data(ttl=300)
+def carregar_config() -> dict:
+    """
+    Config efetivo do app: config.yaml (defaults, Categoria A) mesclado com
+    app.parametros do Supabase (Categoria B — o que o gestor edita na página
+    de Configurações e precisa sobreviver a redeploy no Streamlit Cloud).
+
+    Degradação graciosa: Supabase indisponível → yaml puro + aviso (o app
+    continua funcionando com os defaults do git).
+
+    Único ponto de leitura de config do app — páginas e scripts NÃO devem
+    abrir config.yaml diretamente. Página 5 salva via config_store e chama
+    st.cache_data.clear() (invalida este cache junto).
+    """
+    from pathlib import Path
+
+    import yaml
+
+    from etl.config_store import deep_merge, obter_repositorio_parametros
+
+    caminho = Path(__file__).resolve().parent.parent / "config.yaml"
+    with open(caminho, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    try:
+        dados = obter_repositorio_parametros().ler()
+        if dados:
+            config = deep_merge(config, dados)
+    except Exception as e:  # sem Supabase (dev offline, DDL não aplicado…)
+        try:
+            st.warning(
+                f"⚠️ Parâmetros do Supabase indisponíveis — usando defaults "
+                f"do config.yaml (alterações da página de Configurações podem "
+                f"não estar refletidas). Detalhe: {e}"
+            )
+        except Exception:
+            pass  # fora do Streamlit (scripts CLI): segue com o yaml puro
+
+    return config
+
+
 @st.cache_resource
 def _conn_supabase():
     """
