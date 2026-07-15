@@ -8,7 +8,7 @@ Rode com:
 import streamlit as st
 
 st.set_page_config(
-    page_title="AKU Dashboard",
+    page_title="AKU Hub",
     page_icon="assets/aku-favicon.png",
     layout="wide",
     initial_sidebar_state="collapsed",

@@ -33,7 +33,7 @@ def verificar_acesso():
 
     authenticator = stauth.Authenticate(
         credentials=creds,
-        cookie_name=auth_config.get("cookie_name", "bling_dashboard_auth"),
+        cookie_name=auth_config.get("cookie_name", "aku_hub_auth"),
         cookie_key=auth_config.get("cookie_key", "chave_secreta_padrao"),
         cookie_expiry_days=auth_config.get("cookie_expiry_days", 7),
         auto_hash=True,
@@ -42,7 +42,7 @@ def verificar_acesso():
     authenticator.login(
         location="main",
         fields={
-            "Form name": "Login — Bling Dashboard",
+            "Form name": "Login — AKU Hub",
             "Username": "Usuário",
             "Password": "Senha",
             "Login": "Entrar",

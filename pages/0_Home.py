@@ -18,7 +18,7 @@ with st.spinner("Carregando dados..."):
     dados, config = _carregar()
 val = dados["validacao"]
 
-st.title("📊 Bling Dashboard")
+st.title("📊 AKU Hub")
 st.caption("Inteligência de Estoque, PCP e Vendas")
 
 if not val["ok"]:
