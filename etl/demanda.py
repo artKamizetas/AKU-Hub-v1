@@ -26,6 +26,32 @@ def _nivel_para_z(nivel: float) -> float:
     return NIVEL_SERVICO_Z.get(round(nivel), 1.65)
 
 
+def restringir_a_ativos(dados: dict) -> dict:
+    """
+    Cópia rasa de `dados` com `itens` e `detalhes` restritos aos produtos
+    ATIVOS — os IDs presentes em dados["produtos"] (que o loader já filtra por
+    situacao == "A"). Idempotente: reaplicar num dict já restrito é no-op.
+
+    Garante que histórico de vendas e categorização de produtos inativos
+    (ex: colégios descontinuados como OVD) não entrem nos agregados do
+    Simulador de Produção nem da Reposição de Loja — nem como demanda, nem
+    como colégio. Comercial/Daily e KPIs de faturamento seguem com o
+    histórico completo (fora do escopo deste filtro).
+    """
+    produtos = dados.get("produtos")
+    if produtos is None or "ID" not in getattr(produtos, "columns", []):
+        return dados
+    ativos = set(produtos["ID"].astype(str).str.strip())
+
+    out = dict(dados)
+    for chave in ("itens", "detalhes"):
+        df = dados.get(chave)
+        if df is not None and "ID_produto" in df.columns:
+            ids = df["ID_produto"].astype(str).str.strip()
+            out[chave] = df[ids.isin(ativos)]
+    return out
+
+
 def estoque_seguranca(demanda_intervalo: float, contem_mes_alta: bool, config: dict,
                       meses_intervalo: float = 1.0) -> float:
     """
@@ -60,6 +86,7 @@ def calcular_sazonalidade_empresa(dados: dict, config: dict) -> pd.DataFrame:
     PesoNormalizado: soma = 12.0 (mês médio = 1.0).
     Usado como fallback de última instância pela sazonalidade por colégio.
     """
+    dados = restringir_a_ativos(dados)
     cfg = config.get("planejamento", {})
     dt_ini = pd.Timestamp(str(cfg.get("periodo_historico_inicio", "2025-01-01")))  # str(): ruamel
     dt_fim = pd.Timestamp(str(cfg.get("periodo_historico_fim", "2026-02-28")))
@@ -121,6 +148,7 @@ def calcular_sazonalidade_por_colegio(dados: dict, config: dict) -> pd.DataFrame
     FonteSazonalidade], FonteSazonalidade em {"colegio", "empresa", "uniforme"}.
     Colégio "" (produto sem Marca_sku) sempre cai no fallback da empresa.
     """
+    dados = restringir_a_ativos(dados)
     cfg_demanda = config.get("demanda") or {}
     min_vendas = cfg_demanda.get("min_vendas_colegio", 30)
     min_meses = cfg_demanda.get("min_meses_colegio", 6)
@@ -305,6 +333,7 @@ def calcular_crescimento_observado(dados: dict, config: dict, data_hoje=None) ->
 
     Retorna {colegio: {"__geral__": g|None, "segmentos": {segmento: g}}}.
     """
+    dados = restringir_a_ativos(dados)
     CLAMP = (0.5, 2.0)
     VOL_MIN = 30
     data_hoje = pd.Timestamp.now().normalize() if data_hoje is None else pd.Timestamp(data_hoje)
@@ -446,6 +475,7 @@ def calcular_proporcao_baixa(dados: dict, config: dict, data_hoje=None) -> float
     curta (tamanho central) são pegos por override manual (proporcao_baixa_efetiva).
     Ex: 0.44 = "a baixa vende 44% do que a alta vende".
     """
+    dados = restringir_a_ativos(dados)
     data_hoje = pd.Timestamp.now().normalize() if data_hoje is None else pd.Timestamp(data_hoje)
     janela = _ordenar_janela_cronologica((config.get("demanda", {}) or {}).get("janela_alta", [12, 1, 2]))
     if not janela:
@@ -532,6 +562,7 @@ def calcular_demanda_mensal_por_sku(dados: dict, config: dict, ativo_crescimento
     if ativo_crescimento is None:
         ativo_crescimento = config.get("demanda", {}).get("aplicar_crescimento_fabrica", True)
 
+    dados = restringir_a_ativos(dados)
     cfg_fab = config.get("fabrica", {})
     excecoes = config.get("excecoes_sku") or {}
     correcao_global = cfg_fab.get("correcao_manual", 0)

@@ -435,11 +435,13 @@ with tab1:
         "mudar vira regra — o resto segue como está. A coluna _Sugestão_ é só uma dica."
     )
 
-    from etl.demanda import colegio_efetivo, parece_ruido
+    from etl.demanda import colegio_efetivo, parece_ruido, restringir_a_ativos
 
     config = carregar_config()
     alias_atual = config.get("colegios_alias") or {}
-    dados_colegios = carregar_dados()
+    # Só produtos ATIVOS: colégios descontinuados (ex: OVD) não devem aparecer
+    # nos editores de Colégios / Grupo→Segmento.
+    dados_colegios = restringir_a_ativos(carregar_dados())
 
     _crus = dados_colegios["detalhes"]["Marca_sku"].fillna("").astype(str).str.strip()
     _crus = _crus[(_crus != "") & (_crus.str.lower() != "nan")]
