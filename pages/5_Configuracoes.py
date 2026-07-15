@@ -8,8 +8,24 @@ Gerencia todos os parâmetros de produção via UI:
 """
 
 import streamlit as st
-from auth import exigir_login
-exigir_login()
+
+# =================================================================
+# RETORNO DO OAUTH (?code&state) — capturar ANTES do login
+# Esta página é o ALVO do redirect das integrações. O usuário volta do Bling/
+# Olist numa SESSÃO NOVA do Streamlit (session_state zerado). Guardamos code+
+# state em session_state AGORA, antes de qualquer coisa que possa consumir a
+# query string (o login), e limpamos a URL. O callback lá embaixo processa.
+# =================================================================
+_qp = st.query_params
+if "code" in _qp and "state" in _qp and "_oauth_retorno" not in st.session_state:
+    st.session_state["_oauth_retorno"] = {"code": _qp["code"], "state": _qp["state"]}
+    st.query_params.clear()   # tira o code da URL (F5 não re-dispara a troca)
+
+# verificar_acesso (NÃO exigir_login): reautentica pelo COOKIE numa sessão nova.
+# exigir_login só olhava session_state, então o retorno do OAuth caía em
+# "faça login pela página principal" e o callback nunca rodava.
+from auth import verificar_acesso
+_nome, username, role = verificar_acesso()
 
 import yaml
 from datetime import datetime, date
@@ -20,37 +36,27 @@ from etl.config_store import extrair_parametros, obter_repositorio_parametros
 from pedidos.integracoes.repositorio import obter_repositorio_integracoes
 from pedidos.integracoes import oauth, bling as cliente_bling, olist as cliente_olist
 
-# Pega as credenciais do session_state (setado em auth.py)
-# Busca o role no secrets.toml baseado no username
-username = st.session_state.get("username", "")
-auth_config = dict(st.secrets.get("auth_config", {}))
-usernames = auth_config.get("credentials", {}).get("usernames", {})
-user_data = usernames.get(username, {})
-role = user_data.get("role", "")
-
 if role != "admin":
     st.error("⛔ Acesso negado. Apenas administradores podem acessar esta página.")
     st.stop()
 
 # =================================================================
-# CALLBACK OAUTH (integrações) — roda ANTES das abas
-# A plataforma devolve o navegador para .../configuracoes?code=&state=.
+# CALLBACK OAUTH (integrações) — processa o retorno capturado no topo
 # O state foi persistido no banco (a sessão do Streamlit morre no redirect),
 # então buscamos por ele para saber de qual plataforma é o retorno.
 # =================================================================
-_qp = st.query_params
-if "code" in _qp and "state" in _qp:
-    _code, _state = _qp["code"], _qp["state"]
+_ret = st.session_state.pop("_oauth_retorno", None)
+if _ret:
     try:
         _repo_int = obter_repositorio_integracoes()
-        _integ = _repo_int.buscar_por_state(_state)
+        _integ = _repo_int.buscar_por_state(_ret["state"])
         if not _integ:
             st.error("Retorno OAuth com state inválido ou expirado. Refaça a conexão.")
         else:
             _plat = _integ["id"]
             _tokens = oauth.trocar_code(
                 _plat, _integ.get("client_id", ""), _integ.get("client_secret", ""),
-                _code, _integ.get("redirect_uri", ""))
+                _ret["code"], _integ.get("redirect_uri", ""))
             _repo_int.concluir_oauth(_plat, _tokens["access_token"],
                                      _tokens["refresh_token"], _tokens["expira_em"],
                                      username or "admin")
@@ -58,8 +64,6 @@ if "code" in _qp and "state" in _qp:
             st.success(f"✅ {_plat.capitalize()} conectado com sucesso!")
     except Exception as _exc:
         st.error(f"Falha ao concluir a conexão OAuth: {_exc}")
-    finally:
-        st.query_params.clear()
 
 MESES_NOME_CFG = {
     1: "Janeiro", 2: "Fevereiro", 3: "Março", 4: "Abril", 5: "Maio", 6: "Junho",
