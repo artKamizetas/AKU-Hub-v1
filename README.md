@@ -129,7 +129,7 @@ Deploy gratuito no [share.streamlit.io](https://share.streamlit.io) — o Supaba
    git push -u origin main
    ```
 2. Em [share.streamlit.io](https://share.streamlit.io), clique em **New app** e preencha:
-   - **Repository:** `SEU_USUARIO/aku-simulacao`
+   - **Repository:** `SEU_USUARIO/AKU-Hub-v1`
    - **Branch:** `main`
    - **Main file path:** `app.py`
 3. Em **Advanced settings → Secrets**, cole o conteúdo do seu `secrets.toml` (bloco `[supabase]` + `[auth_config]` da seção acima).
@@ -142,7 +142,7 @@ Para atualizar o app após mudanças no código, basta `git push` — o redeploy
 ## Estrutura do projeto
 
 ```
-aku-simulacao/
+AKU-Hub-v1/
 ├── app.py                         # Ponto de entrada do Streamlit
 ├── auth.py                        # Autenticação e controle de acesso por perfil
 ├── config.yaml                    # Metas, IDs e configurações operacionais
