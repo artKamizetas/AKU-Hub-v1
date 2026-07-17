@@ -268,22 +268,24 @@ if len(pedidos) == 0:
 @st.fragment
 def _secao_pedido():
     with st.container(border=True):
-        # --- Escolha do pedido (dentro da caixa) ---
+        # --- Escolha do pedido: "Ver pedido" (h3) + selectbox ---
+        st.subheader("🔍 Ver pedido")
         idx_pedido = st.selectbox(
-            "🔍 Ver pedido",
+            "Ver pedido",
             options=list(range(len(pedidos))),
             format_func=lambda i: (
                 f"{estados.ROTULOS_BADGE.get(pedidos.iloc[i]['status'], '')} · "
                 f"{pedidos.iloc[i]['colegio']} · {pedidos.iloc[i]['super_categoria']}"
             ),
+            label_visibility="collapsed",
         )
         pedido_sel = pedidos.iloc[idx_pedido]
         pedido_id = pedido_sel["id"]
         itens = repo.listar_itens(pedido_id)
         pode_editar = estados.editavel(pedido_sel["status"])
 
-        # --- Título + status (dentro da caixa) ---
-        st.subheader(pedido_sel["titulo"])
+        # --- Nome do pedido (h2) + status ---
+        st.header(pedido_sel["titulo"])
         st.caption(
             f"{estados.ROTULOS_BADGE.get(pedido_sel['status'], pedido_sel['status'])} · "
             f"criado em {pd.Timestamp(pedido_sel['criado_em']):%d/%m/%Y %H:%M} "
@@ -292,7 +294,7 @@ def _secao_pedido():
         if not pode_editar and pedido_sel["status"] == estados.PRONTO:
             st.info("Pedido **Pronto** — reabra o rascunho para editar quantidades.")
 
-        # --- Itens (editor) + totais ---
+        # --- Itens (editor) ---
         cols_editor = ["sku", "produto", "tamanho", "categoria",
                        "quantidade_sugerida", "quantidade_final"]
         df_editor = itens[cols_editor].copy()
@@ -314,16 +316,10 @@ def _secao_pedido():
                     help="Quantidade que será emitida — editável no rascunho"),
             },
         )
-
-        # Totais recalculados do editor (feedback imediato antes de salvar)
+        # Totais recalculados do editor (exibidos mais abaixo, acima dos botões)
         _qtd_final = pd.to_numeric(editado["quantidade_final"], errors="coerce").fillna(0)
         _delta = int(_qtd_final.sum() - itens["quantidade_sugerida"].sum())
         _invest = float((_qtd_final.values * itens["custo_unit"].values).sum())
-        st.caption(
-            f"**{int((_qtd_final > 0).sum())}** SKUs · "
-            f"**{int(_qtd_final.sum()):,}** pares finais "
-            f"(Δ {_delta:+d} vs sugerido) · **{_fmt_brl(_invest)}**"
-        )
 
         _memoria_sugestao(itens)
 
@@ -392,15 +388,42 @@ def _secao_pedido():
             )
             st.code(obs_bling, language=None)
 
+        # --- CSV do pedido (preparado aqui; botão renderizado na linha de ações) ---
+        df_csv = itens[["sku", "produto", "tamanho", "categoria",
+                        "quantidade_sugerida", "quantidade_final", "custo_unit"]].copy()
+        df_csv["investimento"] = df_csv["quantidade_final"] * df_csv["custo_unit"]
+        df_csv = df_csv.rename(columns={
+            "sku": "SKU", "produto": "Produto", "tamanho": "Tam", "categoria": "Categoria",
+            "quantidade_sugerida": "Qtd Sugerida", "quantidade_final": "Qtd Final",
+            "custo_unit": "Custo Unit (R$)", "investimento": "Investimento (R$)",
+        })
+        cabecalho = "".join(f"# {linha}\n" for linha in obs_bling.split("\n")) + "\n"
+        csv_pedido = (cabecalho + df_csv.to_csv(index=False, sep=";", decimal=",")).encode("utf-8")
+
+        def _botao_csv():
+            st.download_button(
+                "⬇️ Baixar CSV do pedido",
+                data=csv_pedido,
+                file_name=f"pedido_{pedido_sel['colegio']}_{pedido_sel['super_categoria']}"
+                          f"_{rodada_sel['mes_disparo']:02d}{rodada_sel['ano_disparo']}.csv",
+                mime="text/csv", width="stretch", key=f"csv_{pedido_id}",
+            )
+
         # =========================================================
-        # AÇÕES DO PEDIDO (parte inferior da caixa)
+        # Informação geral + AÇÕES (parte inferior, em colunas iguais)
         # =========================================================
         st.divider()
-        ac1, ac2, ac3 = st.columns([1.2, 1.2, 3])
+        st.caption(
+            f"**{int((_qtd_final > 0).sum())}** SKUs · "
+            f"**{int(_qtd_final.sum()):,}** pares finais "
+            f"(Δ {_delta:+d} vs sugerido) · **{_fmt_brl(_invest)}**"
+        )
 
-        if pedido_sel["status"] == estados.RASCUNHO:
-            with ac1:
-                if st.button("💾 Salvar alterações", type="primary"):
+        status = pedido_sel["status"]
+        if status == estados.RASCUNHO:
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                if st.button("💾 Salvar alterações", type="primary", width="stretch"):
                     # Diff editor × banco: só linhas alteradas (ordem preservada —
                     # num_rows="fixed" mantém o alinhamento posicional com itens)
                     alteracoes = [
@@ -417,15 +440,15 @@ def _secao_pedido():
                         except PedidoNaoEditavel as exc:
                             _flash("warning", str(exc))
                     st.rerun()
-            with ac2:
-                if st.button("✅ Marcar como Pronto"):
+            with c2:
+                if st.button("✅ Marcar como Pronto", width="stretch"):
                     ok = repo.transicionar_pedido(
                         pedido_id, estados.RASCUNHO, estados.PRONTO, username)
                     _flash("success", "Pedido marcado como **Pronto**.") if ok else _flash(
                         "warning", "O pedido mudou de estado em outra sessão — recarregado.")
                     st.rerun()
-            with ac3:
-                with st.popover("🚫 Cancelar pedido"):
+            with c3:
+                with st.popover("🚫 Cancelar pedido", width="stretch"):
                     st.caption("O pedido cancelado sai do fluxo (fica registrado p/ auditoria).")
                     if st.button("Confirmar cancelamento", key=f"cancel_{pedido_id}"):
                         ok = repo.transicionar_pedido(
@@ -433,10 +456,13 @@ def _secao_pedido():
                         _flash("success", "Pedido cancelado.") if ok else _flash(
                             "warning", "O pedido mudou de estado em outra sessão — recarregado.")
                         st.rerun()
+            with c4:
+                _botao_csv()
 
-        elif pedido_sel["status"] == estados.PRONTO:
-            with ac1:
-                if st.button("📤 Emitir compra (Bling)", type="primary",
+        elif status == estados.PRONTO:
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                if st.button("📤 Emitir compra (Bling)", type="primary", width="stretch",
                              key=f"emit_compra_{pedido_id}"):
                     try:
                         res = emissor.emitir_compra_bling(
@@ -446,25 +472,28 @@ def _secao_pedido():
                     except emissor.EmissaoFalhou as exc:
                         _flash("error", f"Emissão da compra falhou: {exc}")
                     st.rerun()
-            with ac2:
-                if st.button("↩️ Reabrir rascunho", key=f"reabrir_{pedido_id}"):
+            with c2:
+                if st.button("↩️ Reabrir rascunho", width="stretch", key=f"reabrir_{pedido_id}"):
                     ok = repo.transicionar_pedido(
                         pedido_id, estados.PRONTO, estados.RASCUNHO, username)
                     _flash("success", "Pedido reaberto para edição.") if ok else _flash(
                         "warning", "O pedido mudou de estado em outra sessão — recarregado.")
                     st.rerun()
-            with ac3:
-                with st.popover("🚫 Cancelar pedido"):
+            with c3:
+                with st.popover("🚫 Cancelar pedido", width="stretch"):
                     if st.button("Confirmar cancelamento", key=f"cancelp_{pedido_id}"):
                         ok = repo.transicionar_pedido(
                             pedido_id, estados.PRONTO, estados.CANCELADO, username)
                         _flash("success", "Pedido cancelado.") if ok else _flash(
                             "warning", "O pedido mudou de estado em outra sessão — recarregado.")
                         st.rerun()
+            with c4:
+                _botao_csv()
 
-        elif pedido_sel["status"] == estados.COMPRA_EMITIDA:
-            with ac1:
-                if st.button("📤 Emitir venda (Olist)", type="primary",
+        elif status == estados.COMPRA_EMITIDA:
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("📤 Emitir venda (Olist)", type="primary", width="stretch",
                              disabled=bool(_erro_map or _erros_pre),
                              key=f"emit_venda_{pedido_id}"):
                     try:
@@ -476,10 +505,13 @@ def _secao_pedido():
                     except emissor.EmissaoFalhou as exc:
                         _flash("error", f"Emissão da venda falhou: {exc}")
                     st.rerun()
+            with c2:
+                _botao_csv()
 
-        elif estados.emitindo(pedido_sel["status"]):
-            with ac1:
-                with st.popover("🔓 Destravar"):
+        elif estados.emitindo(status):
+            c1, c2 = st.columns(2)
+            with c1:
+                with st.popover("🔓 Destravar", width="stretch"):
                     st.caption("Volta o pedido ao estado anterior. Confirme antes que o "
                                "pedido NÃO foi criado no ERP (senão vira duplicata).")
                     if st.button("Confirmar destravamento", key=f"destr_{pedido_id}"):
@@ -488,25 +520,13 @@ def _secao_pedido():
                         _flash("success", "Pedido destravado.") if ok else _flash(
                             "warning", "O estado mudou em outra sessão — recarregado.")
                         st.rerun()
+            with c2:
+                _botao_csv()
 
-        # --- CSV do pedido (ponte manual p/ digitar no Bling) ---
-        df_csv = itens[["sku", "produto", "tamanho", "categoria",
-                        "quantidade_sugerida", "quantidade_final", "custo_unit"]].copy()
-        df_csv["investimento"] = df_csv["quantidade_final"] * df_csv["custo_unit"]
-        df_csv = df_csv.rename(columns={
-            "sku": "SKU", "produto": "Produto", "tamanho": "Tam", "categoria": "Categoria",
-            "quantidade_sugerida": "Qtd Sugerida", "quantidade_final": "Qtd Final",
-            "custo_unit": "Custo Unit (R$)", "investimento": "Investimento (R$)",
-        })
-        cabecalho = "".join(f"# {linha}\n" for linha in obs_bling.split("\n")) + "\n"
-        csv_pedido = (cabecalho + df_csv.to_csv(index=False, sep=";", decimal=",")).encode("utf-8")
-        st.download_button(
-            "⬇️ Baixar CSV do pedido",
-            data=csv_pedido,
-            file_name=f"pedido_{pedido_sel['colegio']}_{pedido_sel['super_categoria']}"
-                      f"_{rodada_sel['mes_disparo']:02d}{rodada_sel['ano_disparo']}.csv",
-            mime="text/csv",
-        )
+        else:  # EMITIDO / SINCRONIZADO / CANCELADO — sem ações, só o CSV
+            c1, _ = st.columns([1, 3])
+            with c1:
+                _botao_csv()
 
 
 _secao_pedido()
