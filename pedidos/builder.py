@@ -41,6 +41,45 @@ def _normalizar_dim(valor, fallback: str) -> str:
     return s
 
 
+# Drivers da SugestaoProducao gravados por item (chave curada → coluna do
+# processar_fabrica). É a memória enxuta que explica a quantidade sugerida na
+# revisão do rascunho, sem carregar o resultado_skus da rede inteira. A conta
+# order-up-to encadeia: demanda_periodo (+ alta/baixa) + estoque_seguranca =
+# estoque_meta; (estoque_rede − backlog) projeta o estoque na chegada;
+# estoque_meta − estoque_projetado = quantidade sugerida.
+_DRIVERS_MEMORIA = {
+    "vendas_hist": "VendasHist",                 # base histórica (última alta)
+    "demanda_periodo": "DemandaProjetada",       # demanda até a próxima chegada
+    "demanda_periodo_alta": "DemandaPeriodoAlta",
+    "demanda_periodo_baixa": "DemandaPeriodoBaixa",
+    "estoque_rede": "EstoqueRede",               # saldo físico da rede no cálculo
+    "backlog": "Backlog",
+    "estoque_seguranca": "EstoqueSeguranca",
+    "estoque_meta": "EstoqueMeta",               # estoque-alvo (order-up-to S)
+    "estoque_projetado": "EstoqueProjetado",     # projetado na chegada
+    "nivel_servico": "NivelServico",
+    "janela_label": "JanelaLabel",
+}
+
+
+def _memoria_sugerida(linha) -> dict:
+    """
+    Extrai da linha do processar_fabrica a memória curada da sugestão.
+    Usa .get para tolerar DataFrames sintéticos/parciais (colunas ausentes
+    viram None). Números viram float/int nativos (jsonb não aceita numpy).
+    """
+    memoria = {}
+    for chave, coluna in _DRIVERS_MEMORIA.items():
+        valor = linha.get(coluna)
+        if valor is None or (not isinstance(valor, str) and pd.isna(valor)):
+            memoria[chave] = None
+        elif isinstance(valor, str):
+            memoria[chave] = valor
+        else:
+            memoria[chave] = float(valor)
+    return memoria
+
+
 def identidade_rodada(config: dict, mes_disparo: int, ano_disparo: int,
                       data_referencia) -> dict:
     """
@@ -149,6 +188,7 @@ def agrupar_pedidos(df_resultado: pd.DataFrame, produtos: pd.DataFrame,
                 "quantidade_sugerida": int(linha["SugestaoProducao"]),
                 "quantidade_final": int(linha["SugestaoProducao"]),
                 "custo_unit": round(float(linha.get("CustoUnit", 0) or 0), 2),
+                "memoria_sugerida": _memoria_sugerida(linha),
             })
         grupos.append({
             "colegio": colegio,

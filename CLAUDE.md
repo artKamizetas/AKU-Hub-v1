@@ -120,7 +120,13 @@ tira **snapshot imutável** (resultado integral por SKU + config completo + data
 referência) e gera **pedidos rascunho por Colégio × SuperCategoria** (1 pedido nosso ↔
 1 pedido de compra no Bling ↔ 1 pedido de venda no Olist). Revisão/edição na 4_Pedidos:
 `quantidade_sugerida` (imutável, snapshot) vs `quantidade_final` (editável só em
-RASCUNHO — trigger no banco é a trava real), depois PRONTO → emissão.
+RASCUNHO — trigger no banco é a trava real), depois PRONTO → emissão. Cada item
+carrega também `memoria_sugerida` (jsonb, DDL 004) — cópia CURADA e enxuta dos
+drivers order-up-to que geraram a sugestão (demanda do período alta/baixa,
+estoque de segurança, estoque-alvo, estoque da rede, backlog, projetado na
+chegada, nível de serviço). É o "por que essa quantidade" exibido na revisão do
+rascunho SEM carregar o `resultado_skus` pesado da rede; congelada no INSERT,
+nunca atualizada.
 
 - **Persistência**: schema **`app`** do Supabase (gravável) — `rodada_congelada`
   (snapshot, jsonb), `pedido_compra`, `pedido_compra_item`, `integracao`

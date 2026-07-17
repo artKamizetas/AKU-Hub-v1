@@ -51,6 +51,61 @@ def _fmt_brl(x: float) -> str:
     return f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
+# Rótulos das colunas da memória de cálculo por SKU (ordem de exibição =
+# a cadeia order-up-to: base → demanda → alvo → posição → sugestão)
+_MEMORIA_COLS = {
+    "vendas_hist": "Vendas hist. (alta)",
+    "demanda_periodo": "Demanda período",
+    "demanda_periodo_alta": "…alta",
+    "demanda_periodo_baixa": "…baixa",
+    "estoque_seguranca": "Estoque segurança",
+    "estoque_meta": "Estoque-alvo",
+    "estoque_rede": "Estoque rede",
+    "backlog": "Backlog",
+    "estoque_projetado": "Projetado na chegada",
+}
+
+
+def _memoria_sugestao(itens: pd.DataFrame) -> None:
+    """
+    Painel read-only 'por que essa quantidade': os drivers congelados da
+    sugestão (memoria_sugerida por item), ao lado do SKU e da qtd sugerida —
+    sem carregar o resultado_skus pesado da rodada. Degrada com aviso quando
+    a rodada foi congelada antes desta memória existir (jsonb vazio)."""
+    with st.expander("🧮 Por que essas quantidades? (memória de cálculo)"):
+        if "memoria_sugerida" not in itens.columns:
+            st.info("Rodada congelada antes desta versão — memória indisponível.")
+            return
+        linhas = []
+        for _, it in itens.iterrows():
+            mem = it["memoria_sugerida"] or {}
+            if not isinstance(mem, dict) or not mem:
+                continue
+            linha = {"SKU": it["sku"]}
+            for chave, rotulo in _MEMORIA_COLS.items():
+                valor = mem.get(chave)
+                linha[rotulo] = round(valor, 1) if isinstance(valor, (int, float)) else None
+            ns = mem.get("nivel_servico")   # já em pontos percentuais (99, 92…)
+            linha["Nível serviço"] = f"{ns:.0f}%" if isinstance(ns, (int, float)) else "—"
+            linha["Qtd sugerida"] = int(it["quantidade_sugerida"])
+            linhas.append(linha)
+
+        if not linhas:
+            st.info(
+                "Esta rodada foi congelada antes da memória de cálculo por item "
+                "existir — abra o snapshot da rodada para conferir."
+            )
+            return
+
+        st.caption(
+            "Política **order-up-to**: `Demanda período + Estoque segurança = "
+            "Estoque-alvo`; subtrai-se o estoque projetado na chegada "
+            "(`Estoque rede − Backlog`, consumido até a rodada chegar) → **Qtd "
+            "sugerida**. Valores congelados no momento do cálculo."
+        )
+        st.dataframe(pd.DataFrame(linhas), width="stretch", hide_index=True)
+
+
 st.title("🧾 Pedidos de Compra")
 st.caption(
     "Rodadas congeladas do Simulador de Produção, divididas em pedidos por "
@@ -249,6 +304,8 @@ with st.container(border=True):
         f"**{int(_qtd_final.sum()):,}** pares finais "
         f"(Δ {_delta:+d} vs sugerido) · **{_fmt_brl(_invest)}**"
     )
+
+    _memoria_sugestao(itens)
 
     # --- Ações por estado ---
     ac1, ac2, ac3 = st.columns([1.2, 1.2, 3])

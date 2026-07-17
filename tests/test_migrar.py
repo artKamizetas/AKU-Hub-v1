@@ -116,15 +116,17 @@ class TestCredenciais:
 
 class TestAplicar:
     def test_aplica_pendentes_e_registra_no_ledger(self, capsys):
-        # ledger com 001/002 já baselined → só 003 é pendente
-        reg = {"001_app_pedidos.sql": "x", "002_app_parametros.sql": "y"}
+        # ledger com tudo baselined menos a última → só a última é pendente
+        aplicadas = [a.name for a in migrar.listar_arquivos()]
+        ultima = aplicadas[-1]
+        reg = {nome: "x" for nome in aplicadas if nome != ultima}
         cli = ClienteFake(ledger=reg)
         migrar.cmd_aplicar(cli)
-        # bootstrap + leitura do ledger + exatamente 1 'begin;' (só o 003)
+        # bootstrap + leitura do ledger + exatamente 1 'begin;' (só a última)
         assert cli.executados[0] == migrar.SQL_BOOTSTRAP
         begins = [s for s in cli.executados if s.startswith("begin;")]
         assert len(begins) == 1
-        assert "003_app_integracoes.sql" in begins[0]
+        assert ultima in begins[0]
         assert "insert into app.schema_migrations" in begins[0]
 
     def test_dry_run_nao_executa_migracao(self):

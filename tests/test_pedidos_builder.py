@@ -121,6 +121,37 @@ class TestAgruparPedidos:
         df = df_fabrica([("A", "A", "P", "c", "SC", "COL", 0, 1.0, "R1")])
         assert builder.agrupar_pedidos(df, produtos_map([("A", "1")]), "t", 8, 2026) == []
 
+    def test_memoria_sugerida_extrai_drivers(self):
+        """Item carrega a memória curada da sugestão (drivers order-up-to),
+        em tipos nativos JSON-serializáveis (sem numpy)."""
+        df = pd.DataFrame([{
+            "SKU": "A", "Produto": "Prod A", "Tamanho": "P", "Categoria": "Calça",
+            "SuperCategoria": "CALÇAS", "Colegio": "NEVES", "SugestaoProducao": 12,
+            "CustoUnit": 50.0, "JanelaLabel": "R1",
+            "VendasHist": 30, "DemandaProjetada": 40.0, "DemandaPeriodoAlta": 33.0,
+            "DemandaPeriodoBaixa": 7.0, "EstoqueRede": 10, "Backlog": 2,
+            "EstoqueSeguranca": 6.0, "EstoqueMeta": 46, "EstoqueProjetado": 8.0,
+            "NivelServico": 99,   # pontos percentuais (99, 92…), não fração
+        }])
+        grupos = builder.agrupar_pedidos(df, produtos_map([("A", "1")]), "t", 8, 2026)
+        mem = grupos[0]["itens"][0]["memoria_sugerida"]
+        assert mem["demanda_periodo"] == 40.0
+        assert mem["estoque_meta"] == 46.0
+        assert mem["estoque_projetado"] == 8.0
+        assert mem["nivel_servico"] == 99.0
+        assert mem["janela_label"] == "R1"
+        json.dumps(mem)   # nativo, sem numpy
+
+    def test_memoria_sugerida_tolera_colunas_ausentes(self):
+        """DataFrame parcial (sem as colunas de driver) → memória com None,
+        ainda serializável (não quebra o congelamento)."""
+        df = df_fabrica([("A", "A", "P", "c", "SC", "COL", 4, 1.0, "R1")])
+        grupos = builder.agrupar_pedidos(df, produtos_map([("A", "1")]), "t", 8, 2026)
+        mem = grupos[0]["itens"][0]["memoria_sugerida"]
+        assert mem["demanda_periodo"] is None
+        assert mem["janela_label"] == "R1"   # essa coluna existe no sintético
+        json.dumps(mem)
+
 
 # ---------------------------------------------------------------------------
 # validar_pre_congelamento
