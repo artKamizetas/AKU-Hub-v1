@@ -326,25 +326,56 @@ with st.container(border=True):
             resumo, hide_index=True, width="stretch", key="editor_cobertura_alvo",
             disabled=_cols_ro,
             column_config={
-                "Rodada": st.column_config.NumberColumn("R", width="small"),
+                "Rodada": st.column_config.NumberColumn(
+                    "R", width="small",
+                    help="Número da rodada de produção, em ordem no calendário. "
+                         "Cada rodada é um disparo de fabricação."),
                 "_iso": None,   # coluna técnica (chave do override) — oculta
-                "Demanda": st.column_config.NumberColumn("Demanda (pçs)", format="%.0f"),
-                "Produção": st.column_config.NumberColumn("Produção (pçs)", format="%.0f"),
-                "% anual": st.column_config.NumberColumn("% da demanda anual", format="%.0f%%"),
+                "Disparo → Chegada": st.column_config.TextColumn(
+                    "Disparo → Chegada",
+                    help="Quando a produção é disparada e quando as peças chegam "
+                         "prontas para vender. O intervalo entre os dois é o lead "
+                         "time de fabricação."),
+                "Demanda": st.column_config.NumberColumn(
+                    "Demanda (pçs)", format="%.0f",
+                    help="Quantas peças o mercado deve pedir no período que esta "
+                         "rodada precisa cobrir (da chegada dela até a próxima rodada "
+                         "chegar). É a necessidade — não o que será fabricado."),
+                "Produção": st.column_config.NumberColumn(
+                    "Produção (pçs)", format="%.0f",
+                    help="Quantas peças fabricar nesta rodada. Pode ser menor que a "
+                         "demanda porque o estoque que você já tem (e o que rodadas "
+                         "anteriores anteciparam) abate parte da necessidade."),
+                "% anual": st.column_config.NumberColumn(
+                    "% da demanda anual", format="%.0f%%",
+                    help="Quanto esta rodada fabrica, comparado à demanda do ano "
+                         "inteiro da rede. Mede o tamanho do lote produzido — não o "
+                         "tempo que ele cobre."),
                 "Cobertura natural": st.column_config.NumberColumn(
                     "Cobertura natural (%)", format="%.0f%%",
-                    help="O que a rodada cobre sozinha (demanda do intervalo ÷ demanda "
-                         "anual da rede). É o piso — abaixo disso o alvo não tem efeito."),
+                    help="Quanto da demanda do ano esta rodada cobre sozinha, no seu "
+                         "intervalo natural (da chegada dela até a próxima chegar). É "
+                         "o piso: definir uma cobertura alvo abaixo deste valor não "
+                         "tem efeito."),
                 "Cobertura alvo": st.column_config.NumberColumn(
                     "Cobertura alvo (%) ✏️", min_value=0, max_value=100, step=1,
                     format="%.0f%%",
-                    help="Antecipação deliberada. Deixe VAZIO para automático (segue o "
-                         "natural). Preencha só onde quer que esta rodada cubra MAIS que "
-                         "o natural: a janela de proteção estende e a rodada SEGUINTE "
-                         "encolhe sozinha (order-up-to). Abaixo do natural não tem efeito."),
+                    help="Antecipação deliberada: até que fatia da demanda do ano você "
+                         "quer que esta rodada cubra. Deixe VAZIO para o automático "
+                         "(segue o natural). Preencha só para cobrir MAIS que o natural "
+                         "— a rodada estende a proteção e a SEGUINTE encolhe sozinha, "
+                         "então o total do ano não muda. É um destino, não uma soma: "
+                         "pôr 20% significa 'cobrir até 20%', não 'natural + 20%'. "
+                         "Abaixo do natural não tem efeito."),
                 "Cobre até": st.column_config.TextColumn(
-                    "Cobre até 🔒", help="Fim da proteção — natural, ou estendido (⬆) pela cobertura alvo"),
-                "Investimento": st.column_config.NumberColumn("Investimento", format="R$ %.2f"),
+                    "Cobre até 🔒",
+                    help="Data em que a proteção desta rodada termina. Normalmente é "
+                         "quando a próxima rodada chega; o ícone ⬆ indica que a "
+                         "cobertura alvo esticou essa data para frente."),
+                "Investimento": st.column_config.NumberColumn(
+                    "Investimento", format="R$ %.2f",
+                    help="Custo de fabricar as peças desta rodada (produção × custo "
+                         "unitário de cada SKU). É quanto de capital a rodada imobiliza."),
             },
         )
 
