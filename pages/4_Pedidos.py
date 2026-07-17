@@ -505,139 +505,150 @@ with st.container(border=True):
 # AÇÃO EM LOTE — seleção múltipla na tabela + botões (aprovar / reabrir /
 # cancelar / emitir compra Bling / emitir venda Olist)
 # =================================================================
-with st.container(border=True):
-    st.subheader("Pedidos da rodada — ação em lote")
+@st.fragment
+def _secao_lote():
+    """
+    Fragmento isolado: clicar num checkbox da tabela dispara um rerun SÓ
+    deste fragmento — não re-executa listar_pedidos (N+1 no Supabase) nem o
+    detalhe/Olist lá em cima. Some com o 'piscar/carregar' a cada clique.
+    Os botões de ação chamam st.rerun() (escopo app) para refletir a mudança
+    na página inteira + a mensagem de resultado.
+    """
+    with st.container(border=True):
+        st.subheader("Pedidos da rodada — ação em lote")
 
-    view_ped = pedidos.copy()
-    view_ped["Status"] = view_ped["status"].map(estados.ROTULOS_BADGE)
-    view_ped["Δ"] = view_ped["qtd_final"] - view_ped["qtd_sugerida"]
-    # bling_numero/olist_numero podem não existir se o DDL 003 não foi aplicado
-    for _col in ("bling_numero", "olist_numero"):
-        if _col not in view_ped.columns:
-            view_ped[_col] = ""
-    st.caption(
-        "Marque as linhas (☑) e use os botões abaixo para agir em vários pedidos "
-        "de uma vez. Para ver/editar um pedido, use **🔍 Ver pedido** lá em cima. "
-        "O cabeçalho da coluna de seleção marca/desmarca tudo."
-    )
-    evento = st.dataframe(
-        view_ped[["titulo", "colegio", "super_categoria", "Status", "n_itens",
-                  "qtd_sugerida", "qtd_final", "Δ", "investimento_final",
-                  "bling_numero", "olist_numero"]]
-        .rename(columns={
-            "titulo": "Título", "colegio": "Colégio", "super_categoria": "Super Categoria",
-            "n_itens": "Itens", "qtd_sugerida": "Qtd Sugerida", "qtd_final": "Qtd Final",
-            "investimento_final": "Investimento (R$)",
-            "bling_numero": "Nº Bling", "olist_numero": "Nº Olist",
-        }),
-        width="stretch", hide_index=True, height=560,
-        on_select="rerun", selection_mode="multi-row",
-        key=f"sel_pedidos_{rodada_id}",
-        column_config={
-            "Investimento (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
-        },
-    )
-
-    # Posições selecionadas → pedidos (view_ped preserva a ordem/índice de `pedidos`)
-    _rows = list(getattr(evento.selection, "rows", []) if evento else [])
-    sel = pedidos.iloc[_rows] if _rows else pedidos.iloc[0:0]
-
-    # -----------------------------------------------------------------
-    # Barra de AÇÕES EM LOTE (aparece com ≥1 selecionado; cada botão age só
-    # nas linhas cujo estado permite aquela ação — seleção mista é ok)
-    # -----------------------------------------------------------------
-    if len(sel) >= 1:
-        _rasc = sel[sel["status"] == estados.RASCUNHO]
-        _pronto = sel[sel["status"] == estados.PRONTO]
-        _compra = sel[sel["status"] == estados.COMPRA_EMITIDA]
-        _reabrir = sel[sel["status"] == estados.PRONTO]
-        _cancelaveis = sel[sel["status"].isin([estados.RASCUNHO, estados.PRONTO])]
-
-        st.divider()
-        st.markdown(
-            f"**{len(sel)}** selecionado(s) · **{int(sel['qtd_final'].sum()):,}** pares "
-            f"finais · **{_fmt_brl(float(sel['investimento_final'].sum()))}**"
+        view_ped = pedidos.copy()
+        view_ped["Status"] = view_ped["status"].map(estados.ROTULOS_BADGE)
+        view_ped["Δ"] = view_ped["qtd_final"] - view_ped["qtd_sugerida"]
+        # bling_numero/olist_numero podem não existir se o DDL 003 não foi aplicado
+        for _col in ("bling_numero", "olist_numero"):
+            if _col not in view_ped.columns:
+                view_ped[_col] = ""
+        st.caption(
+            "Marque as linhas (☑) e use os botões abaixo para agir em vários pedidos "
+            "de uma vez. Para ver/editar um pedido, use **🔍 Ver pedido** lá em cima. "
+            "O cabeçalho da coluna de seleção marca/desmarca tudo."
+        )
+        evento = st.dataframe(
+            view_ped[["titulo", "colegio", "super_categoria", "Status", "n_itens",
+                      "qtd_sugerida", "qtd_final", "Δ", "investimento_final",
+                      "bling_numero", "olist_numero"]]
+            .rename(columns={
+                "titulo": "Título", "colegio": "Colégio", "super_categoria": "Super Categoria",
+                "n_itens": "Itens", "qtd_sugerida": "Qtd Sugerida", "qtd_final": "Qtd Final",
+                "investimento_final": "Investimento (R$)",
+                "bling_numero": "Nº Bling", "olist_numero": "Nº Olist",
+            }),
+            width="stretch", hide_index=True, height=560,
+            on_select="rerun", selection_mode="multi-row",
+            key=f"sel_pedidos_{rodada_id}",
+            column_config={
+                "Investimento (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
+            },
         )
 
-        b1, b2, b3, b4, b5 = st.columns(5)
+        # Posições selecionadas → pedidos (view_ped preserva a ordem/índice de `pedidos`)
+        _rows = list(getattr(evento.selection, "rows", []) if evento else [])
+        sel = pedidos.iloc[_rows] if _rows else pedidos.iloc[0:0]
 
-        # Aprovar: RASCUNHO → PRONTO
-        with b1:
-            if st.button(f"✅ Aprovar ({len(_rasc)})", type="primary",
-                         disabled=_rasc.empty, width="stretch",
-                         help="Marca os selecionados em Rascunho como Pronto"):
-                suc, fal = _executar_lote(
-                    _rasc, lambda r: (
-                        repo.transicionar_pedido(
-                            r["id"], estados.RASCUNHO, estados.PRONTO, username),
-                        "o estado mudou em outra sessão"))
-                _flash_resumo_lote("Aprovação", suc, fal)
-                st.rerun()
+        # -----------------------------------------------------------------
+        # Barra de AÇÕES EM LOTE (aparece com ≥1 selecionado; cada botão age só
+        # nas linhas cujo estado permite aquela ação — seleção mista é ok)
+        # -----------------------------------------------------------------
+        if len(sel) >= 1:
+            _rasc = sel[sel["status"] == estados.RASCUNHO]
+            _pronto = sel[sel["status"] == estados.PRONTO]
+            _compra = sel[sel["status"] == estados.COMPRA_EMITIDA]
+            _reabrir = sel[sel["status"] == estados.PRONTO]
+            _cancelaveis = sel[sel["status"].isin([estados.RASCUNHO, estados.PRONTO])]
 
-        # Reabrir: PRONTO → RASCUNHO
-        with b2:
-            if st.button(f"↩️ Reabrir ({len(_reabrir)})",
-                         disabled=_reabrir.empty, width="stretch",
-                         help="Volta os selecionados em Pronto para Rascunho (edição)"):
-                suc, fal = _executar_lote(
-                    _reabrir, lambda r: (
-                        repo.transicionar_pedido(
-                            r["id"], estados.PRONTO, estados.RASCUNHO, username),
-                        "o estado mudou em outra sessão"))
-                _flash_resumo_lote("Reabertura", suc, fal)
-                st.rerun()
+            st.divider()
+            st.markdown(
+                f"**{len(sel)}** selecionado(s) · **{int(sel['qtd_final'].sum()):,}** pares "
+                f"finais · **{_fmt_brl(float(sel['investimento_final'].sum()))}**"
+            )
 
-        # Cancelar: RASCUNHO/PRONTO → CANCELADO (com confirmação)
-        with b3:
-            with st.popover(f"🚫 Cancelar ({len(_cancelaveis)})", width="stretch",
-                            disabled=_cancelaveis.empty):
-                st.caption("Cancela os selecionados em Rascunho/Pronto (fica registrado "
-                           "p/ auditoria). Pedidos já emitidos são ignorados.")
-                if st.button("Confirmar cancelamento", type="primary",
-                             key="cancel_lote"):
+            b1, b2, b3, b4, b5 = st.columns(5)
+
+            # Aprovar: RASCUNHO → PRONTO
+            with b1:
+                if st.button(f"✅ Aprovar ({len(_rasc)})", type="primary",
+                             disabled=_rasc.empty, width="stretch",
+                             help="Marca os selecionados em Rascunho como Pronto"):
                     suc, fal = _executar_lote(
-                        _cancelaveis, lambda r: (
+                        _rasc, lambda r: (
                             repo.transicionar_pedido(
-                                r["id"], r["status"], estados.CANCELADO, username),
+                                r["id"], estados.RASCUNHO, estados.PRONTO, username),
                             "o estado mudou em outra sessão"))
-                    _flash_resumo_lote("Cancelamento", suc, fal)
+                    _flash_resumo_lote("Aprovação", suc, fal)
                     st.rerun()
 
-        # Emitir compra (Bling): PRONTO → Bling (com confirmação + total)
-        with b4:
-            with st.popover(f"📤 Compra Bling ({len(_pronto)})", width="stretch",
-                            disabled=_pronto.empty):
-                st.caption(
-                    f"Emite **{len(_pronto)}** pedido(s) de compra REAIS no Bling · "
-                    f"total **{_fmt_brl(float(_pronto['investimento_final'].sum()))}**. "
-                    "Se um falhar, os demais seguem e o erro é reportado."
-                )
-                if st.button("Confirmar emissão das compras", type="primary",
-                             key="emit_compra_lote"):
+            # Reabrir: PRONTO → RASCUNHO
+            with b2:
+                if st.button(f"↩️ Reabrir ({len(_reabrir)})",
+                             disabled=_reabrir.empty, width="stretch",
+                             help="Volta os selecionados em Pronto para Rascunho (edição)"):
                     suc, fal = _executar_lote(
-                        _pronto, lambda r: (
-                            bool(emissor.emitir_compra_bling(
-                                r["id"], username, repo,
-                                obter_repositorio_integracoes())), ""))
-                    _flash_resumo_lote("Emissão de compra (Bling)", suc, fal)
+                        _reabrir, lambda r: (
+                            repo.transicionar_pedido(
+                                r["id"], estados.PRONTO, estados.RASCUNHO, username),
+                            "o estado mudou em outra sessão"))
+                    _flash_resumo_lote("Reabertura", suc, fal)
                     st.rerun()
 
-        # Emitir venda (Olist): COMPRA_EMITIDA → Olist (com confirmação + total)
-        with b5:
-            with st.popover(f"📤 Venda Olist ({len(_compra)})", width="stretch",
-                            disabled=_compra.empty):
-                st.caption(
-                    f"Emite **{len(_compra)}** pedido(s) de venda no Olist (só os que "
-                    "já têm a compra emitida). O mapeamento SKU→Olist é feito por "
-                    "pedido; falha em um não interrompe os outros."
-                )
-                if st.button("Confirmar emissão das vendas", type="primary",
-                             key="emit_venda_lote"):
-                    suc, fal = _executar_lote(
-                        _compra, lambda r: (
-                            bool(emissor.emitir_venda_olist(
-                                r["id"], username, repo,
-                                obter_repositorio_integracoes())), ""))
-                    _flash_resumo_lote("Emissão de venda (Olist)", suc, fal)
-                    st.rerun()
+            # Cancelar: RASCUNHO/PRONTO → CANCELADO (com confirmação)
+            with b3:
+                with st.popover(f"🚫 Cancelar ({len(_cancelaveis)})", width="stretch",
+                                disabled=_cancelaveis.empty):
+                    st.caption("Cancela os selecionados em Rascunho/Pronto (fica registrado "
+                               "p/ auditoria). Pedidos já emitidos são ignorados.")
+                    if st.button("Confirmar cancelamento", type="primary",
+                                 key="cancel_lote"):
+                        suc, fal = _executar_lote(
+                            _cancelaveis, lambda r: (
+                                repo.transicionar_pedido(
+                                    r["id"], r["status"], estados.CANCELADO, username),
+                                "o estado mudou em outra sessão"))
+                        _flash_resumo_lote("Cancelamento", suc, fal)
+                        st.rerun()
 
+            # Emitir compra (Bling): PRONTO → Bling (com confirmação + total)
+            with b4:
+                with st.popover(f"📤 Compra Bling ({len(_pronto)})", width="stretch",
+                                disabled=_pronto.empty):
+                    st.caption(
+                        f"Emite **{len(_pronto)}** pedido(s) de compra REAIS no Bling · "
+                        f"total **{_fmt_brl(float(_pronto['investimento_final'].sum()))}**. "
+                        "Se um falhar, os demais seguem e o erro é reportado."
+                    )
+                    if st.button("Confirmar emissão das compras", type="primary",
+                                 key="emit_compra_lote"):
+                        suc, fal = _executar_lote(
+                            _pronto, lambda r: (
+                                bool(emissor.emitir_compra_bling(
+                                    r["id"], username, repo,
+                                    obter_repositorio_integracoes())), ""))
+                        _flash_resumo_lote("Emissão de compra (Bling)", suc, fal)
+                        st.rerun()
+
+            # Emitir venda (Olist): COMPRA_EMITIDA → Olist (com confirmação + total)
+            with b5:
+                with st.popover(f"📤 Venda Olist ({len(_compra)})", width="stretch",
+                                disabled=_compra.empty):
+                    st.caption(
+                        f"Emite **{len(_compra)}** pedido(s) de venda no Olist (só os que "
+                        "já têm a compra emitida). O mapeamento SKU→Olist é feito por "
+                        "pedido; falha em um não interrompe os outros."
+                    )
+                    if st.button("Confirmar emissão das vendas", type="primary",
+                                 key="emit_venda_lote"):
+                        suc, fal = _executar_lote(
+                            _compra, lambda r: (
+                                bool(emissor.emitir_venda_olist(
+                                    r["id"], username, repo,
+                                    obter_repositorio_integracoes())), ""))
+                        _flash_resumo_lote("Emissão de venda (Olist)", suc, fal)
+                        st.rerun()
+
+
+_secao_lote()
