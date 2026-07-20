@@ -20,6 +20,7 @@ from pedidos import estados  # noqa: F401  (constantes de plataforma futuras)
 
 TAB_INTEGRACAO = "integracao"
 TAB_EVENTO = "integracao_evento"
+TAB_PRODUTO_CACHE = "olist_produto_cache"   # DDL 005 (opcional; degrada se ausente)
 
 PLATAFORMAS_VALIDAS = ("bling", "olist")
 
@@ -80,6 +81,32 @@ class RepositorioIntegracoes:
 
     def _inserir(self, tabela: str, linhas) -> list:
         resp = self._client.from_(tabela).insert(linhas).execute()
+        return resp.data or []
+
+    def _selecionar_in(self, tabela: str, coluna: str, valores: list,
+                       colunas: str = "*") -> list:
+        """SELECT ... WHERE coluna IN (valores). Degrada p/ [] se tabela ausente."""
+        if not valores:
+            return []
+        try:
+            resp = (self._client.from_(tabela).select(colunas)
+                    .in_(coluna, list(valores)).execute())
+        except APIError as e:
+            if e.code in _ERROS_TABELA_AUSENTE:
+                return []
+            raise
+        return resp.data or []
+
+    def _upsert(self, tabela: str, linhas: list) -> list:
+        """Upsert por PK. Degrada p/ [] se a tabela ainda não existe (DDL ausente)."""
+        if not linhas:
+            return []
+        try:
+            resp = self._client.from_(tabela).upsert(linhas).execute()
+        except APIError as e:
+            if e.code in _ERROS_TABELA_AUSENTE:
+                return []
+            raise
         return resp.data or []
 
     # -----------------------------------------------------------------
@@ -164,3 +191,22 @@ class RepositorioIntegracoes:
             "plataforma": plataforma, "acao": acao, "sucesso": bool(sucesso),
             "detalhe": detalhe, "pedido_id": pedido_id, "criado_por": usuario,
         }])
+
+    # -----------------------------------------------------------------
+    # Cache SKU → id do Olist (DDL 005) — otimização da emissão da venda.
+    # Ausente o DDL, tudo degrada: leitura vazia, escrita ignorada.
+    # -----------------------------------------------------------------
+    def ler_cache_produtos_olist(self, skus: list) -> dict:
+        """{sku: olist_id} dos SKUs já resolvidos (só os presentes no cache)."""
+        distintos = sorted({str(s).strip() for s in skus if str(s).strip()})
+        linhas = self._selecionar_in(TAB_PRODUTO_CACHE, "sku", distintos,
+                                      colunas="sku,olist_id")
+        return {r["sku"]: int(r["olist_id"]) for r in linhas
+                if r.get("olist_id") is not None}
+
+    def gravar_cache_produtos_olist(self, mapa: dict) -> None:
+        """Upsert de {sku: olist_id}. No-op silencioso se o DDL 005 não existe."""
+        linhas = [{"sku": str(sku).strip(), "olist_id": int(oid),
+                   "atualizado_em": _agora_iso()}
+                  for sku, oid in (mapa or {}).items() if str(sku).strip()]
+        self._upsert(TAB_PRODUTO_CACHE, linhas)

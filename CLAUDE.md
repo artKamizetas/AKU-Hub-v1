@@ -130,7 +130,8 @@ nunca atualizada.
 
 - **Persistência**: schema **`app`** do Supabase (gravável) — `rodada_congelada`
   (snapshot, jsonb), `pedido_compra`, `pedido_compra_item`, `integracao`
-  (credenciais/tokens OAuth), `integracao_evento` (auditoria). DDL numerada em
+  (credenciais/tokens OAuth), `integracao_evento` (auditoria), `olist_produto_cache`
+  (SKU→id do Olist, DDL 005 — otimização da emissão, degrada se ausente). DDL numerada em
   `docs/sql/00N_*.sql` (aplicar manual no SQL Editor; `app` já exposto na Data API).
   O `public` segue 100% espelho read-only da pipeline externa.
 - **Escrita no Supabase SÓ via portas** `pedidos/repositorio.py` (pedidos) e
@@ -145,14 +146,21 @@ nunca atualizada.
   (`*_EMITINDO` = lock CAS anti duplo-clique, igual ao CONGELANDO). Falha ANTES do
   POST → rollback ao estado anterior; falha DEPOIS → fica travado em `*_EMITINDO`, UI
   oferece "Destravar" com aviso de conferir no ERP. Idempotência por `bling_id`/
-  `olist_id` já gravado. SKUs idênticos nos 2 sistemas → mapa SKU→id Olist por
-  **busca direcionada** `GET /produtos?codigo=<SKU>` (1 GET por SKU distinto,
-  match EXATO local — o filtro pode ser parcial), NÃO varrendo o catálogo:
-  a varredura estourava o rate limit (Olist v3 = 60 req/min → 429). Todo GET/POST
-  do cliente passa por `_requisitar`, que em 429 respeita `Retry-After` e
-  reemite (backoff limitado). No modo LOTE, a 4_Pedidos pré-mapeia todos os SKUs
-  UMA vez e passa o superset a cada `emitir_venda_olist` (mapa_sku=None refazia a
-  busca por pedido). Pré-validação lista faltantes antes de habilitar a venda.
+  `olist_id` já gravado. SKUs idênticos nos 2 sistemas → mapa SKU→id Olist
+  resolvido por `emissor.resolver_ids_olist` em CAMADAS (mais barato → mais caro):
+  **(1) cache** `app.olist_produto_cache` (DDL 005, id imutável — SKU já visto = 0
+  chamadas; degrada se o DDL não existe); **(2) por família**
+  (`olist.mapear_por_familia`): deriva o SKU pai (corta o `-TAMANHO`), `?codigo=`
+  acha o pai e `GET /produtos/{id}` traz a grade INTEIRA (`variacoes[]`), ~2
+  chamadas por família de ~7 tamanhos e aquece os irmãos no cache; **(3) fallback
+  exato** `?codigo=<SKU>` (match EXATO local, o filtro pode ser parcial) para o
+  que sobrou. NUNCA varre o catálogo — a varredura estourava o rate limit (Olist
+  v3 = 60 req/min → 429). Todo GET/POST passa por `_requisitar`, que em 429
+  respeita `Retry-After` e reemite (backoff limitado). No modo LOTE, a 4_Pedidos
+  resolve todos os SKUs UMA vez e passa o superset a cada `emitir_venda_olist`
+  (mapa_sku=None refazia por pedido). O cache é a ponte para a fonte definitiva
+  (espelho do catálogo do Tiny): popule a tabela por fora e a API nem é tocada.
+  Pré-validação lista faltantes antes de habilitar a venda.
   **Pré-validação simétrica** (`validar_pre_emissao_bling`/`_olist` em `emissor.py`):
   checks puros (config incompleta — `fornecedor_id`/`contato_id` etc, nada a emitir,
   itens sem id de produto) que dão o feedback ANTES do clique — lista vazia = pode

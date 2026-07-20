@@ -9,6 +9,32 @@ Records). Adicione no topo as mais recentes.
 
 ---
 
+## 2026-07 · Emissão da venda no Olist: 429 e a resolução SKU→id em camadas
+A 1ª emissão de venda real quebrou com **HTTP 429** (rate limit). Causa: o mapeamento
+SKU→id do Olist **varria o catálogo inteiro** (paginado 100/pág), dezenas de GETs por
+pedido — e no lote, uma varredura POR pedido. O Olist v3 dá 60 req/min (plano básico):
+um único pedido já estourava. O POST /pedidos exige `produto.id` (id interno do Tiny),
+**não aceita SKU/código** — então o id tem de ser resolvido de algum jeito.
+
+Testado ao vivo contra a API para decidir a estratégia:
+- `?codigo=` é match **EXATO** — buscar o SKU pai retorna só o registro-pai, não os
+  filhos; prefixos curtos retornam zero. (A ideia inicial de "buscar o pai e vir a
+  grade" não funciona por aqui.)
+- `?nome=` é parcial e traz a grade toda num GET, mas casa por **descrição** (texto não
+  garantido idêntico entre Bling e Tiny) e é guloso — descartado como chave.
+- `GET /produtos/{id_pai}` devolve `variacoes[]` com `{sku, id}` de todos os tamanhos —
+  robusto porque chaveia por **SKU** (idêntico nos dois sistemas).
+
+Resolução final em **3 camadas** (`emissor.resolver_ids_olist`), do mais barato ao mais
+caro: **(1) cache** `app.olist_produto_cache` (DDL 005; id é imutável → SKU já visto
+custa 0 chamadas); **(2) por família** (deriva o pai cortando o `-TAMANHO`, `?codigo=`
+acha o pai, `/produtos/{id}` traz a grade — ~2 chamadas p/ ~7 tamanhos, e grava os
+irmãos no cache); **(3) fallback exato** `?codigo=<SKU>` para o que sobrou. A derivação
+do pai é ingênua de propósito (corta no último `-`): se errar, o SKU cai no fallback
+exato — **nunca casa errado**. Todo GET/POST passa por `_requisitar`, que em 429 respeita
+`Retry-After` e reemite. O cache é a **ponte para a fonte definitiva** (espelho do
+catálogo do Tiny que o Diogo tem): popular a tabela por fora dispensa a API.
+
 ## 2026-07 · Payload de compra completo: código, unidade, pagamento e memória por item
 A 1ª conferência de um pedido emitido no Bling mostrou campos vazios que a operação
 preenchia à mão: **Código** (`codigoFornecedor` = nosso SKU — idêntico nos dois

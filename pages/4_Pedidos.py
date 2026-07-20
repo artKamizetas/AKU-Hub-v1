@@ -354,13 +354,11 @@ def _secao_pedido():
         _mapa, _erros_pre, _erro_map = {}, [], None
         if pedido_sel["status"] == estados.COMPRA_EMITIDA:
             try:
-                from pedidos.integracoes import oauth as _oauth, olist as _olist
                 _repo_int = obter_repositorio_integracoes()
                 _cfg_olist = (_repo_int.ler("olist") or {}).get("config") or {}
-                _token = _oauth.obter_access_token("olist", _repo_int)
                 _skus = itens[itens["quantidade_final"] > 0]["sku"].tolist()
                 with st.spinner("Verificando catálogo do Olist…"):
-                    _mapa, _faltantes = _olist.mapear_produtos_por_sku(_token, _skus)
+                    _mapa, _faltantes = emissor.resolver_ids_olist(_skus, _repo_int)
             except Exception as exc:
                 _erro_map = str(exc)
             _erros_pre = emissor.validar_pre_emissao_olist(
@@ -710,22 +708,20 @@ def _secao_lote():
                                  key="emit_venda_lote"):
                         with st.status(f"📤 Emitindo {len(_compra)} venda(s) no Olist…",
                                        expanded=True) as _s:
-                            # Mapeia SKU→Olist UMA vez p/ todo o lote — passar
-                            # mapa_sku=None por pedido refazia a busca N vezes e
-                            # estourava o rate limit (429). Superset é seguro:
-                            # cada emissão só consulta os SKUs do próprio pedido.
-                            from pedidos.integracoes import (oauth as _oauth,
-                                                             olist as _olist)
+                            # Mapeia SKU→Olist UMA vez p/ todo o lote (cache +
+                            # família + fallback) — passar mapa_sku=None por
+                            # pedido refazia a busca N vezes e estourava o rate
+                            # limit (429). Superset é seguro: cada emissão só
+                            # consulta os SKUs do próprio pedido.
                             try:
                                 _ri = obter_repositorio_integracoes()
-                                _tok = _oauth.obter_access_token("olist", _ri)
                                 _skus = sorted({
                                     s for pid in _compra["id"]
                                     for s in repo.listar_itens(pid).pipe(
                                         lambda d: d[d["quantidade_final"] > 0]["sku"])
                                 })
                                 _s.write(f"Mapeando {len(_skus)} SKU(s) no Olist…")
-                                _mapa_lote, _ = _olist.mapear_produtos_por_sku(_tok, _skus)
+                                _mapa_lote, _ = emissor.resolver_ids_olist(_skus, _ri)
                             except Exception as _exc:
                                 _mapa_lote = None
                                 _s.write(f"⚠️ Pré-mapeamento falhou ({_exc}); "

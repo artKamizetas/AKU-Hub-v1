@@ -8,12 +8,12 @@ import pytest
 from postgrest.exceptions import APIError
 
 from pedidos.integracoes.repositorio import (
-    RepositorioIntegracoes, TAB_INTEGRACAO, TAB_EVENTO,
+    RepositorioIntegracoes, TAB_INTEGRACAO, TAB_EVENTO, TAB_PRODUTO_CACHE,
 )
 
 
 class RepoFake(RepositorioIntegracoes):
-    """Gateway em memória: as 2 linhas seed ('bling','olist') + eventos."""
+    """Gateway em memória: as 2 linhas seed ('bling','olist') + eventos + cache."""
 
     def __init__(self):
         super().__init__(client=None)
@@ -23,12 +23,17 @@ class RepoFake(RepositorioIntegracoes):
                 {"id": "olist", "config": {}, "oauth_state": None},
             ],
             TAB_EVENTO: [],
+            TAB_PRODUTO_CACHE: [],
         }
         self._seq = 0
 
     def _selecionar(self, tabela, filtros=None, colunas="*"):
         return [dict(r) for r in self.tabelas[tabela]
                 if all(r.get(k) == v for k, v in (filtros or {}).items())]
+
+    def _selecionar_in(self, tabela, coluna, valores, colunas="*"):
+        alvo = set(valores or [])
+        return [dict(r) for r in self.tabelas[tabela] if r.get(coluna) in alvo]
 
     def _atualizar(self, tabela, filtros, valores):
         out = []
@@ -48,6 +53,17 @@ class RepoFake(RepositorioIntegracoes):
             self.tabelas[tabela].append(linha)
             out.append(dict(linha))
         return out
+
+    def _upsert(self, tabela, linhas):
+        alvo = self.tabelas.setdefault(tabela, [])
+        for linha in linhas:
+            linha = dict(linha)
+            existe = next((r for r in alvo if r.get("sku") == linha.get("sku")), None)
+            if existe:
+                existe.update(linha)
+            else:
+                alvo.append(linha)
+        return [dict(r) for r in alvo]
 
 
 class TestChavesEConfig:

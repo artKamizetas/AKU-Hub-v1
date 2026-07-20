@@ -265,6 +265,43 @@ class TestMapearProdutos:
             olist.mapear_produtos_por_sku("tok", ["X"], http)
 
 
+class TestMapearPorFamilia:
+    def test_grade_inteira_em_duas_chamadas(self):
+        # 2 filhos do mesmo pai → 1 GET no pai + 1 na grade cobrem os dois
+        # (e aquecem os irmãos que nem foram pedidos).
+        http = HttpFake([
+            RespostaFake(200, {"itens": [{"id": 10, "sku": "SES"}]}),      # ?codigo=SES
+            RespostaFake(200, {"id": 10, "sku": "SES", "variacoes": [       # /produtos/10
+                {"id": 11, "sku": "SES-G"}, {"id": 12, "sku": "SES-M"},
+                {"id": 13, "sku": "SES-GG"}]}),
+        ])
+        mapa, pendentes = olist.mapear_por_familia("tok", ["SES-G", "SES-M"], http)
+        assert mapa == {"SES": 10, "SES-G": 11, "SES-M": 12, "SES-GG": 13}
+        assert pendentes == set()
+        assert len(http.chamadas) == 2
+        assert http.chamadas[1][1].endswith("/produtos/10")
+
+    def test_pai_inexistente_deixa_filhos_pendentes(self):
+        http = HttpFake([RespostaFake(200, {"itens": []})])   # ?codigo=SES → nada
+        mapa, pendentes = olist.mapear_por_familia("tok", ["SES-G", "SES-M"], http)
+        assert mapa == {} and pendentes == {"SES-G", "SES-M"}
+        assert len(http.chamadas) == 1                        # nem tenta a grade
+
+    def test_filho_fora_da_grade_fica_pendente(self):
+        http = HttpFake([
+            RespostaFake(200, {"itens": [{"id": 10, "sku": "SES"}]}),
+            RespostaFake(200, {"id": 10, "sku": "SES", "variacoes": [
+                {"id": 11, "sku": "SES-G"}]}),
+        ])
+        mapa, pendentes = olist.mapear_por_familia("tok", ["SES-G", "SES-XGG"], http)
+        assert mapa["SES-G"] == 11 and pendentes == {"SES-XGG"}
+
+    def test_sku_sem_pai_vai_direto_pendente(self):
+        http = HttpFake([])   # não deve chamar nada
+        mapa, pendentes = olist.mapear_por_familia("tok", ["SEMHIFEN"], http)
+        assert mapa == {} and pendentes == {"SEMHIFEN"} and http.chamadas == []
+
+
 # ---------------------------------------------------------------------------
 # Camada HTTP fina (criar/testar)
 # ---------------------------------------------------------------------------

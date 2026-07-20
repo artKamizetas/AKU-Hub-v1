@@ -39,6 +39,38 @@ def _carregar_contexto(repo_ped, pedido_id: str):
     return pedido, itens, rodada
 
 
+def resolver_ids_olist(skus, repo_int, http=None, dormir=None) -> tuple:
+    """
+    SKU → id interno do Olist, em CAMADAS do mais barato ao mais caro:
+      1. cache persistente (app.olist_produto_cache) — 0 chamadas p/ SKU já visto;
+      2. resolução por família (1 GET no pai + 1 na grade, cobre ~7 tamanhos);
+      3. fallback exato por SKU (?codigo=) para o que sobrou.
+    O que a API resolveu (inclusive irmãos da grade não pedidos) volta ao cache,
+    então lotes seguintes do mesmo colégio saem quase todos do cache.
+
+    Retorna ({sku: id_olist}, [skus_sem_match]). Token buscado só se houver
+    SKU fora do cache (cache quente = nenhuma ida à API, nem refresh de token).
+    """
+    distintos = sorted({str(s).strip() for s in skus if str(s).strip()})
+    if not distintos:
+        return {}, []
+
+    mapa = dict(repo_int.ler_cache_produtos_olist(distintos))
+    faltam = [s for s in distintos if s not in mapa]
+    if faltam:
+        token = oauth.obter_access_token("olist", repo_int, http)
+        por_familia, pendentes = olist.mapear_por_familia(token, faltam, http, dormir)
+        por_exato, _ = olist.mapear_produtos_por_sku(
+            token, sorted(pendentes), http, dormir)
+        novos = {**por_familia, **por_exato}
+        if novos:
+            repo_int.gravar_cache_produtos_olist(novos)
+        mapa.update(novos)
+
+    faltantes = [s for s in distintos if s not in mapa]
+    return {s: mapa[s] for s in distintos if s in mapa}, faltantes
+
+
 def emitir_compra_bling(pedido_id: str, usuario: str, repo_ped, repo_int,
                         http=None) -> dict:
     """Pedido PRONTO → pedido de compra no Bling. Retorna {bling_id, bling_numero}."""
@@ -114,7 +146,7 @@ def emitir_venda_olist(pedido_id: str, usuario: str, repo_ped, repo_int,
             token = oauth.obter_access_token("olist", repo_int, http)
             if mapa_sku is None:
                 skus = itens[itens["quantidade_final"] > 0]["sku"].tolist()
-                mapa_sku, faltantes = olist.mapear_produtos_por_sku(token, skus, http)
+                mapa_sku, faltantes = resolver_ids_olist(skus, repo_int, http)
                 if faltantes:
                     raise EmissaoFalhou(
                         f"{len(faltantes)} SKU(s) sem match no catálogo do Olist: "

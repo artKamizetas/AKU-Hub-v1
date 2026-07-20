@@ -170,14 +170,53 @@ class TestEmitirVenda:
     def test_sku_faltante_no_catalogo_faz_rollback(self):
         repo_ped, repo_int = RepoPedFake(), _repo_int_conectado()
         pid = self._pedido_compra_emitida(repo_ped, repo_int)
-        # mapa None → busca direcionada por SKU; nenhum casa (itens vazios)
-        http = HttpFake([RespostaFake(200, {"itens": []}),
-                         RespostaFake(200, {"itens": []})])
+        # mapa None → resolver: 1 GET no pai "A" + fallback exato A-M/A-PP,
+        # todos vazios → nada casa → faltantes
+        http = HttpFake([RespostaFake(200, {"itens": []}) for _ in range(3)])
 
         with pytest.raises(emissor.EmissaoFalhou, match="sem match"):
             emissor.emitir_venda_olist(pid, "diogo", repo_ped, repo_int,
                                        mapa_sku=None, http=http)
         assert repo_ped.obter_pedido(pid)["status"] == e.COMPRA_EMITIDA   # rollback
+
+
+# ---------------------------------------------------------------------------
+# resolver_ids_olist — cache → família → fallback exato
+# ---------------------------------------------------------------------------
+class TestResolverIdsOlist:
+    def test_cache_quente_nao_toca_a_api(self):
+        repo = _repo_int_conectado()
+        repo.gravar_cache_produtos_olist({"A-PP": 1, "A-M": 2})
+        http = HttpFake([])   # qualquer chamada estouraria (lista vazia)
+        mapa, faltantes = emissor.resolver_ids_olist(["A-PP", "A-M"], repo, http)
+        assert mapa == {"A-PP": 1, "A-M": 2} and faltantes == []
+        assert http.chamadas == []
+
+    def test_resolve_por_familia_grava_e_reusa_cache(self):
+        repo = _repo_int_conectado()
+        http = HttpFake([
+            RespostaFake(200, {"itens": [{"id": 10, "sku": "A"}]}),        # pai
+            RespostaFake(200, {"id": 10, "sku": "A", "variacoes": [        # grade
+                {"id": 11, "sku": "A-PP"}, {"id": 12, "sku": "A-M"},
+                {"id": 13, "sku": "A-G"}]}),
+        ])
+        mapa, faltantes = emissor.resolver_ids_olist(["A-PP", "A-M"], repo, http)
+        assert mapa == {"A-PP": 11, "A-M": 12}   # devolve só o pedido
+        assert faltantes == []
+
+        # 2ª chamada: cache aquecido, inclusive o irmão A-G que nem foi pedido
+        http2 = HttpFake([])
+        mapa2, _ = emissor.resolver_ids_olist(["A-G"], repo, http2)
+        assert mapa2 == {"A-G": 13} and http2.chamadas == []
+
+    def test_fallback_exato_e_faltante(self):
+        repo = _repo_int_conectado()
+        http = HttpFake([
+            RespostaFake(200, {"itens": []}),   # pai "Z" não existe
+            RespostaFake(200, {"itens": []}),   # exato "Z-P" também não
+        ])
+        mapa, faltantes = emissor.resolver_ids_olist(["Z-P"], repo, http)
+        assert mapa == {} and faltantes == ["Z-P"]
 
 
 # ---------------------------------------------------------------------------

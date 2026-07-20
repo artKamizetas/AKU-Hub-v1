@@ -111,6 +111,15 @@ def _id_por_codigo_exato(itens: list, sku: str):
     return None
 
 
+def _buscar_id_por_codigo(token: str, codigo: str, http, dormir) -> int:
+    """id do produto cujo código bate EXATAMENTE com `codigo` (ou None)."""
+    resp = _requisitar(http, "get", f"{BASE}/produtos", token,
+                       params={"codigo": codigo, "limit": _PAGINA}, dormir=dormir)
+    if resp.status_code >= 300:
+        raise OlistFalhou(_erro_legivel(resp))
+    return _id_por_codigo_exato((resp.json() or {}).get("itens") or [], codigo)
+
+
 def mapear_produtos_por_sku(token: str, skus: list, http=None, dormir=None) -> tuple:
     """
     De-para SKU → id interno do Olist (a API de pedidos exige o id).
@@ -119,7 +128,8 @@ def mapear_produtos_por_sku(token: str, skus: list, http=None, dormir=None) -> t
 
     Busca direcionada (`GET /produtos?codigo=<SKU>`), 1 GET por SKU distinto —
     não varre o catálogo inteiro. Dezenas de milhares de produtos varridos por
-    pedido eram o que estourava o rate limit (429).
+    pedido eram o que estourava o rate limit (429). É o PISO (fallback) da
+    resolução; mapear_por_familia() cobre a grade de tamanhos em menos chamadas.
     """
     http = http or _http_default()
     mapa, faltantes, vistos = {}, [], set()
@@ -128,17 +138,80 @@ def mapear_produtos_por_sku(token: str, skus: list, http=None, dormir=None) -> t
         if not sku or sku in vistos:
             continue
         vistos.add(sku)
-        resp = _requisitar(http, "get", f"{BASE}/produtos", token,
-                           params={"codigo": sku, "limit": _PAGINA}, dormir=dormir)
-        if resp.status_code >= 300:
-            raise OlistFalhou(_erro_legivel(resp))
-        itens = (resp.json() or {}).get("itens") or []
-        id_olist = _id_por_codigo_exato(itens, sku)
+        id_olist = _buscar_id_por_codigo(token, sku, http, dormir)
         if id_olist is not None:
             mapa[sku] = id_olist
         else:
             faltantes.append(sku)
     return mapa, faltantes
+
+
+def _sku_pai(sku: str):
+    """
+    SKU do produto-pai a partir do SKU-filho, tirando o sufixo de tamanho
+    ('SES024MOLDIA-G' → 'SES024MOLDIA'). Heurística deliberadamente ingênua
+    (corta no último '-'): se errar, a família não é encontrada e o SKU cai no
+    fallback exato — nunca casa errado. None se não há '-' para cortar.
+    """
+    base = str(sku).rpartition("-")[0].strip()
+    return base or None
+
+
+def obter_variacoes(token: str, id_pai: int, http=None, dormir=None) -> dict:
+    """
+    {sku: id} de TODAS as variações de um produto-pai (GET /produtos/{id}),
+    incluindo o próprio pai. Uma chamada devolve a grade de tamanhos inteira —
+    o barato que substitui 1 GET por tamanho.
+    """
+    http = http or _http_default()
+    resp = _requisitar(http, "get", f"{BASE}/produtos/{id_pai}", token, dormir=dormir)
+    if resp.status_code >= 300:
+        raise OlistFalhou(_erro_legivel(resp))
+    corpo = resp.json() or {}
+    mapa = {}
+    sku_pai = str(corpo.get("sku") or "").strip()
+    if sku_pai and corpo.get("id") is not None:
+        mapa[sku_pai] = int(corpo["id"])
+    for v in (corpo.get("variacoes") or []):
+        s = str(v.get("sku") or "").strip()
+        if s and v.get("id") is not None:
+            mapa[s] = int(v["id"])
+    return mapa
+
+
+def mapear_por_familia(token: str, skus: list, http=None, dormir=None) -> tuple:
+    """
+    Resolve SKU → id agrupando por produto-PAI: um GET acha o pai
+    (`?codigo=<pai>`) e outro traz a grade inteira (`/produtos/{id}`), ~2
+    chamadas por família de ~7 tamanhos em vez de 7.
+
+    Retorna ({sku: id_olist}, {skus_pendentes}). O mapa inclui TODOS os
+    tamanhos que a grade trouxe (não só os pedidos) — de propósito, para o
+    cache aquecer os irmãos. `pendentes` = SKUs sem pai derivável, com pai não
+    encontrado, ou ausentes da grade → o chamador tenta o fallback exato.
+    """
+    http = http or _http_default()
+    grupos, pendentes = {}, set()
+    for sku in skus:
+        sku = str(sku).strip()
+        if not sku:
+            continue
+        pai = _sku_pai(sku)
+        if pai is None:
+            pendentes.add(sku)
+        else:
+            grupos.setdefault(pai, set()).add(sku)
+
+    mapa = {}
+    for pai, filhos in grupos.items():
+        id_pai = _buscar_id_por_codigo(token, pai, http, dormir)
+        if id_pai is None:
+            pendentes |= filhos            # pai não existe → tenta cada filho exato
+            continue
+        grade = obter_variacoes(token, id_pai, http, dormir)
+        mapa.update(grade)                 # aquece irmãos também
+        pendentes |= {f for f in filhos if f not in grade}
+    return mapa, pendentes
 
 
 def montar_payload_venda(pedido: dict, itens: pd.DataFrame, rodada: dict,
