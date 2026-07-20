@@ -108,7 +108,7 @@ Fonte única usada tanto pela aba tática ("Sugestão por SKU") quanto pela estr
   - Meses de alta (`config["demanda"]["janela_alta"]`, ex: [12,1,2]): `vendas reais da última temporada de alta completa × crescimento` (a grade de tamanhos é preservada porque cada SKU é um tamanho).
   - Meses de baixa: `demanda de baixa` = demanda de alta × `proporção da baixa`, espalhada pela `distribuicao_mensal_baixa()` agregada. A proporção é **global** (`calcular_proporcao_baixa()` = Σbaixa/Σalta da empresa, últimos 2 ciclos ≈ 0,43) com **cascata de override manual** (`proporcao_baixa_efetiva(sku, colegio, config, base)`): `excecoes_sku[sku].proporcao_baixa → colegios[COL].proporcao_baixa → global`. Backtest (2023-25): fatiar por categoria/SKU não melhora (teto ~48%); global + override nos poucos gigantes de cauda curta é o que sustenta. Editável na tela (coluna no editor de Colégios + coluna no CSV de exceções).
 - **Crescimento por (colégio × série)** (`taxa_crescimento_efetiva(colegio, config, grupo, ativo, observado)`): cascata híbrida (manual do planejador SEMPRE vence os dados): `crescimento_grupos[grupo] (manual) → taxa_crescimento colégio (manual) → observado colégio×segmento → observado colégio → 1+fabrica.crescimento_pct/100`. A **camada observada** (`calcular_crescimento_observado`) mede o crescimento realizado nas ALTAS (alta-sobre-alta, sinal limpo — a baixa tem ruptura), por colégio e por segmento, clamp [0.5,2.0], gate de volume ≥30. O mapa grupo→segmento (`mapa_grupo_segmento(config)`) tem default no código (`SEGMENTO_POR_GRUPO`) sobrescrito por `config["grupo_segmento"]` — editável na página de Configurações (baldes atuais: Infantil, Inf+Fund, Fundamental, Médio, Tempo Integral, Diário, Ed. Física, Esporte, Outros). Desligável em `config["demanda"]["crescimento_observado_ativo"]` (→ volta ao +10% cego). `ativo=False` desliga tudo (toggle p/ comparar). Vale p/ fábrica e VM logística. Não muda o total da rede (~+11%), **redistribui** para o mix certo (ex: NEV Médio +51% vs LMN −29%).
-- **Política order-up-to** (`simular_politica_reabastecimento`): motor comum. Por SKU, caminha as rodadas mantendo estoque projetado (`estoque − backlog`, consumido mês a mês, reabastecido a cada chegada). Em cada rodada r: `DemandaPeriodo` = demanda até a próxima chegar; `EstoqueSeguranca = estoque_seguranca(DemandaPeriodo, contém_alta, config)` (Fator de Serviço × Variação da Demanda × DemandaPeriodo); `EstoqueAlvo = DemandaPeriodo + EstoqueSeguranca`; `Pedido = par_ceil(EstoqueAlvo − EstoqueProjetado_na_chegada)`. As colunas do DataFrame retornado usam esses nomes (`DemandaPeriodo`/`EstoqueSeguranca`/`EstoqueAlvo`/`EstoqueProjetado`; antes eram `DI`/`SS`/`S`/`OH`). Sugestão por SKU = Pedido da rodada selecionada; Visão Geral = soma por rodada. **Cobertura Alvo** (antecipação deliberada, `planejamento.cobertura_override` = {data_disparo ISO → fração 0-1 da demanda anual da rede}): estende o fim de proteção da rodada até a demanda acumulada da rede atingir o alvo (`_data_por_demanda_acumulada`; clamp piso=natural, teto=1.0) — a rodada seguinte encolhe SOZINHA (order-up-to é auto-liquidante; Σ produção do horizonte se conserva). Colunas `FimCobertura`/`CoberturaPct` no retorno. A **Visão Geral é o cockpit único do plano de rodadas**: edita o calendário de disparos (`rodadas_datas`, **multiselect de mês/ano** — pills; disparos são sempre 1º-de-mês) E as coberturas na mesma tela, onde o efeito é visível ao vivo (config de simulação usa as datas do preview antes de salvar). A tabela tem DUAS colunas de cobertura — "Cobertura natural (%)" read-only (piso) + "Cobertura alvo (%)" editável e **vazia quando não há antecipação** (preenchida = intenção deliberada). Preview de sessão para datas e coberturas; um botão "Salvar plano" (admin) persiste `rodadas_datas` + `cobertura_override` juntos. Spec: `docs/requisitos/cobertura-alvo-rodada.md`.
+- **Política order-up-to** (`simular_politica_reabastecimento`): motor comum. Por SKU, caminha as rodadas mantendo estoque projetado (`estoque − backlog`, consumido mês a mês, reabastecido a cada chegada). Em cada rodada r: `DemandaPeriodo` = demanda até a próxima chegar; `EstoqueSeguranca = estoque_seguranca(DemandaPeriodo, contém_alta, config)` (Fator de Serviço × Variação da Demanda × DemandaPeriodo); `EstoqueAlvo = DemandaPeriodo + EstoqueSeguranca`; `Pedido = par_ceil(EstoqueAlvo − EstoqueProjetado_na_chegada)`. As colunas do DataFrame retornado usam esses nomes (`DemandaPeriodo`/`EstoqueSeguranca`/`EstoqueAlvo`/`EstoqueProjetado`; antes eram `DI`/`SS`/`S`/`OH`). Sugestão por SKU = Pedido da rodada selecionada; Visão Geral = soma por rodada. **Cobertura Alvo** (antecipação deliberada, `planejamento.cobertura_override` = {data_disparo ISO → fração 0-1 da demanda anual da rede}): estende o fim de proteção da rodada até a demanda acumulada da rede atingir o alvo (`_data_por_demanda_acumulada`; clamp piso=natural, teto=1.0) — a rodada seguinte encolhe SOZINHA (order-up-to é auto-liquidante; Σ produção do horizonte se conserva). Colunas `FimCobertura`/`CoberturaPct` no retorno. A **Visão Geral é o cockpit único do plano de rodadas**: edita o calendário de disparos (`rodadas_datas`, **multiselect de mês/ano** — pills; disparos são sempre 1º-de-mês) E as coberturas na mesma tela, onde o efeito é visível ao vivo (config de simulação usa as datas do preview antes de salvar). A tabela tem DUAS colunas de cobertura — "Cobertura natural (%)" read-only (piso) + "Cobertura alvo (%)" editável e **vazia quando não há antecipação** (preenchida = intenção deliberada). Preview de sessão para datas e coberturas; um botão "Salvar plano" (admin) persiste `rodadas_datas` + `cobertura_override` juntos. Spec: `docs/requisitos/cobertura-alvo-rodada.md`. **On-order/em-trânsito** (pendência conhecida, EM DISCUSSÃO — não implementar ainda): hoje o motor abre em `estoque − backlog` e recalcula o pedido a cada chegada, então a decisão manual do gestor (congelou 65 no lugar de 70) não retroalimenta a próxima rodada. A spec `docs/requisitos/posicao-estoque-on-order.md` explora somar o termo em-trânsito à posição de partida, com o Tiny/Olist como fonte da verdade da execução (qtd/data reais deslizam na fábrica) e a regra de ouro da reconciliação (baixar o on-order quando vira estoque físico).
 - **Nível de serviço** (`config["demanda"]["nivel_servico_alta"/"nivel_servico_baixa"/"variacao_demanda"]`): alta ~99% ("não pode faltar"), baixa ~92%. Fator de Serviço pela criticidade do intervalo.
 - `planejamento.periodo_historico_inicio`/`fim` = período histórico único (sazonalidade agregada + distribuição mensal da baixa + base dos SKUs só-de-baixa). Define o FORMATO do ano, não o tamanho do pico. Calendário de rodadas: `planejamento.rodadas_datas` (datas ISO explícitas de disparo, este ano + próximo, SEM repetição anual — a última data só fecha o intervalo da penúltima; 2+ datas obrigatórias) é a **fonte única**. O antigo fallback mensal (`planejamento.rodadas`, meses fixos que repetiam todo ano) e o override `rodadas_meses` foram removidos — havia duas metodologias divergindo na UI (Visão Geral por meses × Sugestão por SKU por datas). Sem `rodadas_datas`, a Visão Geral só avisa e a Sugestão por SKU cai na cobertura fixa (`fabrica.cobertura_meses`). A simulação expõe `DemandaPeriodoAlta`/`DemandaPeriodoBaixa`/`MesesIntervalo`/`data_chegada_seguinte` (split pico/baixa usado pela UI da Sugestão por SKU).
 
@@ -147,6 +147,14 @@ nunca atualizada.
   oferece "Destravar" com aviso de conferir no ERP. Idempotência por `bling_id`/
   `olist_id` já gravado. SKUs idênticos nos 2 sistemas → mapa SKU→id Olist via
   `GET /produtos`; pré-validação lista faltantes antes de habilitar a venda.
+  **Pré-validação simétrica** (`validar_pre_emissao_bling`/`_olist` em `emissor.py`):
+  checks puros (config incompleta — `fornecedor_id`/`contato_id` etc, nada a emitir,
+  itens sem id de produto) que dão o feedback ANTES do clique — lista vazia = pode
+  emitir. A UI da 4_Pedidos oferece **dois modos** num `st.segmented_control`
+  (editar UM pedido × ação em LOTE), ambos dentro de um único `@st.fragment`
+  (`_area_trabalho`) para trocar de modo sem re-ler o topo (sem cache) e sem o
+  "piscar"; NÃO em `st.tabs` (fragment-que-rerroda dentro de tabs vaza conteúdo,
+  bug #9158/#9313 do Streamlit). Emissões usam `st.status` com progresso.
 - **Integrações** (`pedidos/integracoes/`): OAuth2 authorization_code; chaves e tokens
   vivem em `app.integracao` (NÃO em secrets.toml — filesystem do Cloud é efêmero),
   geridas na aba Integrações de 5_Configuracoes. `state` anti-CSRF no banco (a sessão
@@ -154,12 +162,36 @@ nunca atualizada.
   Redirect URI = URL do app + `/configuracoes` (`url_path` fixo em app.py). Clientes
   HTTP com `http` injetável (testes sem rede). App no portal Bling e no Olist a
   registrar (pré-requisito; ver `docs/decisoes.md`).
-- **Observações internas padronizadas**: `pedido_compra.titulo`
-  (`AKU-PC · COLÉGIO · SUPERCAT · Rmm/aaaa`) persistido; bloco completo SEMPRE
+- **Observações padronizadas**: `pedido_compra.titulo`
+  (`COLÉGIO - SUPERCAT - Rmm/aaaa`) persistido; bloco completo SEMPRE
   recomposto por `builder.montar_observacoes_bling` no momento do uso (nunca
   pré-gravado — envelheceria ao editar quantidades). `ref: <uuid>` = chave de
-  reconciliação com o espelho futuro. Vai em `observacoes`/`observacoesInternas` dos
-  dois ERPs.
+  reconciliação com o espelho futuro. **Mapeamento nos dois ERPs**: o título
+  curto vai em `observacoesInternas` (é a coluna "Observação interna" da
+  listagem de compras do Bling e alimenta a busca por pedido); o bloco completo
+  vai em `observacoes`. A 1ª linha do bloco repete o título de propósito, para
+  ficar autocontido. Por ITEM, `descricaoDetalhada` recebe a memória de cálculo
+  em uma linha (`builder.montar_descricao_item`, derivada da `memoria_sugerida`):
+  `Alvo 42 = demanda 30 + segurança 12 - projetado 0 | final 40 | R08/2026`.
+- **Campos de compra do Bling**: `codigoFornecedor` = nosso SKU; `unidade` vem de
+  `unidade_padrao` no config da integração (default `PÇ` — o espelho não traz
+  unidade do cadastro); pagamento = parcela única com `dataVencimento` = emissão +
+  `prazo_pagamento_dias` (default 30) e `formaPagamento.id` (`forma_pagamento_id`,
+  selectbox por nome via `GET /formas-pagamentos`). Os três moram na aba
+  Integrações — são fixos do acordo comercial, não decisão por rodada.
+- **Campos de venda do Olist**: `dataPrevista` = a MESMA `rodada.data_chegada` que
+  vai no Bling (os dois ERPs não podem divergir sobre quando a mercadoria chega);
+  `produto.tipo = "P"` nos itens; `infoAdicional` = SKU (a memória de cálculo é
+  só do Bling — a fábrica não precisa dela). O pagamento espelha a parcela única
+  do Bling, mas o SHAPE é OUTRO: objeto aninhado `pagamento.{formaRecebimento,
+  meioPagamento, parcelas[]}` — no Olist é forma de **recebimento**, não
+  `formaPagamento` no topo. `forma_recebimento_id` (obrigatório p/ gerar o bloco),
+  `meio_pagamento_id` (opcional) moram na aba Integrações; os IDs são digitados
+  porque a API v3 não expõe um GET de formas de recebimento para montar selectbox
+  como o do Bling. **O prazo NÃO se configura no Olist**: a compra e a venda são
+  o mesmo acordo, então `emissor.py` injeta o `prazo_pagamento_dias` do config do
+  **Bling** em `montar_payload_venda(prazo_dias=...)` e os dois vencimentos batem
+  por construção — um campo editável em dois lugares divergiria.
 
 ## Página de Configuração (5_Configuracoes.py)
 

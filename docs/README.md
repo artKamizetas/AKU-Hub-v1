@@ -19,7 +19,10 @@ Art Kamizetas (aparece nos contextos de produção/PCP).
 | [decisoes.md](decisoes.md) | Log cronológico de decisões (o "porquê" de cada escolha) |
 | [migracao-supabase.md](migracao-supabase.md) | **Decisões congeladas** da futura migração das configs (persistência) para o Supabase — a implementar |
 | [glossario.md](glossario.md) | Termos técnicos e de negócio |
+| [bling-app-descricao.md](bling-app-descricao.md) | Texto de descrição do app no portal Bling (integração OAuth de Pedidos de Compra) |
 | [requisitos/normalizacao-colegios.md](requisitos/normalizacao-colegios.md) | **Requisito (proposta)** — tabela configurável para normalizar o colégio (`Marca_sku`), jogando ruído em `Outros` |
+| [requisitos/cobertura-alvo-rodada.md](requisitos/cobertura-alvo-rodada.md) | **Spec (implementada)** — Cobertura Alvo por rodada: antecipação deliberada em % da demanda anual; a rodada seguinte encolhe sozinha |
+| [requisitos/posicao-estoque-on-order.md](requisitos/posicao-estoque-on-order.md) | **Exploração (não implementar ainda)** — on-order/em-trânsito na posição de estoque do motor + reconciliação com o Tiny |
 
 ## Mapa rápido do código
 

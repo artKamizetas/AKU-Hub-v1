@@ -59,7 +59,9 @@ class TestEmitirCompra:
         # payload enviado: itens do pedido, fornecedor da config
         metodo, url, corpo = http.chamadas[0]
         assert corpo["fornecedor"] == {"id": 987}
-        assert corpo["observacoes"].startswith("AKU-PC")
+        # título curto nas observações internas (busca/listagem); bloco no público
+        assert corpo["observacoesInternas"] == "NEVES - CALÇAS - R08/2026"
+        assert corpo["observacoes"].startswith("NEVES - CALÇAS - R08/2026")
 
     def test_cas_perdido_nao_toca_erp(self):
         repo_ped, repo_int = RepoPedFake(), _repo_int_conectado()
@@ -190,6 +192,16 @@ class TestValidacaoEPreview:
         cfg_ok = {"contato_id": "1", "vendedor_id": "2", "deposito_id": "3"}
         assert emissor.validar_pre_emissao_olist(itens, cfg_ok, {"A": 1, "B": 2}) == []
 
+    def test_validacao_bling_exige_forma_pagamento(self):
+        """Sem forma de pagamento o pedido sairia sem parcela/vencimento —
+        barra ANTES do clique, não no erro do POST."""
+        itens = pd.DataFrame({"sku": ["A"], "quantidade_final": [2],
+                              "id_produto_bling": ["111"]})
+        erros = emissor.validar_pre_emissao_bling(itens, {"fornecedor_id": "9"})
+        assert any("forma de pagamento" in x for x in erros)
+        assert emissor.validar_pre_emissao_bling(
+            itens, {"fornecedor_id": "9", "forma_pagamento_id": "555"}) == []
+
     def test_preview_compra_ok_venda_bloqueada_antes_do_bling(self):
         repo_ped, repo_int = RepoPedFake(), _repo_int_conectado()
         pid = _pedido_pronto(repo_ped)
@@ -205,3 +217,35 @@ class TestValidacaoEPreview:
 
         prev = emissor.preview_payloads(pid, repo_ped, repo_int, mapa_sku=MAPA)
         assert prev["venda"]["numeroOrdemCompra"] == "PC-78"
+
+
+class TestProntidaoOlist:
+    """
+    Guarda o aviso que faltava quando 21 compras saíram no Bling e a venda
+    quebrou depois (token do Olist expirado + config vazia).
+    """
+
+    def test_tudo_pronto_nao_avisa(self):
+        assert emissor.checar_prontidao_olist(_repo_int_conectado()) == []
+
+    def test_token_morto_avisa(self):
+        repo = _repo_int_conectado()
+        vencido = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=2)).isoformat()
+        repo.concluir_oauth("olist", "tok", "ref-morto", vencido, "t")
+        # refresh recusado, como o "Token is not active" do Keycloak
+        http = HttpFake([RespostaFake(400, {"error": "invalid_grant"})])
+        avisos = emissor.checar_prontidao_olist(repo, http)
+        assert any("token utilizável" in a for a in avisos)
+
+    def test_config_vazia_avisa_os_tres_ids(self):
+        repo = _repo_int_conectado()
+        repo.salvar_config("olist", {}, "t")
+        avisos = emissor.checar_prontidao_olist(repo)
+        assert any("contato_id" in a and "vendedor_id" in a and "deposito_id" in a
+                   for a in avisos)
+
+    def test_nunca_levanta(self):
+        class RepoQuebrado:
+            def ler(self, _):
+                raise RuntimeError("supabase fora")
+        assert len(emissor.checar_prontidao_olist(RepoQuebrado())) == 1

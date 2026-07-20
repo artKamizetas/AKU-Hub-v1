@@ -75,6 +75,14 @@ Perfis (roles) controlam quais páginas cada usuário vê (`app.py`):
 | `vendedor` | Home, Daily |
 | `estoque` | Logística |
 
+`app.py` chama `verificar_acesso()` uma vez por execução (reautentica pelo cookie,
+inclusive na sessão nova pós-redirect OAuth). As páginas usam o guard leve
+`exigir_login()`; a **`5_Configuracoes.py` usa `identidade_atual()`** (lê
+`name`/`username`/`role` do `session_state`, sem instanciar um 2º
+`Authenticate`/`CookieManager`) — chamar `verificar_acesso()` de novo na página
+criava dois `CookieManager` com a mesma `key="init"` e estourava
+`StreamlitDuplicateElementKey` no retorno do OAuth.
+
 ## Como rodar
 
 ```bash

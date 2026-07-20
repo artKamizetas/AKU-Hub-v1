@@ -15,8 +15,16 @@ ANTES da primeira emissão. Divergiu? O ajuste é só nesta função pura.
 
 import pandas as pd
 
+from pedidos import builder
+
 
 BASE = "https://api.bling.com.br/Api/v3"
+
+# Defaults dos campos de compra que o Bling exige mas o espelho do Supabase não
+# tem (unidade não vem no cadastro espelhado; prazo é acordo comercial).
+# Sobrescritos por app.integracao['bling'].config na aba Integrações.
+UNIDADE_PADRAO = "PÇ"
+PRAZO_PAGAMENTO_PADRAO = 30
 
 
 class BlingFalhou(Exception):
@@ -68,12 +76,27 @@ def obter_pedido_compra_exemplo(token: str, http=None) -> dict:
 
 
 def montar_payload_compra(pedido: dict, itens: pd.DataFrame, rodada: dict,
-                          cfg: dict, obs_internas: str) -> dict:
+                          cfg: dict, obs_completa: str, data_emissao=None) -> dict:
     """
     Payload do POST /pedidos/compras (PURO). Itens só com quantidade_final>0
     (zeros são decisão de não comprar — ficam como auditoria no nosso banco).
 
+    Campos de texto (ordem verificada na gestão de compras do Bling):
+      - observacoesInternas = título curto → é a coluna "Observação interna"
+        da listagem e alimenta a busca por pedido;
+      - observacoes         = bloco completo (obs_completa) com o resumo da rodada;
+      - descricaoDetalhada  = memória de cálculo do item (builder), 1 linha.
+
+    Por item, `codigoFornecedor` = nosso SKU (é a coluna "Código" da tela de
+    compras; SKUs são idênticos nos dois sistemas) e `unidade` vem do config —
+    o espelho do Supabase não traz unidade de medida do cadastro.
+
+    `parcelas`: uma parcela única com vencimento em `prazo_pagamento_dias` a
+    partir da emissão. Só entra no payload quando forma_pagamento_id está
+    configurado (validar_pre_emissao_bling avisa antes do clique).
+
     cfg = app.integracao['bling'].config — exige fornecedor_id (Art Kamizetas).
+    `data_emissao` (default hoje) fica injetável para os testes serem determinísticos.
     """
     fornecedor_id = str(cfg.get("fornecedor_id") or "").strip()
     if not fornecedor_id:
@@ -84,6 +107,10 @@ def montar_payload_compra(pedido: dict, itens: pd.DataFrame, rodada: dict,
     if len(validos) == 0:
         raise ValueError("Pedido sem itens com quantidade final > 0 — nada a emitir.")
 
+    unidade = str(cfg.get("unidade_padrao") or UNIDADE_PADRAO).strip()
+    mes = int(rodada.get("mes_disparo") or 0)
+    ano = int(rodada.get("ano_disparo") or 0)
+
     itens_payload = []
     for _, linha in validos.iterrows():
         id_produto = str(linha["id_produto_bling"]).strip()
@@ -92,18 +119,53 @@ def montar_payload_compra(pedido: dict, itens: pd.DataFrame, rodada: dict,
                              "(produto pode ter sido excluído do cadastro).")
         itens_payload.append({
             "produto": {"id": int(id_produto)},
+            "codigoFornecedor": str(linha["sku"]),
+            "unidade": unidade,
             "quantidade": int(linha["quantidade_final"]),
             "valor": float(linha["custo_unit"]),
             "descricao": str(linha.get("produto", "") or ""),
+            "descricaoDetalhada": builder.montar_descricao_item(linha, mes, ano),
         })
 
-    return {
+    payload = {
         "fornecedor": {"id": int(fornecedor_id)},
         "dataPrevista": str(pd.Timestamp(str(rodada["data_chegada"])).date()),
-        "observacoes": str(pedido["titulo"]),
-        "observacoesInternas": str(obs_internas),
+        "observacoes": str(obs_completa),
+        "observacoesInternas": str(pedido["titulo"]),
         "itens": itens_payload,
     }
+
+    # Pagamento: parcela única, vencimento = emissão + prazo. A data de emissão
+    # vai explícita no payload para o vencimento não divergir do que o Bling
+    # assumiria por conta própria.
+    forma_id = str(cfg.get("forma_pagamento_id") or "").strip()
+    if forma_id:
+        emissao = (pd.Timestamp.now().normalize() if data_emissao is None
+                   else pd.Timestamp(str(data_emissao)).normalize())
+        prazo = int(cfg.get("prazo_pagamento_dias") or PRAZO_PAGAMENTO_PADRAO)
+        total = float((validos["quantidade_final"] * validos["custo_unit"]).sum())
+        payload["data"] = str(emissao.date())
+        payload["parcelas"] = [{
+            "valor": round(total, 2),
+            "dataVencimento": str((emissao + pd.Timedelta(days=prazo)).date()),
+            "formaPagamento": {"id": int(forma_id)},
+        }]
+
+    return payload
+
+
+def listar_formas_pagamento(token: str, http=None) -> list:
+    """
+    GET /formas-pagamentos → [{"id", "descricao"}] p/ o selectbox da aba
+    Integrações (o id é por conta — não dá para hardcodar).
+    """
+    http = http or _http_default()
+    resp = http.get(f"{BASE}/formas-pagamentos", headers=_headers(token))
+    if resp.status_code >= 300:
+        raise BlingFalhou(_erro_legivel(resp))
+    dados = (resp.json() or {}).get("data") or []
+    return [{"id": str(f.get("id", "")), "descricao": str(f.get("descricao", ""))}
+            for f in dados]
 
 
 def criar_pedido_compra(token: str, payload: dict, http=None) -> dict:

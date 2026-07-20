@@ -115,7 +115,7 @@ class TestAgruparPedidos:
     def test_titulo_padronizado(self):
         df = df_fabrica([("A", "A", "P", "c", "Calças", "Neves", 4, 1.0, "R1")])
         grupos = builder.agrupar_pedidos(df, produtos_map([("A", "1")]), "tester", 8, 2026)
-        assert grupos[0]["titulo"] == "AKU-PC · NEVES · CALÇAS · R08/2026"
+        assert grupos[0]["titulo"] == "NEVES - CALÇAS - R08/2026"
 
     def test_nada_para_produzir_lista_vazia(self):
         df = df_fabrica([("A", "A", "P", "c", "SC", "COL", 0, 1.0, "R1")])
@@ -151,6 +151,55 @@ class TestAgruparPedidos:
         assert mem["demanda_periodo"] is None
         assert mem["janela_label"] == "R1"   # essa coluna existe no sintético
         json.dumps(mem)
+
+
+# ---------------------------------------------------------------------------
+# montar_descricao_item — memória de cálculo enxuta p/ o campo do ERP
+# ---------------------------------------------------------------------------
+MEM = {"demanda_periodo": 30.0, "estoque_seguranca": 12.0,
+       "estoque_projetado": 0.0, "estoque_meta": 42.0}
+
+
+class TestDescricaoItem:
+    def test_linha_completa(self):
+        item = {"memoria_sugerida": MEM, "quantidade_sugerida": 42,
+                "quantidade_final": 42}
+        assert builder.montar_descricao_item(item, 8, 2026) == (
+            "Alvo 42 = demanda 30 + segurança 12 - projetado 0 → 42 pç | R08/2026")
+
+    def test_fracionarios_preservam_uma_casa(self):
+        """Rodada de baixo volume (pedido 433): arredondar p/ inteiro dava
+        'demanda 2 + segurança 0' para 1,6 + 0,2 — conta incoerente. E o
+        projetado -0,2 não pode virar '-0'."""
+        mem = {"demanda_periodo": 1.6, "estoque_seguranca": 0.2,
+               "estoque_projetado": -0.2, "estoque_meta": 2}
+        item = {"memoria_sugerida": mem, "quantidade_sugerida": 4,
+                "quantidade_final": 4}
+        assert builder.montar_descricao_item(item, 7, 2026) == (
+            "Alvo 2 = demanda 1,6 + segurança 0,2 - projetado -0,2 → 4 pç | R07/2026")
+
+    def test_quantidade_fecha_a_conta(self):
+        """Entre o alvo e a quantidade há o par_ceil — sem a qtd no fim, a linha
+        não reconcilia com o item do pedido (alvo 2 → 4 peças)."""
+        mem = dict(MEM, estoque_meta=2.0)
+        item = {"memoria_sugerida": mem, "quantidade_sugerida": 4,
+                "quantidade_final": 4}
+        assert "→ 4 pç" in builder.montar_descricao_item(item, 8, 2026)
+
+    def test_final_editado_aparece(self):
+        """Divergência sugerida×final é intervenção manual — vira sinal na linha."""
+        item = {"memoria_sugerida": MEM, "quantidade_sugerida": 42,
+                "quantidade_final": 40}
+        assert "→ 40 pç (ajustado de 42)" in builder.montar_descricao_item(item, 8, 2026)
+
+    def test_sem_memoria_vazio(self):
+        """Rodada congelada antes do DDL 004 → campo vazio, sem placeholder."""
+        assert builder.montar_descricao_item({"memoria_sugerida": None}, 8, 2026) == ""
+        assert builder.montar_descricao_item({}, 8, 2026) == ""
+
+    def test_driver_faltando_vazio(self):
+        mem = dict(MEM, estoque_meta=None)
+        assert builder.montar_descricao_item({"memoria_sugerida": mem}, 8, 2026) == ""
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +292,7 @@ class TestObservacoesBling:
             "data_chegada": "2026-08-29", "data_chegada_seguinte": "2026-11-29",
             "congelada_em": "2026-07-12T10:00:00+00:00", "congelada_por": "diretoria",
         }
-        pedido = {"id": "abc-123", "titulo": "AKU-PC · NEVES · CALÇAS · R08/2026"}
+        pedido = {"id": "abc-123", "titulo": "NEVES - CALÇAS - R08/2026"}
         itens = pd.DataFrame({
             "quantidade_final": [10, 0, 4],
             "custo_unit": [10.0, 5.0, 2.5],
@@ -254,7 +303,7 @@ class TestObservacoesBling:
         rodada, pedido, itens = self._base()
         texto = builder.montar_observacoes_bling(rodada, pedido, itens)
         linhas = texto.split("\n")
-        assert linhas[0] == "AKU-PC · NEVES · CALÇAS · R08/2026"
+        assert linhas[0] == "NEVES - CALÇAS - R08/2026"
         # item com quantidade_final = 0 fica fora dos totais
         assert "2 SKUs · 14 pares" in linhas[2]
         assert "R$ 110,00" in linhas[2]        # 10×10 + 4×2,5
@@ -268,4 +317,4 @@ class TestObservacoesBling:
 
     def test_titulo_padrao(self):
         assert (builder.montar_titulo("Neves", "calças", 8, 2026)
-                == "AKU-PC · NEVES · CALÇAS · R08/2026")
+                == "NEVES - CALÇAS - R08/2026")

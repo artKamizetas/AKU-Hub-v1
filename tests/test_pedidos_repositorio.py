@@ -106,11 +106,11 @@ def grupos_min():
             "quantidade_sugerida": 10, "quantidade_final": 10, "custo_unit": 5.0}
     return [
         {"colegio": "NEVES", "super_categoria": "CALÇAS",
-         "titulo": "AKU-PC · NEVES · CALÇAS · R08/2026", "criado_por": "tester",
+         "titulo": "NEVES - CALÇAS - R08/2026", "criado_por": "tester",
          "itens": [item, {**item, "sku": "A-M", "quantidade_sugerida": 4,
                           "quantidade_final": 4}]},
         {"colegio": "NEVES", "super_categoria": "CAMISETAS",
-         "titulo": "AKU-PC · NEVES · CAMISETAS · R08/2026", "criado_por": "tester",
+         "titulo": "NEVES - CAMISETAS - R08/2026", "criado_por": "tester",
          "itens": [{**item, "sku": "B-PP"}]},
     ]
 

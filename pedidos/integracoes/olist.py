@@ -18,6 +18,10 @@ import pandas as pd
 BASE = "https://api.tiny.com.br/public-api/v3"
 _PAGINA = 100   # limit máximo aceito pelo GET /produtos
 
+# Só o piso de segurança: o prazo real vem do config do BLING (mesmo acordo,
+# dois documentos) e é injetado em montar_payload_venda(prazo_dias=...).
+PRAZO_PAGAMENTO_PADRAO = 30
+
 
 class OlistFalhou(Exception):
     """Resposta não-2xx da API do Olist (mensagem legível p/ a UI)."""
@@ -101,12 +105,28 @@ def mapear_produtos_por_sku(token: str, skus: list, http=None) -> tuple:
 
 def montar_payload_venda(pedido: dict, itens: pd.DataFrame, rodada: dict,
                          cfg: dict, mapa_sku: dict, bling_numero: str,
-                         obs_internas: str) -> dict:
+                         obs_completa: str, prazo_dias=None,
+                         data_emissao=None) -> dict:
     """
     Payload do POST /pedidos (PURO). Itens só com quantidade_final>0.
 
+    Texto espelha o Bling: observacoesInternas = título curto (busca/listagem),
+    observacoes = bloco completo (obs_completa) com o resumo da rodada.
+    `dataPrevista` = data de chegada da rodada — o MESMO valor que vai no Bling,
+    para os dois ERPs nunca divergirem sobre quando a mercadoria chega.
+
+    `pagamento` tem SHAPE diferente do Bling: objeto aninhado com
+    `formaRecebimento` (não `formaPagamento` solto no topo). Só entra quando
+    forma_recebimento_id está configurado.
+
+    `prazo_dias` é o prazo do BLING, injetado pelo chamador — o pedido de compra
+    e o de venda são o MESMO acordo visto dos dois lados, então o vencimento tem
+    de bater. Por isso não existe campo de prazo na config do Olist: um número
+    editável em dois lugares divergiria na primeira vez que alguém mudasse um só.
+
     cfg = app.integracao['olist'].config — exige contato_id (AK Uniformes),
     vendedor_id e deposito_id (obrigatórios na API). situacao default 0=Aberta.
+    `data_emissao` (default hoje) fica injetável p/ testes determinísticos.
     """
     faltando_cfg = [c for c in ("contato_id", "vendedor_id", "deposito_id")
                     if not str(cfg.get(c) or "").strip()]
@@ -128,22 +148,49 @@ def montar_payload_venda(pedido: dict, itens: pd.DataFrame, rodada: dict,
             raise ValueError(f"SKU {sku} não encontrado no catálogo do Olist — "
                              "rode a pré-validação na tela do pedido.")
         itens_payload.append({
-            "produto": {"id": int(mapa_sku[sku])},
+            "produto": {"id": int(mapa_sku[sku]), "tipo": "P"},
             "quantidade": int(linha["quantidade_final"]),
             "valorUnitario": float(linha["custo_unit"]),
             "infoAdicional": sku,
         })
 
-    return {
+    chegada = pd.Timestamp(str(rodada["data_chegada"])).normalize()
+    payload = {
         "idContato": int(cfg["contato_id"]),
         "situacao": int(cfg.get("situacao", 0)),          # 0 = Aberta
+        "dataPrevista": str(chegada.date()),
         "numeroOrdemCompra": str(bling_numero),
-        "observacoes": str(pedido["titulo"]),
-        "observacoesInternas": str(obs_internas),
+        "observacoes": str(obs_completa),
+        "observacoesInternas": str(pedido["titulo"]),
         "vendedor": {"id": int(cfg["vendedor_id"])},
         "deposito": {"id": int(cfg["deposito_id"])},
         "itens": itens_payload,
     }
+
+    # Recebimento: parcela única com vencimento em `prazo_dias` a partir da
+    # emissão — a MESMA regra e o MESMO prazo do pedido de compra do Bling.
+    forma_id = str(cfg.get("forma_recebimento_id") or "").strip()
+    if forma_id:
+        emissao = (pd.Timestamp.now().normalize() if data_emissao is None
+                   else pd.Timestamp(str(data_emissao)).normalize())
+        prazo = int(prazo_dias if prazo_dias is not None else PRAZO_PAGAMENTO_PADRAO)
+        total = float((validos["quantidade_final"] * validos["custo_unit"]).sum())
+        payload["data"] = str(emissao.date())
+        payload["pagamento"] = {
+            "formaRecebimento": {"id": int(forma_id)},
+            "parcelas": [{
+                "dias": prazo,
+                "data": str((emissao + pd.Timedelta(days=prazo)).date()),
+                "valor": round(total, 2),
+                "formaRecebimento": {"id": int(forma_id)},
+            }],
+        }
+        meio_id = str(cfg.get("meio_pagamento_id") or "").strip()
+        if meio_id:
+            payload["pagamento"]["meioPagamento"] = {"id": int(meio_id)}
+            payload["pagamento"]["parcelas"][0]["meioPagamento"] = {"id": int(meio_id)}
+
+    return payload
 
 
 def criar_pedido_venda(token: str, payload: dict, http=None) -> dict:

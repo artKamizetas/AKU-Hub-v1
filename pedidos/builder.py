@@ -231,11 +231,72 @@ def montar_titulo(colegio: str, super_categoria: str,
                   mes_disparo: int, ano_disparo: int) -> str:
     """
     Título padronizado, curto e escaneável nas listagens do Bling.
-    Ex: 'AKU-PC · NEVES · CALÇAS · R08/2026'
+    Vai no campo "Observações internas" dos ERPs (é a coluna que aparece na
+    listagem de pedidos de compra e alimenta a busca). Separador ' - ' (e não
+    '·') para ser fácil de digitar na busca do Bling.
+    Ex: 'NEVES - CALÇAS - R08/2026'
     """
-    return (f"AKU-PC · {str(colegio).strip().upper()} · "
-            f"{str(super_categoria).strip().upper()} · "
+    return (f"{str(colegio).strip().upper()} - "
+            f"{str(super_categoria).strip().upper()} - "
             f"R{int(mes_disparo):02d}/{int(ano_disparo)}")
+
+
+def _num(valor: float) -> str:
+    """
+    Número curto em pt-BR: inteiro quando é inteiro, 1 casa quando fracionário.
+    Arredondar tudo para inteiro tornava a linha incoerente nas rodadas de baixo
+    volume ('demanda 2 + segurança 0' para 1,6 + 0,2) — e o '-0' do projetado
+    negativo pequeno parecia defeito.
+    """
+    arredondado = round(float(valor) + 0.0, 1) + 0.0   # +0.0 normaliza o -0.0
+    texto = f"{arredondado:.0f}" if arredondado == int(arredondado) else f"{arredondado:.1f}"
+    return texto.replace(".", ",")
+
+
+def montar_descricao_item(item, mes_disparo: int, ano_disparo: int) -> str:
+    """
+    Linha única para o campo "Descrição detalhada" do item no ERP: a memória de
+    cálculo enxuta que explica AQUELA quantidade, visível para quem produz.
+
+        Alvo 2 = demanda 1,6 + segurança 0,2 - projetado -0,2 → 4 pç | R07/2026
+
+    É a mesma conta order-up-to do painel de revisão, comprimida numa linha —
+    o detalhamento (alta/baixa, nível de serviço, estoque/backlog separados)
+    fica no AKU-Hub, que é onde há espaço para tabela.
+
+    A quantidade final vai SEMPRE no fim (`→ N pç`): entre o alvo e o que se
+    compra há o arredondamento para par (`par_ceil`), então sem esse elo a conta
+    não fecha com a linha do pedido — foi o que apareceu na conferência do
+    pedido 433 (alvo 2 → 4 peças). Quando a quantidade foi editada à mão, o
+    'ajustado de N' marca a intervenção.
+
+    Retorna "" (campo vazio, sem placeholder) quando a memória não existe —
+    rodadas congeladas antes do DDL 004 ou item sem os drivers.
+    """
+    mem = item.get("memoria_sugerida") if hasattr(item, "get") else None
+    if not isinstance(mem, dict) or not mem:
+        return ""
+
+    campos = ("estoque_meta", "demanda_periodo", "estoque_seguranca", "estoque_projetado")
+    valores = {c: mem.get(c) for c in campos}
+    if any(v is None or not isinstance(v, (int, float)) for v in valores.values()):
+        return ""
+
+    conta = (f"Alvo {_num(valores['estoque_meta'])} = "
+             f"demanda {_num(valores['demanda_periodo'])} + "
+             f"segurança {_num(valores['estoque_seguranca'])} - "
+             f"projetado {_num(valores['estoque_projetado'])}")
+
+    # O elo que fecha a conta: do alvo até a quantidade comprada há o
+    # arredondamento para par do motor (e, se houve, a edição do gestor).
+    final = item.get("quantidade_final")
+    sugerida = item.get("quantidade_sugerida")
+    if final is not None:
+        conta += f" → {int(final)} pç"
+        if sugerida is not None and int(sugerida) != int(final):
+            conta += f" (ajustado de {int(sugerida)})"
+
+    return f"{conta} | R{int(mes_disparo):02d}/{int(ano_disparo)}"
 
 
 def _fmt_brl(x: float) -> str:
@@ -249,9 +310,11 @@ def _mes_ano(ts) -> str:
 
 def montar_observacoes_bling(rodada: dict, pedido: dict, itens: pd.DataFrame) -> str:
     """
-    Texto padronizado COMPLETO para o campo de observações internas do pedido
-    de compra no Bling (API v3: observacoesInternas — nome exato do campo é
-    verificado na fase de emissão).
+    Texto padronizado COMPLETO para o campo "Observações" (público) do pedido
+    de compra — o resumo detalhado da rodada. O título curto vai à parte, no
+    campo "Observações internas" (que é o que aparece na listagem e alimenta a
+    busca do Bling). A 1ª linha repete o título de propósito, para o bloco ser
+    autocontido.
 
     Determinístico e sempre recomposto no momento do uso: os totais refletem
     quantidade_final (edições pós-congelamento), nunca texto pré-gravado.

@@ -9,6 +9,77 @@ Records). Adicione no topo as mais recentes.
 
 ---
 
+## 2026-07 · Payload de compra completo: código, unidade, pagamento e memória por item
+A 1ª conferência de um pedido emitido no Bling mostrou campos vazios que a operação
+preenchia à mão: **Código** (`codigoFornecedor` = nosso SKU — idêntico nos dois
+sistemas), **Un** (`unidade`) e a **forma de pagamento**. Agora saem no payload:
+
+- `unidade` vem de `unidade_padrao` no config da integração (default `PÇ`) — o
+  espelho `public.produto_detalhes` **não traz** unidade do cadastro, e uma chamada
+  extra ao Bling por item não se justifica para um valor que é o mesmo em tudo;
+- pagamento = **parcela única**, `dataVencimento` = emissão + `prazo_pagamento_dias`
+  (default 30), `formaPagamento.id` escolhido por nome num selectbox alimentado por
+  `GET /formas-pagamentos`. Mora na **aba Integrações**, não na rodada congelada:
+  é característica fixa do acordo com a Art Kamizetas, não decisão por rodada —
+  colocá-la na rodada obrigaria a redecidir todo congelamento algo que nunca muda,
+  e espalharia config de ERP para dentro do domínio de pedidos;
+- `descricaoDetalhada` por item recebe a **memória de cálculo em uma linha**
+  (`builder.montar_descricao_item`): `Alvo 42 = demanda 30 + segurança 12 -
+  projetado 0 | final 40 | R08/2026`. Reaproveita a `memoria_sugerida` (DDL 004) que
+  já era congelada e só era lida na revisão do rascunho — quem produz passa a ver o
+  porquê da quantidade sem abrir o AKU-Hub. `| final X` só aparece quando divergiu
+  da sugestão (sinal de intervenção manual); sem memória, campo vazio, sem placeholder.
+
+`forma_pagamento_id` entrou como obrigatório em `validar_pre_emissao_bling` — a
+falta barra o clique em vez de gerar um pedido sem vencimento. Nomes dos campos
+conferidos contra o JSON de exemplo do POST `/pedidos/compras` (atenção:
+`codigoFornecedor`, não `codigo`; parcela usa `observacao` no singular).
+
+## 2026-07 · Spec (exploração) — on-order/em-trânsito na posição de estoque
+Aberta a spec `requisitos/posicao-estoque-on-order.md` (🟡 EM DISCUSSÃO, não
+implementar). Nasce da pergunta da diretoria: *"a rodada sugere 70 mas eu faço
+65; a projeção nunca fica sabendo disso"*. O motor order-up-to abre em
+`estoque − backlog` e recalcula o pedido a cada chegada — falta o termo
+**em-trânsito** (comprometido e ainda não recebido), o que faz a decisão manual
+do gestor evaporar e gera um viés que troca de sinal conforme o tempo. Fecha a
+pendência da Cobertura Alvo (§8). Decisões de projeto ainda em aberto: fonte do
+on-order (ponte própria em `app` × espelho `public` do outro time × read-back no
+Tiny), a **regra de ouro da reconciliação** (baixar o on-order no instante em que
+vira estoque físico, evitando contagem dupla), e o faseamento (passo 1 =
+"travar rodada futura comprometida" é baixo risco e recomendado primeiro). O
+Tiny/Olist é a fonte da verdade da execução (qtd/data reais deslizam na fábrica);
+o nosso banco guarda a intenção; o `ref:<uuid>` costura os dois.
+
+## 2026-07 · Guard de auth leve nas páginas (`identidade_atual`) + UI de Pedidos em 2 modos
+- **`auth.identidade_atual()`**: a `5_Configuracoes.py` passou a usar um guard leve
+  que lê `name`/`username`/`role` do `session_state`, em vez de chamar
+  `verificar_acesso()` de novo. O `app.py` já reautentica pelo cookie a cada
+  execução (inclusive na sessão nova pós-redirect OAuth) ANTES de a página rodar;
+  chamar `verificar_acesso()` de novo criava um 2º `CookieManager` com a mesma
+  `key="init"` e estourava `StreamlitDuplicateElementKey` no retorno do OAuth.
+- **Pré-validação simétrica da emissão**: `validar_pre_emissao_bling` espelha o
+  `_olist` — dá o feedback (config incompleta, nada a emitir, item sem id) ANTES
+  do clique, em vez de o erro do payload sumir.
+- **UI da 4_Pedidos** reorganizada: `st.segmented_control` com dois modos (editar
+  UM pedido × ação em LOTE) dentro de um único `@st.fragment` (`_area_trabalho`),
+  para trocar de modo sem re-ler o topo (sem cache) nem "piscar". NÃO em
+  `st.tabs` — fragment-que-rerroda dentro de tabs vaza conteúdo (bug #9158/#9313
+  do Streamlit). Resumo da rodada em KPIs no topo, emissões com `st.status`, e o
+  log de integração ganhou coluna "Detalhe / erro" (resumo legível do jsonb).
+
+## 2026-07 · Observações dos pedidos: título curto vai no campo "interno"
+Dois ajustes no texto que os pedidos de compra levam aos ERPs (`builder.py` +
+`integracoes/{bling,olist}.py`):
+1. O prefixo `AKU-PC ·` saiu do título e o separador `·` virou ` - ` (fácil de
+   digitar na busca do Bling). Formato agora: `COLÉGIO - SUPERCAT - Rmm/aaaa`.
+2. **Inversão dos campos**: o Bling mostra a coluna "Observação interna" na
+   *listagem* de compras e busca por ela; então o **título curto** passou a ir
+   em `observacoesInternas` (escaneável/buscável) e o **bloco completo** em
+   `observacoes` (detalhe da rodada, aberto ao entrar no pedido). Antes era o
+   contrário. Espelhado no Olist para consistência. A 1ª linha do bloco repete
+   o título de propósito (autocontido). Só afeta pedidos congelados a partir
+   daqui — o `titulo` é persistido no congelamento.
+
 ## 2026-07 · Migrações DDL por script (Management API), não mais copiar-e-colar
 As migrações do schema `app` (`docs/sql/00N_*.sql`) deixam de ser aplicadas à mão no
 SQL Editor: `python scripts/migrar.py aplicar` roda as pendentes e registra num ledger

@@ -21,11 +21,12 @@ if "code" in _qp and "state" in _qp and "_oauth_retorno" not in st.session_state
     st.session_state["_oauth_retorno"] = {"code": _qp["code"], "state": _qp["state"]}
     st.query_params.clear()   # tira o code da URL (F5 não re-dispara a troca)
 
-# verificar_acesso (NÃO exigir_login): reautentica pelo COOKIE numa sessão nova.
-# exigir_login só olhava session_state, então o retorno do OAuth caía em
-# "faça login pela página principal" e o callback nunca rodava.
-from auth import verificar_acesso
-_nome, username, role = verificar_acesso()
+# identidade_atual (guard LEVE): o app.py já roda verificar_acesso() a cada
+# execução — reautenticando pelo cookie mesmo na sessão nova pós-OAuth — ANTES
+# de esta página rodar. Chamar verificar_acesso() aqui de novo criava um 2º
+# CookieManager (key="init" duplicada) → StreamlitDuplicateElementKey.
+from auth import identidade_atual
+_nome, username, role = identidade_atual()
 
 import yaml
 from datetime import datetime, date
@@ -810,8 +811,100 @@ with tab_int:
             "a página."
         )
 
-    def _card_integracao(plataforma: str, titulo: str, campos_negocio: list):
-        """Card de configuração + conexão OAuth de uma plataforma."""
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def _formas_pagamento_bling() -> list:
+        """Formas de pagamento da conta (id é por conta — não dá p/ hardcodar)."""
+        token = oauth.obter_access_token("bling", obter_repositorio_integracoes())
+        return cliente_bling.listar_formas_pagamento(token)
+
+    def _extras_bling(cfg: dict, conectado: bool) -> dict:
+        """
+        Pagamento do pedido de compra: mora aqui (e não na rodada) porque é
+        característica fixa do acordo com a Art Kamizetas — não varia por rodada.
+        Selectbox quando conectado (nomes em vez de IDs); text_input como
+        degradação se a conta não estiver conectada ou o GET falhar.
+        """
+        st.markdown("**Pagamento** (usado nas parcelas do pedido de compra)")
+        salvo = str(cfg.get("forma_pagamento_id") or "")
+        forma_id = salvo
+
+        formas, erro = [], None
+        if conectado:
+            try:
+                formas = _formas_pagamento_bling()
+            except Exception as exc:
+                erro = str(exc)
+
+        if formas:
+            ids = [f["id"] for f in formas]
+            rotulos = {f["id"]: f["descricao"] for f in formas}
+            if salvo and salvo not in ids:      # forma removida/renomeada no Bling
+                ids.insert(0, salvo)
+                rotulos[salvo] = f"(id {salvo} — não está mais na lista)"
+            forma_id = st.selectbox(
+                "Forma de pagamento", options=ids,
+                index=ids.index(salvo) if salvo in ids else 0,
+                format_func=lambda i: rotulos.get(i, i),
+                help="Cadastros → Formas de pagamento no Bling.",
+                key="neg_bling_forma_sel")
+        else:
+            if erro:
+                st.caption(f"⚠️ Não foi possível listar as formas de pagamento: {erro}")
+            forma_id = st.text_input(
+                "ID da forma de pagamento", value=salvo,
+                help="Conecte a integração para escolher pelo nome.",
+                key="neg_bling_forma_txt")
+
+        prazo = st.number_input(
+            "Prazo de pagamento (dias da emissão)", min_value=0, max_value=365,
+            value=int(cfg.get("prazo_pagamento_dias") or 30), step=1,
+            help="Vencimento da parcela = data de emissão + este prazo.",
+            key="neg_bling_prazo")
+
+        unidade = st.text_input(
+            "Unidade de medida dos itens", value=str(cfg.get("unidade_padrao") or "PÇ"),
+            help="O espelho do Supabase não traz a unidade do cadastro — "
+                 "este valor vai em todos os itens do pedido.",
+            key="neg_bling_unidade")
+
+        return {"forma_pagamento_id": str(forma_id or "").strip(),
+                "prazo_pagamento_dias": int(prazo),
+                "unidade_padrao": unidade.strip()}
+
+    def _extras_olist(cfg: dict, conectado: bool) -> dict:
+        """
+        Recebimento do pedido de venda. Sem campo de prazo de propósito: a
+        compra e a venda são o mesmo acordo, então o prazo é o do card do Bling
+        — duplicar o campo só criaria divergência. IDs digitados: a API v3 não
+        expõe um GET de formas de recebimento para montar selectbox como o do
+        Bling.
+        """
+        st.markdown("**Recebimento** (usado nas parcelas do pedido de venda)")
+        forma = st.text_input(
+            "ID da forma de recebimento",
+            value=str(cfg.get("forma_recebimento_id") or ""),
+            help="Cadastros → Formas de recebimento no Olist. Vazio = pedido "
+                 "emitido sem bloco de pagamento.",
+            key="neg_olist_forma")
+        meio = st.text_input(
+            "ID do meio de pagamento (opcional)",
+            value=str(cfg.get("meio_pagamento_id") or ""),
+            help="Deixe vazio se o Olist não exigir na sua conta.",
+            key="neg_olist_meio")
+        st.caption("O prazo da parcela é o mesmo do pedido de compra "
+                   "(card do Bling) — não se configura em dois lugares.")
+
+        return {"forma_recebimento_id": forma.strip(),
+                "meio_pagamento_id": meio.strip()}
+
+    def _card_integracao(plataforma: str, titulo: str, campos_negocio: list,
+                         extras_form=None):
+        """
+        Card de configuração + conexão OAuth de uma plataforma.
+        `extras_form(cfg, conectado) -> dict` desenha campos extras DENTRO do
+        form de IDs de negócio e devolve o que gravar junto (salvar_config
+        substitui o jsonb inteiro — tudo precisa sair no mesmo submit).
+        """
         repo_int = obter_repositorio_integracoes()
         integ = repo_int.ler(plataforma) or {}
         conectado = bool(integ.get("refresh_token"))
@@ -846,14 +939,26 @@ with tab_int:
                 st.code(integ["redirect_uri"], language=None)
 
             # -- 2. Conexão --
+            # Ter refresh_token != estar utilizável: o refresh do Olist (Keycloak)
+            # morre com a sessão SSO e só descobrimos na hora de renovar. Access
+            # vencido há muito tempo = aviso, não o "✅ Conectado" que mentia.
             st.markdown("**Conexão**")
             if conectado:
-                validade = "?"
+                validade, exp = "?", None
                 if integ.get("token_expira_em"):
                     exp = pd.Timestamp(str(integ["token_expira_em"]))
-                    validade = exp.strftime("%d/%m/%Y %H:%M")
-                st.success(f"✅ Conectado por {integ.get('conectado_por','?')} · "
-                           f"token expira {validade}")
+                    if exp.tzinfo is None:
+                        exp = exp.tz_localize("UTC")
+                    validade = exp.tz_convert(None).strftime("%d/%m/%Y %H:%M")
+                quem = integ.get("conectado_por", "?")
+                if exp is not None and not oauth.token_valido(integ):
+                    st.warning(
+                        f"⚠️ Autorizado por {quem}, mas o token venceu em "
+                        f"{validade} (UTC). A renovação é automática — se a "
+                        "sessão na plataforma tiver expirado, ela falha e é "
+                        "preciso reconectar. Use **Testar conexão** antes de emitir.")
+                else:
+                    st.success(f"✅ Conectado por {quem} · token expira {validade} (UTC)")
             else:
                 st.info("❌ Não conectado.")
 
@@ -893,8 +998,12 @@ with tab_int:
                     valores[chave] = st.text_input(
                         rotulo, value=str(cfg.get(chave, "") or ""),
                         help=ajuda, key=f"neg_{plataforma}_{chave}")
+                extras = extras_form(cfg, conectado) if extras_form else {}
                 if st.form_submit_button("💾 Salvar IDs de negócio"):
                     novo = {k: v.strip() for k, v in valores.items() if v.strip()}
+                    # extras já vêm tipados (int/str) — só descarta string vazia
+                    novo.update({k: v for k, v in extras.items()
+                                 if not (isinstance(v, str) and not v)})
                     if plataforma == "olist" and "situacao" not in novo:
                         novo["situacao"] = 0
                     repo_int.salvar_config(plataforma, novo, username or "admin")
@@ -924,6 +1033,7 @@ with tab_int:
             "bling", "🛒 Bling — Pedido de Compra (AK Uniformes)",
             [("fornecedor_id", "ID do fornecedor (Art Kamizetas)",
               "Cadastros → Fornecedores no Bling")],
+            extras_form=_extras_bling,
         )
         _card_integracao(
             "olist", "🏭 Olist — Pedido de Venda (Art Kamizetas)",
@@ -931,14 +1041,31 @@ with tab_int:
              ("vendedor_id", "ID do vendedor", "Obrigatório na API do Olist"),
              ("deposito_id", "ID do depósito", "Obrigatório na API do Olist"),
              ("situacao", "Situação inicial (0 = Aberta)", "Código de situação do pedido")],
+            extras_form=_extras_olist,
         )
 
         with st.expander("📜 Últimos eventos de integração"):
             _eventos = obter_repositorio_integracoes().listar_eventos(20)
             if len(_eventos):
-                _cols = [c for c in ["criado_em", "plataforma", "acao", "sucesso", "criado_por"]
+                def _resumo_detalhe(det):
+                    # jsonb → resumo legível: erro (falhas) tem prioridade, depois
+                    # msg (sucessos), senão o JSON compacto. Vazio quando não há.
+                    if not isinstance(det, dict):
+                        return ""
+                    return (det.get("erro") or det.get("msg")
+                            or ", ".join(f"{k}={v}" for k, v in det.items()))
+                _eventos = _eventos.copy()
+                _eventos["detalhe"] = _eventos.get("detalhe").map(_resumo_detalhe) \
+                    if "detalhe" in _eventos.columns else ""
+                _cols = [c for c in ["criado_em", "plataforma", "acao", "sucesso",
+                                     "detalhe", "criado_por"]
                          if c in _eventos.columns]
-                st.dataframe(_eventos[_cols], width="stretch", hide_index=True)
+                st.dataframe(
+                    _eventos[_cols], width="stretch", hide_index=True,
+                    column_config={"detalhe": st.column_config.TextColumn(
+                        "Detalhe / erro", width="large",
+                        help="Motivo da falha ou resumo do evento (campo detalhe do log)")},
+                )
             else:
                 st.caption("Nenhum evento ainda.")
 

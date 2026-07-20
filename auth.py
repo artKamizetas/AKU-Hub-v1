@@ -53,6 +53,9 @@ def verificar_acesso():
         nome = st.session_state.get("name", "")
         username = st.session_state.get("username", "")
         role = usernames.get(username, {}).get("role", "vendedor")
+        # Guarda o role p/ páginas lerem via identidade_atual() sem instanciar
+        # um 2º Authenticate/CookieManager (name/username já vêm da lib).
+        st.session_state["_aku_role"] = role
 
         # Sidebar: info do usuário e logout
         with st.sidebar:
@@ -77,6 +80,25 @@ def exigir_login():
     if not st.session_state.get("authentication_status"):
         st.error("Acesso negado. Faça login pela página principal.")
         st.stop()
+
+
+def identidade_atual():
+    """
+    Guard LEVE que devolve (nome, username, role) a partir do session_state,
+    sem instanciar um 2º Authenticate/CookieManager.
+
+    O app.py chama verificar_acesso() a CADA execução (reautenticando pelo
+    cookie, mesmo em sessão nova pós-redirect OAuth) ANTES de a página rodar —
+    então aqui a sessão já está autenticada. Chamar verificar_acesso() de novo
+    na página criava um segundo CookieManager (ambos com key="init") e estourava
+    StreamlitDuplicateElementKey.
+    """
+    if not st.session_state.get("authentication_status"):
+        st.error("Acesso negado. Faça login pela página principal.")
+        st.stop()
+    return (st.session_state.get("name", ""),
+            st.session_state.get("username", ""),
+            st.session_state.get("_aku_role", "vendedor"))
 
 
 if __name__ == "__main__":

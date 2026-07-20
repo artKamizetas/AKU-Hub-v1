@@ -121,9 +121,13 @@ def emitir_venda_olist(pedido_id: str, usuario: str, repo_ped, repo_int,
                         f"{', '.join(faltantes[:8])}"
                         + ("…" if len(faltantes) > 8 else ""))
             obs = builder.montar_observacoes_bling(rodada, pedido, itens)
+            # Prazo vem do Bling: a compra e a venda são o mesmo acordo, o
+            # vencimento tem de bater nos dois ERPs.
+            cfg_b = (repo_int.ler("bling") or {}).get("config") or {}
             payload = olist.montar_payload_venda(
                 pedido, itens, rodada, integ.get("config") or {}, mapa_sku,
-                pedido.get("bling_numero", ""), obs)
+                pedido.get("bling_numero", ""), obs,
+                prazo_dias=cfg_b.get("prazo_pagamento_dias"))
             res = olist.criar_pedido_venda(token, payload, http)
             pos_post = True
             repo_ped.registrar_ids_emissao(pedido_id, res, usuario)
@@ -191,6 +195,65 @@ def validar_pre_emissao_olist(itens, cfg: dict, mapa_sku: dict) -> list:
     return erros
 
 
+def checar_prontidao_olist(repo_int, http=None) -> list:
+    """
+    O Olist consegue receber a venda AGORA? Checa token e config — sem tocar
+    no catálogo (barato o bastante p/ rodar com o pedido ainda em PRONTO).
+
+    Existe porque a emissão é em dois momentos: a compra no Bling é
+    IRREVERSÍVEL daqui, e sem este aviso um problema do lado do Olist só
+    aparecia depois — deixando pedidos parados em COMPRA_EMITIDA sem par.
+    Retorna lista de avisos (vazia = pronto). Nunca levanta.
+    """
+    avisos = []
+    try:
+        integ = repo_int.ler("olist") or {}
+    except Exception as exc:
+        return [f"Não foi possível ler a integração do Olist: {exc}"]
+
+    try:
+        oauth.obter_access_token("olist", repo_int, http)
+    except Exception as exc:
+        avisos.append(f"Olist sem token utilizável ({exc}). Reconecte na aba "
+                      "Integrações ANTES de emitir a compra.")
+
+    cfg = integ.get("config") or {}
+    faltando = [c for c in ("contato_id", "vendedor_id", "deposito_id")
+                if not str(cfg.get(c) or "").strip()]
+    if faltando:
+        avisos.append(f"Config do Olist incompleta: {', '.join(faltando)} "
+                      "(aba Integrações).")
+    return avisos
+
+
+def validar_pre_emissao_bling(itens, cfg: dict) -> list:
+    """
+    Checks puros antes de habilitar o botão de COMPRA: config incompleta
+    (fornecedor_id), nada a emitir e itens sem id de produto do Bling. Lista
+    vazia = pode emitir. Espelha validar_pre_emissao_olist — dá o feedback
+    ANTES do clique (o erro do payload deixava de aparecer para o usuário).
+    """
+    erros = []
+    if not str(cfg.get("fornecedor_id") or "").strip():
+        erros.append("Config do Bling incompleta: fornecedor_id (Art Kamizetas) "
+                     "— preencha na aba Integrações.")
+    if not str(cfg.get("forma_pagamento_id") or "").strip():
+        erros.append("Config do Bling sem forma de pagamento — escolha na aba "
+                     "Integrações (o pedido sairia sem parcela/vencimento).")
+    validos = itens[itens["quantidade_final"] > 0]
+    if len(validos) == 0:
+        erros.append("Nenhum item com quantidade final > 0 — nada a emitir.")
+    elif "id_produto_bling" in validos.columns:
+        sem_id = validos[
+            validos["id_produto_bling"].astype(str).str.strip()
+            .isin(["", "nan", "None", "<NA>"])
+        ]["sku"].astype(str).tolist()
+        if sem_id:
+            erros.append(f"{len(sem_id)} item(ns) sem id de produto do Bling: "
+                         f"{', '.join(sem_id[:8])}" + ("…" if len(sem_id) > 8 else ""))
+    return erros
+
+
 def preview_payloads(pedido_id: str, repo_ped, repo_int, mapa_sku: dict = None) -> dict:
     """
     Payloads exatos que a emissão enviará (verificação humana SEM escrita).
@@ -200,8 +263,10 @@ def preview_payloads(pedido_id: str, repo_ped, repo_int, mapa_sku: dict = None) 
     obs = builder.montar_observacoes_bling(rodada, pedido, itens)
     out = {}
 
+    # Lido fora dos try: o prazo do Bling alimenta os DOIS payloads.
+    cfg_b = (repo_int.ler("bling") or {}).get("config") or {}
+
     try:
-        cfg_b = (repo_int.ler("bling") or {}).get("config") or {}
         out["compra"] = bling.montar_payload_compra(pedido, itens, rodada, cfg_b, obs)
     except Exception as exc:
         out["compra"] = {"erro": str(exc)}
@@ -210,7 +275,8 @@ def preview_payloads(pedido_id: str, repo_ped, repo_int, mapa_sku: dict = None) 
         cfg_o = (repo_int.ler("olist") or {}).get("config") or {}
         out["venda"] = olist.montar_payload_venda(
             pedido, itens, rodada, cfg_o, mapa_sku or {},
-            pedido.get("bling_numero", ""), obs)
+            pedido.get("bling_numero", ""), obs,
+            prazo_dias=cfg_b.get("prazo_pagamento_dias"))
     except Exception as exc:
         out["venda"] = {"erro": str(exc)}
 

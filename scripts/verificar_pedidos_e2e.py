@@ -51,12 +51,12 @@ def grupos_teste():
             "quantidade_sugerida": 10, "quantidade_final": 10, "custo_unit": 5.0}
     return [
         {"colegio": "TESTE_COL", "super_categoria": "TESTE_CAT",
-         "titulo": "AKU-PC · TESTE_COL · TESTE_CAT · R12/2099",
+         "titulo": "TESTE_COL · TESTE_CAT · R12/2099",
          "criado_por": "verify_e2e",
          "itens": [item, {**item, "sku": "TESTE-M", "tamanho": "M",
                           "quantidade_sugerida": 4, "quantidade_final": 4}]},
         {"colegio": "TESTE_COL", "super_categoria": "TESTE_CAT2",
-         "titulo": "AKU-PC · TESTE_COL · TESTE_CAT2 · R12/2099",
+         "titulo": "TESTE_COL · TESTE_CAT2 · R12/2099",
          "criado_por": "verify_e2e",
          "itens": [{**item, "sku": "TESTE-G", "tamanho": "G"}]},
     ]

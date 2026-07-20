@@ -148,8 +148,8 @@ def _memoria_sugestao(itens: pd.DataFrame) -> None:
 st.title("🧾 Pedidos de Compra")
 st.caption(
     "Rodadas congeladas do Simulador de Produção, divididas em pedidos por "
-    "**Colégio × Super Categoria**. Edite as quantidades no rascunho e marque "
-    "como Pronto; a emissão automática no Bling é a próxima fase."
+    "**Colégio × Super Categoria**. Edite as quantidades no rascunho, marque "
+    "como Pronto e emita a compra no Bling e a venda no Olist."
 )
 
 _msg = st.session_state.pop("pc_pagina_msg", None)
@@ -259,13 +259,23 @@ if len(pedidos) == 0:
     st.info("Rodada sem pedidos.")
     st.stop()
 
+# --- Resumo da rodada (veredito rápido, acima do seletor de modo) ---
+with st.container(border=True):
+    st.subheader("Resumo da rodada")
+    _k1, _k2, _k3, _k4, _k5 = st.columns(5)
+    _k1.metric("Pedidos", len(pedidos))
+    _k2.metric("Rascunhos", int((pedidos["status"] == estados.RASCUNHO).sum()))
+    _k3.metric("Prontos", int((pedidos["status"] == estados.PRONTO).sum()))
+    _k4.metric("Emitidos", int((pedidos["status"] == estados.EMITIDO).sum()))
+    _k5.metric("Investimento (final)", _fmt_brl(float(pedidos["investimento_final"].sum())))
+
 # =================================================================
 # PEDIDO INDIVIDUAL — inspecionar / editar UM pedido. Fragmento próprio:
 # trocar o pedido no selectbox rerroda SÓ esta caixa, não a tabela de ação
-# em lote lá embaixo. Os botões de ação usam st.rerun() (escopo app) porque
+# em lote do outro modo. Os botões de ação usam st.rerun() (escopo app) porque
 # mudam o estado do pedido e precisam refletir na tabela de lote + no flash.
+# (Roda dentro de _area_trabalho — o @st.fragment é o do pai, não aqui.)
 # =================================================================
-@st.fragment
 def _secao_pedido():
     with st.container(border=True):
         # --- Escolha do pedido: "Ver pedido" (h3) + selectbox ---
@@ -284,8 +294,8 @@ def _secao_pedido():
         itens = repo.listar_itens(pedido_id)
         pode_editar = estados.editavel(pedido_sel["status"])
 
-        # --- Nome do pedido (h2) + status ---
-        st.header(pedido_sel["titulo"])
+        # --- Nome do pedido (h3) + status ---
+        st.subheader(pedido_sel["titulo"])
         st.caption(
             f"{estados.ROTULOS_BADGE.get(pedido_sel['status'], pedido_sel['status'])} · "
             f"criado em {pd.Timestamp(pedido_sel['criado_em']):%d/%m/%Y %H:%M} "
@@ -349,7 +359,8 @@ def _secao_pedido():
                 _cfg_olist = (_repo_int.ler("olist") or {}).get("config") or {}
                 _token = _oauth.obter_access_token("olist", _repo_int)
                 _skus = itens[itens["quantidade_final"] > 0]["sku"].tolist()
-                _mapa, _faltantes = _olist.mapear_produtos_por_sku(_token, _skus)
+                with st.spinner("Verificando catálogo do Olist…"):
+                    _mapa, _faltantes = _olist.mapear_produtos_por_sku(_token, _skus)
             except Exception as exc:
                 _erro_map = str(exc)
             _erros_pre = emissor.validar_pre_emissao_olist(
@@ -359,6 +370,11 @@ def _secao_pedido():
             elif _erros_pre:
                 for _e in _erros_pre:
                     st.warning(_e)
+
+        # --- Olist pronto? Avisa ANTES da compra (que é irreversível daqui) ---
+        if pedido_sel["status"] == estados.PRONTO:
+            for _a in emissor.checar_prontidao_olist(obter_repositorio_integracoes()):
+                st.warning(f"⚠️ {_a}")
 
         # --- Preview dos payloads de emissão (verificação humana, sem escrita) ---
         if pedido_sel["status"] in (estados.PRONTO, estados.COMPRA_EMITIDA):
@@ -382,9 +398,11 @@ def _secao_pedido():
             rodada_sel.to_dict(), pedido_sel.to_dict(), itens)
         with st.expander("📄 Observações para o Bling (padronizadas)"):
             st.caption(
-                "Texto que a emissão automática enviará no campo de observações "
-                "internas do pedido de compra. Enquanto a emissão é manual, copie "
-                "daqui (ou do cabeçalho do CSV)."
+                "Bloco que a emissão automática envia no campo **Observações** do "
+                "pedido de compra. Nas **Observações internas** vai só o título "
+                f"(`{pedido_sel['titulo']}`) — é o que aparece na listagem e na "
+                "busca do Bling. Enquanto a emissão é manual, copie daqui (ou do "
+                "cabeçalho do CSV)."
             )
             st.code(obs_bling, language=None)
 
@@ -413,11 +431,11 @@ def _secao_pedido():
         # Informação geral + AÇÕES (parte inferior, em colunas iguais)
         # =========================================================
         st.divider()
-        st.caption(
-            f"**{int((_qtd_final > 0).sum())}** SKUs · "
-            f"**{int(_qtd_final.sum()):,}** pares finais "
-            f"(Δ {_delta:+d} vs sugerido) · **{_fmt_brl(_invest)}**"
-        )
+        _m1, _m2, _m3 = st.columns(3)
+        _m1.metric("SKUs", int((_qtd_final > 0).sum()))
+        _m2.metric("Pares finais", f"{int(_qtd_final.sum()):,}".replace(",", "."),
+                   delta=f"{_delta:+d} vs sugerido", delta_color="off")
+        _m3.metric("Investimento", _fmt_brl(_invest))
 
         status = pedido_sel["status"]
         if status == estados.RASCUNHO:
@@ -464,13 +482,17 @@ def _secao_pedido():
             with c1:
                 if st.button("📤 Emitir compra (Bling)", type="primary", width="stretch",
                              key=f"emit_compra_{pedido_id}"):
-                    try:
-                        res = emissor.emitir_compra_bling(
-                            pedido_id, username, repo, obter_repositorio_integracoes())
-                        _flash("success",
-                               f"Compra emitida no Bling · nº **{res['bling_numero']}**.")
-                    except emissor.EmissaoFalhou as exc:
-                        _flash("error", f"Emissão da compra falhou: {exc}")
+                    with st.status("📤 Emitindo compra no Bling…", expanded=True) as _s:
+                        try:
+                            res = emissor.emitir_compra_bling(
+                                pedido_id, username, repo, obter_repositorio_integracoes())
+                            _s.update(label=f"Compra emitida · nº {res['bling_numero']}",
+                                      state="complete")
+                            _flash("success",
+                                   f"Compra emitida no Bling · nº **{res['bling_numero']}**.")
+                        except emissor.EmissaoFalhou as exc:
+                            _s.update(label="Falha na emissão da compra", state="error")
+                            _flash("error", f"Emissão da compra falhou: {exc}")
                     st.rerun()
             with c2:
                 if st.button("↩️ Reabrir rascunho", width="stretch", key=f"reabrir_{pedido_id}"):
@@ -496,14 +518,18 @@ def _secao_pedido():
                 if st.button("📤 Emitir venda (Olist)", type="primary", width="stretch",
                              disabled=bool(_erro_map or _erros_pre),
                              key=f"emit_venda_{pedido_id}"):
-                    try:
-                        res = emissor.emitir_venda_olist(
-                            pedido_id, username, repo, obter_repositorio_integracoes(),
-                            mapa_sku=_mapa)
-                        _flash("success",
-                               f"Venda emitida no Olist · nº **{res['olist_numero']}**.")
-                    except emissor.EmissaoFalhou as exc:
-                        _flash("error", f"Emissão da venda falhou: {exc}")
+                    with st.status("📤 Emitindo venda no Olist…", expanded=True) as _s:
+                        try:
+                            res = emissor.emitir_venda_olist(
+                                pedido_id, username, repo, obter_repositorio_integracoes(),
+                                mapa_sku=_mapa)
+                            _s.update(label=f"Venda emitida · nº {res['olist_numero']}",
+                                      state="complete")
+                            _flash("success",
+                                   f"Venda emitida no Olist · nº **{res['olist_numero']}**.")
+                        except emissor.EmissaoFalhou as exc:
+                            _s.update(label="Falha na emissão da venda", state="error")
+                            _flash("error", f"Emissão da venda falhou: {exc}")
                     st.rerun()
             with c2:
                 _botao_csv()
@@ -529,20 +555,17 @@ def _secao_pedido():
                 _botao_csv()
 
 
-_secao_pedido()
-
 # =================================================================
 # AÇÃO EM LOTE — seleção múltipla na tabela + botões (aprovar / reabrir /
 # cancelar / emitir compra Bling / emitir venda Olist)
 # =================================================================
-@st.fragment
 def _secao_lote():
     """
-    Fragmento isolado: clicar num checkbox da tabela dispara um rerun SÓ
-    deste fragmento — não re-executa listar_pedidos (N+1 no Supabase) nem o
-    detalhe/Olist lá em cima. Some com o 'piscar/carregar' a cada clique.
-    Os botões de ação chamam st.rerun() (escopo app) para refletir a mudança
-    na página inteira + a mensagem de resultado.
+    Roda dentro de _area_trabalho (@st.fragment): clicar num checkbox da tabela
+    dispara um rerun SÓ dessa área — não re-executa as leituras do topo
+    (listar_rodadas/listar_pedidos, sem cache). Some com o 'piscar/carregar' a
+    cada clique. Os botões de ação chamam st.rerun() (escopo app) para refletir
+    a mudança na página inteira + a mensagem de resultado.
     """
     with st.container(border=True):
         st.subheader("Pedidos da rodada — ação em lote")
@@ -556,8 +579,8 @@ def _secao_lote():
                 view_ped[_col] = ""
         st.caption(
             "Marque as linhas (☑) e use os botões abaixo para agir em vários pedidos "
-            "de uma vez. Para ver/editar um pedido, use **🔍 Ver pedido** lá em cima. "
-            "O cabeçalho da coluna de seleção marca/desmarca tudo."
+            "de uma vez. Para ver/editar um pedido, troque para **✏️ Editar um pedido** "
+            "no seletor de modo (topo). O cabeçalho da coluna de seleção marca/desmarca tudo."
         )
         evento = st.dataframe(
             view_ped[["titulo", "colegio", "super_categoria", "Status", "n_itens",
@@ -573,6 +596,10 @@ def _secao_lote():
             on_select="rerun", selection_mode="multi-row",
             key=f"sel_pedidos_{rodada_id}",
             column_config={
+                "Itens": st.column_config.NumberColumn(format="%d"),
+                "Qtd Sugerida": st.column_config.NumberColumn(format="%d"),
+                "Qtd Final": st.column_config.NumberColumn(format="%d"),
+                "Δ": st.column_config.NumberColumn(format="%+d"),
                 "Investimento (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
             },
         )
@@ -587,16 +614,15 @@ def _secao_lote():
         # -----------------------------------------------------------------
         if len(sel) >= 1:
             _rasc = sel[sel["status"] == estados.RASCUNHO]
-            _pronto = sel[sel["status"] == estados.PRONTO]
+            _pronto = sel[sel["status"] == estados.PRONTO]   # também os "reabríveis"
             _compra = sel[sel["status"] == estados.COMPRA_EMITIDA]
-            _reabrir = sel[sel["status"] == estados.PRONTO]
             _cancelaveis = sel[sel["status"].isin([estados.RASCUNHO, estados.PRONTO])]
 
             st.divider()
-            st.markdown(
-                f"**{len(sel)}** selecionado(s) · **{int(sel['qtd_final'].sum()):,}** pares "
-                f"finais · **{_fmt_brl(float(sel['investimento_final'].sum()))}**"
-            )
+            _s1, _s2, _s3 = st.columns(3)
+            _s1.metric("Selecionados", len(sel))
+            _s2.metric("Pares finais", f"{int(sel['qtd_final'].sum()):,}".replace(",", "."))
+            _s3.metric("Investimento", _fmt_brl(float(sel['investimento_final'].sum())))
 
             b1, b2, b3, b4, b5 = st.columns(5)
 
@@ -615,11 +641,11 @@ def _secao_lote():
 
             # Reabrir: PRONTO → RASCUNHO
             with b2:
-                if st.button(f"↩️ Reabrir ({len(_reabrir)})",
-                             disabled=_reabrir.empty, width="stretch",
+                if st.button(f"↩️ Reabrir ({len(_pronto)})",
+                             disabled=_pronto.empty, width="stretch",
                              help="Volta os selecionados em Pronto para Rascunho (edição)"):
                     suc, fal = _executar_lote(
-                        _reabrir, lambda r: (
+                        _pronto, lambda r: (
                             repo.transicionar_pedido(
                                 r["id"], estados.PRONTO, estados.RASCUNHO, username),
                             "o estado mudou em outra sessão"))
@@ -651,13 +677,23 @@ def _secao_lote():
                         f"total **{_fmt_brl(float(_pronto['investimento_final'].sum()))}**. "
                         "Se um falhar, os demais seguem e o erro é reportado."
                     )
+                    # Um lote de compras sem o Olist pronto vira um lote de
+                    # pedidos órfãos em COMPRA_EMITIDA — avisa antes.
+                    for _a in emissor.checar_prontidao_olist(
+                            obter_repositorio_integracoes()):
+                        st.warning(f"⚠️ {_a}")
                     if st.button("Confirmar emissão das compras", type="primary",
                                  key="emit_compra_lote"):
-                        suc, fal = _executar_lote(
-                            _pronto, lambda r: (
-                                bool(emissor.emitir_compra_bling(
-                                    r["id"], username, repo,
-                                    obter_repositorio_integracoes())), ""))
+                        with st.status(f"📤 Emitindo {len(_pronto)} compra(s) no Bling…",
+                                       expanded=True) as _s:
+                            suc, fal = _executar_lote(
+                                _pronto, lambda r: (
+                                    bool(emissor.emitir_compra_bling(
+                                        r["id"], username, repo,
+                                        obter_repositorio_integracoes())), ""))
+                            _s.update(
+                                label=f"Compras processadas: {suc} ok, {len(fal)} com problema",
+                                state="error" if fal else "complete")
                         _flash_resumo_lote("Emissão de compra (Bling)", suc, fal)
                         st.rerun()
 
@@ -672,13 +708,44 @@ def _secao_lote():
                     )
                     if st.button("Confirmar emissão das vendas", type="primary",
                                  key="emit_venda_lote"):
-                        suc, fal = _executar_lote(
-                            _compra, lambda r: (
-                                bool(emissor.emitir_venda_olist(
-                                    r["id"], username, repo,
-                                    obter_repositorio_integracoes())), ""))
+                        with st.status(f"📤 Emitindo {len(_compra)} venda(s) no Olist…",
+                                       expanded=True) as _s:
+                            suc, fal = _executar_lote(
+                                _compra, lambda r: (
+                                    bool(emissor.emitir_venda_olist(
+                                        r["id"], username, repo,
+                                        obter_repositorio_integracoes())), ""))
+                            _s.update(
+                                label=f"Vendas processadas: {suc} ok, {len(fal)} com problema",
+                                state="error" if fal else "complete")
                         _flash_resumo_lote("Emissão de venda (Olist)", suc, fal)
                         st.rerun()
 
 
-_secao_lote()
+# Dois modos de trabalho (editar UM pedido × agir em VÁRIOS) num seletor de modo,
+# NÃO em st.tabs: fragment-que-rerroda dentro de st.tabs quebra o show/hide e vaza
+# o conteúdo das duas ("ghost tabs inside st.fragment", #9158/#9313 do Streamlit).
+#
+# O seletor + as duas seções vivem TODOS dentro de _area_trabalho (@st.fragment):
+# trocar de modo (ou de pedido, ou marcar linhas no lote) rerroda SÓ esta área —
+# NÃO re-executa as leituras do topo (listar_rodadas/listar_pedidos), que são sem
+# cache e eram o que travava a troca de modo. Só as AÇÕES (salvar/emitir/cancelar)
+# chamam st.rerun() de app inteiro, porque aí o dado mudou e o resumo + as tabelas
+# do topo precisam refletir. As seções chamadas aqui NÃO são fragments próprias
+# (seria aninhamento desnecessário) — o fragment é este pai.
+@st.fragment
+def _area_trabalho():
+    _modo = st.segmented_control(
+        "Modo de trabalho",
+        ["✏️ Editar um pedido", "⚙️ Ação em lote"],
+        default="✏️ Editar um pedido",
+        label_visibility="collapsed",
+        key="pc_modo",
+    )
+    if _modo == "⚙️ Ação em lote":
+        _secao_lote()
+    else:
+        _secao_pedido()
+
+
+_area_trabalho()
