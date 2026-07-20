@@ -340,5 +340,32 @@ class TestHttpOlist:
         with pytest.raises(olist.OlistFalhou, match="depósito inválido"):
             olist.criar_pedido_venda("tok", {}, http)
 
+    def test_erro_legivel_surface_detalhes_validacao(self):
+        # O 400 de validação do Olist só é útil se os erros por campo (detalhes[])
+        # aparecerem — a mensagem do topo é genérica ("Ocorreram erros de validação").
+        http = HttpFake([RespostaFake(400, {
+            "mensagem": "Ocorreram erros de validação",
+            "detalhes": [
+                {"campo": "pagamento.parcelas[0].meioPagamento", "mensagem": "é obrigatório"},
+                {"campo": "itens[0].valorUnitario", "mensagem": "deve ser maior que zero"},
+            ],
+        })])
+        with pytest.raises(olist.OlistFalhou) as exc:
+            olist.criar_pedido_venda("tok", {}, http)
+        msg = str(exc.value)
+        assert "valorUnitario" in msg and "maior que zero" in msg
+        assert "meioPagamento" in msg
+
     def test_testar_conexao(self):
         assert olist.testar_conexao("tok", HttpFake([RespostaFake(200, {"itens": []})]))[0] is True
+
+    def test_listar_formas_recebimento(self):
+        http = HttpFake([RespostaFake(200, {"itens": [
+            {"id": 733816562, "nome": "Pix", "situacao": "1"},
+            {"id": 479365356, "nome": "Cheque", "situacao": "2"},
+        ]})])
+        formas = olist.listar_formas_recebimento("tok", http)
+        assert formas == [
+            {"id": "733816562", "nome": "Pix", "ativa": True},
+            {"id": "479365356", "nome": "Cheque", "ativa": False},
+        ]

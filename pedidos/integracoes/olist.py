@@ -49,11 +49,42 @@ def _headers(token: str) -> dict:
             "Content-Type": "application/json"}
 
 
+def _detalhes_validacao(corpo: dict) -> str:
+    """
+    Erros por campo que o Olist v3 devolve num 400 de validação, achatados em
+    'campo: mensagem; campo: mensagem'. O corpo é
+    `{"mensagem": "Ocorreram erros de validação", "detalhes": [{"campo", "mensagem"}]}`
+    (a chave já apareceu como `detalhes`, `erros` e `campos` conforme o endpoint;
+    itens ora {campo, mensagem}, ora {field, message}, ora string solta). Sem
+    isso a mensagem do topo ("Ocorreram erros de validação") não diz NADA sobre
+    QUAL campo reprovou. "" se não há array de detalhes reconhecível.
+    """
+    itens = None
+    for chave in ("detalhes", "erros", "campos", "errors"):
+        if isinstance(corpo.get(chave), list) and corpo[chave]:
+            itens = corpo[chave]
+            break
+    if not itens:
+        return ""
+    partes = []
+    for it in itens:
+        if isinstance(it, dict):
+            campo = it.get("campo") or it.get("field") or it.get("propriedade")
+            texto = it.get("mensagem") or it.get("message") or it.get("descricao")
+            partes.append(f"{campo}: {texto}" if campo else str(texto))
+        else:
+            partes.append(str(it))
+    return "; ".join(p for p in partes if p and p != "None")
+
+
 def _erro_legivel(resp) -> str:
     try:
         corpo = resp.json()
         msg = (corpo.get("mensagem") or corpo.get("message")
                or corpo.get("detail") or str(corpo)[:300])
+        detalhes = _detalhes_validacao(corpo)
+        if detalhes:
+            msg = f"{msg} — {detalhes}"
     except Exception:
         msg = str(resp.text)[:300]
     return f"Olist retornou {resp.status_code}: {msg}"
@@ -96,6 +127,23 @@ def testar_conexao(token: str, http=None, dormir=None) -> tuple:
     if resp.status_code < 300:
         return True, "Conexão com o Olist OK."
     return False, _erro_legivel(resp)
+
+
+def listar_formas_recebimento(token: str, http=None, dormir=None) -> list:
+    """
+    GET /formas-recebimento → [{"id", "nome", "ativa"}] p/ o selectbox da aba
+    Integrações. O id da forma de recebimento é POR CONTA (não dá p/ hardcodar)
+    e o Olist não o expõe na UI de forma óbvia — daí o valor ir num selectbox por
+    nome em vez de o usuário caçar o número. `situacao == "1"` = ativa.
+    """
+    http = http or _http_default()
+    resp = _requisitar(http, "get", f"{BASE}/formas-recebimento", token,
+                       params={"limit": _PAGINA}, dormir=dormir)
+    if resp.status_code >= 300:
+        raise OlistFalhou(_erro_legivel(resp))
+    itens = (resp.json() or {}).get("itens") or []
+    return [{"id": str(f.get("id", "")), "nome": str(f.get("nome", "")),
+             "ativa": str(f.get("situacao", "")) == "1"} for f in itens]
 
 
 def _id_por_codigo_exato(itens: list, sku: str):

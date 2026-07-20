@@ -200,9 +200,14 @@ nunca atualizada.
   do Bling, mas o SHAPE é OUTRO: objeto aninhado `pagamento.{formaRecebimento,
   meioPagamento, parcelas[]}` — no Olist é forma de **recebimento**, não
   `formaPagamento` no topo. `forma_recebimento_id` (obrigatório p/ gerar o bloco),
-  `meio_pagamento_id` (opcional) moram na aba Integrações; os IDs são digitados
-  porque a API v3 não expõe um GET de formas de recebimento para montar selectbox
-  como o do Bling. **O prazo NÃO se configura no Olist**: a compra e a venda são
+  `meio_pagamento_id` (opcional) moram na aba Integrações. A forma de recebimento
+  é um **selectbox por nome** (`olist.listar_formas_recebimento` = `GET
+  /formas-recebimento`, só ativas, id por conta — igual ao selectbox de forma de
+  pagamento do Bling), com degradação para text_input se desconectado/GET falhar;
+  o id inválido digitado à mão foi o que fez a 1ª venda reprovar ("Forma de
+  recebimento não encontrada"). O `meio_pagamento_id` segue digitado — a API v3
+  NÃO lista os meios e a numeração de id é própria do Olist. **O prazo NÃO se
+  configura no Olist**: a compra e a venda são
   o mesmo acordo, então `emissor.py` injeta o `prazo_pagamento_dias` do config do
   **Bling** em `montar_payload_venda(prazo_dias=...)` e os dois vencimentos batem
   por construção — um campo editável em dois lugares divergiria.

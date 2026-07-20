@@ -817,6 +817,12 @@ with tab_int:
         token = oauth.obter_access_token("bling", obter_repositorio_integracoes())
         return cliente_bling.listar_formas_pagamento(token)
 
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def _formas_recebimento_olist() -> list:
+        """Formas de recebimento da conta Olist (id por conta) p/ o selectbox."""
+        token = oauth.obter_access_token("olist", obter_repositorio_integracoes())
+        return cliente_olist.listar_formas_recebimento(token)
+
     def _extras_bling(cfg: dict, conectado: bool) -> dict:
         """
         Pagamento do pedido de compra: mora aqui (e não na rodada) porque é
@@ -875,26 +881,63 @@ with tab_int:
         """
         Recebimento do pedido de venda. Sem campo de prazo de propósito: a
         compra e a venda são o mesmo acordo, então o prazo é o do card do Bling
-        — duplicar o campo só criaria divergência. IDs digitados: a API v3 não
-        expõe um GET de formas de recebimento para montar selectbox como o do
-        Bling.
+        — duplicar o campo só criaria divergência.
+
+        Forma de recebimento vira selectbox pelo GET /formas-recebimento (o id é
+        por conta e o Olist não o mostra de forma óbvia — caçar o número à mão foi
+        o que emitiu a venda com id inexistente). Degrada para text_input quando
+        desconectado ou o GET falha. Meio de pagamento (opcional) segue como texto:
+        a API v3 não expõe GET e a numeração de id é própria do Olist.
         """
         st.markdown("**Recebimento** (usado nas parcelas do pedido de venda)")
-        forma = st.text_input(
-            "ID da forma de recebimento",
-            value=str(cfg.get("forma_recebimento_id") or ""),
-            help="Cadastros → Formas de recebimento no Olist. Vazio = pedido "
-                 "emitido sem bloco de pagamento.",
-            key="neg_olist_forma")
+        salvo = str(cfg.get("forma_recebimento_id") or "")
+        forma_id = salvo
+
+        formas, erro = [], None
+        if conectado:
+            try:
+                formas = _formas_recebimento_olist()
+            except Exception as exc:
+                erro = str(exc)
+
+        if formas:
+            # Só ativas no selectbox; inativas confundem (o Olist recusa emitir
+            # com forma inativa). Preserva o salvo mesmo inativo/removido.
+            ativas = [f for f in formas if f["ativa"]]
+            ids = [f["id"] for f in ativas]
+            rotulos = {f["id"]: f["nome"] for f in ativas}
+            opcoes = [""] + ids                       # "" = sem bloco de pagamento
+            rotulos[""] = "(nenhuma — emitir sem pagamento)"
+            if salvo and salvo not in opcoes:         # forma inativa/removida no Olist
+                opcoes.insert(1, salvo)
+                nome_salvo = next((f["nome"] for f in formas if f["id"] == salvo), None)
+                rotulos[salvo] = (f"{nome_salvo} (inativa)" if nome_salvo
+                                  else f"(id {salvo} — não está mais na lista)")
+            forma_id = st.selectbox(
+                "Forma de recebimento", options=opcoes,
+                index=opcoes.index(salvo) if salvo in opcoes else 0,
+                format_func=lambda i: rotulos.get(i, i),
+                help="Cadastros → Formas de recebimento no Olist.",
+                key="neg_olist_forma_sel")
+        else:
+            if erro:
+                st.caption(f"⚠️ Não foi possível listar as formas de recebimento: {erro}")
+            forma_id = st.text_input(
+                "ID da forma de recebimento", value=salvo,
+                help="Conecte a integração para escolher pelo nome. Vazio = "
+                     "pedido emitido sem bloco de pagamento.",
+                key="neg_olist_forma_txt")
+
         meio = st.text_input(
             "ID do meio de pagamento (opcional)",
             value=str(cfg.get("meio_pagamento_id") or ""),
-            help="Deixe vazio se o Olist não exigir na sua conta.",
+            help="A API v3 não lista os meios — deixe vazio se o Olist não "
+                 "exigir na sua conta.",
             key="neg_olist_meio")
         st.caption("O prazo da parcela é o mesmo do pedido de compra "
                    "(card do Bling) — não se configura em dois lugares.")
 
-        return {"forma_recebimento_id": forma.strip(),
+        return {"forma_recebimento_id": str(forma_id or "").strip(),
                 "meio_pagamento_id": meio.strip()}
 
     def _card_integracao(plataforma: str, titulo: str, campos_negocio: list,
