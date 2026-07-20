@@ -10,10 +10,11 @@ from pedidos.integracoes import bling, olist
 
 
 class RespostaFake:
-    def __init__(self, status_code=200, corpo=None, text=""):
+    def __init__(self, status_code=200, corpo=None, text="", headers=None):
         self.status_code = status_code
         self._corpo = corpo if corpo is not None else {}
         self.text = text
+        self.headers = headers or {}
 
     def json(self):
         return self._corpo
@@ -214,17 +215,49 @@ class TestPayloadVenda:
 # Olist — mapeamento SKU → id (HTTP fake paginado)
 # ---------------------------------------------------------------------------
 class TestMapearProdutos:
-    def test_paginacao_e_match(self):
-        pagina1 = [{"id": i, "sku": f"SKU-{i}"} for i in range(100)]
-        pagina2 = [{"id": 100, "sku": "CAL-P"}, {"id": 101, "codigo": "CAL-G"}]
-        http = HttpFake([RespostaFake(200, {"itens": pagina1}),
-                         RespostaFake(200, {"itens": pagina2})])
+    def test_busca_direcionada_por_codigo(self):
+        # 1 GET por SKU distinto, filtrando por ?codigo= (não varre o catálogo).
+        http = HttpFake([
+            RespostaFake(200, {"itens": [{"id": 100, "sku": "CAL-P"}]}),
+            RespostaFake(200, {"itens": [{"id": 101, "codigo": "CAL-G"}]}),  # aceita sku OU codigo
+            RespostaFake(200, {"itens": []}),                                # sem match
+        ])
         mapa, faltantes = olist.mapear_produtos_por_sku(
             "tok", ["CAL-P", "CAL-G", "NAO-EXISTE"], http)
-        assert mapa == {"CAL-P": 100, "CAL-G": 101}        # aceita sku OU codigo
+        assert mapa == {"CAL-P": 100, "CAL-G": 101}
         assert faltantes == ["NAO-EXISTE"]
-        assert len(http.chamadas) == 2                     # 2 páginas, 1 varredura
-        assert http.chamadas[1][2]["offset"] == 100
+        assert len(http.chamadas) == 3
+        assert http.chamadas[0][2] == {"codigo": "CAL-P", "limit": olist._PAGINA}
+
+    def test_match_exato_ignora_parciais_do_filtro(self):
+        # ?codigo=CAL-P pode trazer CAL-PP junto; só o código idêntico casa.
+        http = HttpFake([RespostaFake(200, {"itens": [
+            {"id": 5, "sku": "CAL-PP"}, {"id": 6, "sku": "CAL-P"}]})])
+        mapa, faltantes = olist.mapear_produtos_por_sku("tok", ["CAL-P"], http)
+        assert mapa == {"CAL-P": 6} and faltantes == []
+
+    def test_sku_repetido_faz_um_unico_get(self):
+        http = HttpFake([RespostaFake(200, {"itens": [{"id": 9, "sku": "X"}]})])
+        mapa, _ = olist.mapear_produtos_por_sku("tok", ["X", "X", " X "], http)
+        assert mapa == {"X": 9} and len(http.chamadas) == 1
+
+    def test_retry_em_429_respeita_retry_after(self):
+        esperas = []
+        http = HttpFake([
+            RespostaFake(429, {"mensagem": "rate limit"}, headers={"Retry-After": "2"}),
+            RespostaFake(200, {"itens": [{"id": 7, "sku": "X"}]}),
+        ])
+        mapa, _ = olist.mapear_produtos_por_sku(
+            "tok", ["X"], http, dormir=esperas.append)
+        assert mapa == {"X": 7}
+        assert esperas == [2]                 # esperou os 2s do cabeçalho e reemitiu
+        assert len(http.chamadas) == 2
+
+    def test_429_persistente_acaba_levantando(self):
+        http = HttpFake([RespostaFake(429, {"mensagem": "rate limit"})
+                         for _ in range(olist._TENTATIVAS_429)])
+        with pytest.raises(olist.OlistFalhou, match="429"):
+            olist.mapear_produtos_por_sku("tok", ["X"], http, dormir=lambda _s: None)
 
     def test_erro_da_api_levanta(self):
         http = HttpFake([RespostaFake(401, {"mensagem": "token inválido"})])

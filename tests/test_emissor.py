@@ -170,8 +170,9 @@ class TestEmitirVenda:
     def test_sku_faltante_no_catalogo_faz_rollback(self):
         repo_ped, repo_int = RepoPedFake(), _repo_int_conectado()
         pid = self._pedido_compra_emitida(repo_ped, repo_int)
-        # mapa None → busca catálogo; catálogo só tem A-PP
-        http = HttpFake([RespostaFake(200, {"itens": [{"id": 1, "sku": "A-PP"}]})])
+        # mapa None → busca direcionada por SKU; nenhum casa (itens vazios)
+        http = HttpFake([RespostaFake(200, {"itens": []}),
+                         RespostaFake(200, {"itens": []})])
 
         with pytest.raises(emissor.EmissaoFalhou, match="sem match"):
             emissor.emitir_venda_olist(pid, "diogo", repo_ped, repo_int,

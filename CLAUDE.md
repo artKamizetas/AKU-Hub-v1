@@ -145,8 +145,14 @@ nunca atualizada.
   (`*_EMITINDO` = lock CAS anti duplo-clique, igual ao CONGELANDO). Falha ANTES do
   POST → rollback ao estado anterior; falha DEPOIS → fica travado em `*_EMITINDO`, UI
   oferece "Destravar" com aviso de conferir no ERP. Idempotência por `bling_id`/
-  `olist_id` já gravado. SKUs idênticos nos 2 sistemas → mapa SKU→id Olist via
-  `GET /produtos`; pré-validação lista faltantes antes de habilitar a venda.
+  `olist_id` já gravado. SKUs idênticos nos 2 sistemas → mapa SKU→id Olist por
+  **busca direcionada** `GET /produtos?codigo=<SKU>` (1 GET por SKU distinto,
+  match EXATO local — o filtro pode ser parcial), NÃO varrendo o catálogo:
+  a varredura estourava o rate limit (Olist v3 = 60 req/min → 429). Todo GET/POST
+  do cliente passa por `_requisitar`, que em 429 respeita `Retry-After` e
+  reemite (backoff limitado). No modo LOTE, a 4_Pedidos pré-mapeia todos os SKUs
+  UMA vez e passa o superset a cada `emitir_venda_olist` (mapa_sku=None refazia a
+  busca por pedido). Pré-validação lista faltantes antes de habilitar a venda.
   **Pré-validação simétrica** (`validar_pre_emissao_bling`/`_olist` em `emissor.py`):
   checks puros (config incompleta — `fornecedor_id`/`contato_id` etc, nada a emitir,
   itens sem id de produto) que dão o feedback ANTES do clique — lista vazia = pode

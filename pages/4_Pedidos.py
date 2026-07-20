@@ -703,18 +703,39 @@ def _secao_lote():
                                 disabled=_compra.empty):
                     st.caption(
                         f"Emite **{len(_compra)}** pedido(s) de venda no Olist (só os que "
-                        "já têm a compra emitida). O mapeamento SKU→Olist é feito por "
-                        "pedido; falha em um não interrompe os outros."
+                        "já têm a compra emitida). O mapeamento SKU→Olist é feito UMA vez "
+                        "para o lote inteiro; falha em um não interrompe os outros."
                     )
                     if st.button("Confirmar emissão das vendas", type="primary",
                                  key="emit_venda_lote"):
                         with st.status(f"📤 Emitindo {len(_compra)} venda(s) no Olist…",
                                        expanded=True) as _s:
+                            # Mapeia SKU→Olist UMA vez p/ todo o lote — passar
+                            # mapa_sku=None por pedido refazia a busca N vezes e
+                            # estourava o rate limit (429). Superset é seguro:
+                            # cada emissão só consulta os SKUs do próprio pedido.
+                            from pedidos.integracoes import (oauth as _oauth,
+                                                             olist as _olist)
+                            try:
+                                _ri = obter_repositorio_integracoes()
+                                _tok = _oauth.obter_access_token("olist", _ri)
+                                _skus = sorted({
+                                    s for pid in _compra["id"]
+                                    for s in repo.listar_itens(pid).pipe(
+                                        lambda d: d[d["quantidade_final"] > 0]["sku"])
+                                })
+                                _s.write(f"Mapeando {len(_skus)} SKU(s) no Olist…")
+                                _mapa_lote, _ = _olist.mapear_produtos_por_sku(_tok, _skus)
+                            except Exception as _exc:
+                                _mapa_lote = None
+                                _s.write(f"⚠️ Pré-mapeamento falhou ({_exc}); "
+                                         "cada pedido mapeia sozinho.")
                             suc, fal = _executar_lote(
                                 _compra, lambda r: (
                                     bool(emissor.emitir_venda_olist(
                                         r["id"], username, repo,
-                                        obter_repositorio_integracoes())), ""))
+                                        obter_repositorio_integracoes(),
+                                        mapa_sku=_mapa_lote)), ""))
                             _s.update(
                                 label=f"Vendas processadas: {suc} ok, {len(fal)} com problema",
                                 state="error" if fal else "complete")

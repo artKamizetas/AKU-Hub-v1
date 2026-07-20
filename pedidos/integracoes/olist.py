@@ -8,15 +8,27 @@ compra do Bling (amarração entre os dois sistemas).
 
 Camadas: montar_payload_venda() é PURA; o HTTP é fino com `http` injetável.
 Itens referenciam produto pelo ID INTERNO do Olist (a API não aceita SKU) —
-mapear_produtos_por_sku() constrói o de-para lendo o catálogo completo
-(1 varredura paginada, não 1 GET por SKU — respeita rate limit).
+mapear_produtos_por_sku() constrói o de-para com uma busca DIRECIONADA por
+`?codigo=` por SKU (1 GET por SKU do pedido, ~7-15), não varrendo o catálogo
+inteiro: a varredura antiga (dezenas de páginas × cada pedido) estourava o
+rate limit do Olist (60 req/min no plano básico → HTTP 429).
+
+Rate limit: TODA chamada passa por _requisitar(), que em 429 respeita o
+cabeçalho `Retry-After` e tenta de novo (backoff limitado) — a rede se
+autorregula em vez de falhar o pedido no primeiro esbarrão.
 """
+
+import time
 
 import pandas as pd
 
 
 BASE = "https://api.tiny.com.br/public-api/v3"
 _PAGINA = 100   # limit máximo aceito pelo GET /produtos
+
+# Retry de rate limit (429). O Olist devolve Retry-After; sem ele, backoff fixo.
+_TENTATIVAS_429 = 5
+_ESPERA_429_PADRAO_S = 3
 
 # Só o piso de segurança: o prazo real vem do config do BLING (mesmo acordo,
 # dois documentos) e é injetado em montar_payload_venda(prazo_dias=...).
@@ -47,57 +59,83 @@ def _erro_legivel(resp) -> str:
     return f"Olist retornou {resp.status_code}: {msg}"
 
 
-def testar_conexao(token: str, http=None) -> tuple:
+def _espera_429_s(resp) -> int:
+    """Segundos a aguardar num 429 — o cabeçalho Retry-After manda; senão, padrão."""
+    cab = getattr(resp, "headers", None) or {}
+    try:
+        return max(1, int(float(cab.get("Retry-After", _ESPERA_429_PADRAO_S))))
+    except (TypeError, ValueError):
+        return _ESPERA_429_PADRAO_S
+
+
+def _requisitar(http, metodo: str, url: str, token: str, *, params=None,
+                json=None, dormir=None):
+    """
+    Chamada HTTP com retry SÓ em 429 (rate limit): respeita Retry-After e tenta
+    de novo até _TENTATIVAS_429. Demais status (2xx/erros) voltam intactos ao
+    chamador na 1ª resposta. `dormir` injetável p/ testes não esperarem de fato.
+    """
+    dormir = dormir or time.sleep
+    resp = None
+    for tentativa in range(_TENTATIVAS_429):
+        chamar = getattr(http, metodo)
+        resp = (chamar(url, headers=_headers(token), params=params)
+                if metodo == "get"
+                else chamar(url, headers=_headers(token), json=json))
+        if resp.status_code != 429 or tentativa == _TENTATIVAS_429 - 1:
+            return resp
+        dormir(_espera_429_s(resp))
+    return resp
+
+
+def testar_conexao(token: str, http=None, dormir=None) -> tuple:
     """GET leve p/ validar token+permissões. Retorna (ok, mensagem)."""
     http = http or _http_default()
-    resp = http.get(f"{BASE}/produtos", headers=_headers(token),
-                    params={"limit": 1})
+    resp = _requisitar(http, "get", f"{BASE}/produtos", token,
+                       params={"limit": 1}, dormir=dormir)
     if resp.status_code < 300:
         return True, "Conexão com o Olist OK."
     return False, _erro_legivel(resp)
 
 
-def listar_produtos(token: str, http=None) -> list:
+def _id_por_codigo_exato(itens: list, sku: str):
     """
-    Catálogo completo do Olist (paginado). Retorna a lista crua de produtos
-    ([{id, sku/codigo, descricao, ...}]). Uma varredura só — o mapeamento
-    filtra localmente.
+    Dentre os itens que o filtro ?codigo= devolveu, o id do que casa o código
+    EXATAMENTE (o filtro pode ser parcial: 'ADC-CAL-P' traria 'ADC-CAL-PP').
+    Aceita tanto `sku` quanto `codigo` no retorno. None se nenhum casa.
     """
-    http = http or _http_default()
-    produtos = []
-    offset = 0
-    while True:
-        resp = http.get(f"{BASE}/produtos", headers=_headers(token),
-                        params={"limit": _PAGINA, "offset": offset})
-        if resp.status_code >= 300:
-            raise OlistFalhou(_erro_legivel(resp))
-        lote = (resp.json() or {}).get("itens") or []
-        produtos.extend(lote)
-        if len(lote) < _PAGINA:
-            break
-        offset += _PAGINA
-    return produtos
+    for p in itens:
+        codigo = str(p.get("sku") or p.get("codigo") or "").strip()
+        if codigo == sku:
+            return int(p["id"])
+    return None
 
 
-def mapear_produtos_por_sku(token: str, skus: list, http=None) -> tuple:
+def mapear_produtos_por_sku(token: str, skus: list, http=None, dormir=None) -> tuple:
     """
     De-para SKU → id interno do Olist (a API de pedidos exige o id).
     Retorna ({sku: id_olist}, [skus_sem_match]). SKUs são idênticos nos dois
-    sistemas (confirmado pelo negócio) — match exato por código.
-    """
-    catalogo = listar_produtos(token, http)
-    id_por_codigo = {}
-    for p in catalogo:
-        codigo = str(p.get("sku") or p.get("codigo") or "").strip()
-        if codigo:
-            id_por_codigo[codigo] = int(p["id"])
+    sistemas (confirmado pelo negócio) — match EXATO por código.
 
-    mapa = {}
-    faltantes = []
+    Busca direcionada (`GET /produtos?codigo=<SKU>`), 1 GET por SKU distinto —
+    não varre o catálogo inteiro. Dezenas de milhares de produtos varridos por
+    pedido eram o que estourava o rate limit (429).
+    """
+    http = http or _http_default()
+    mapa, faltantes, vistos = {}, [], set()
     for sku in skus:
         sku = str(sku).strip()
-        if sku in id_por_codigo:
-            mapa[sku] = id_por_codigo[sku]
+        if not sku or sku in vistos:
+            continue
+        vistos.add(sku)
+        resp = _requisitar(http, "get", f"{BASE}/produtos", token,
+                           params={"codigo": sku, "limit": _PAGINA}, dormir=dormir)
+        if resp.status_code >= 300:
+            raise OlistFalhou(_erro_legivel(resp))
+        itens = (resp.json() or {}).get("itens") or []
+        id_olist = _id_por_codigo_exato(itens, sku)
+        if id_olist is not None:
+            mapa[sku] = id_olist
         else:
             faltantes.append(sku)
     return mapa, faltantes
@@ -193,10 +231,11 @@ def montar_payload_venda(pedido: dict, itens: pd.DataFrame, rodada: dict,
     return payload
 
 
-def criar_pedido_venda(token: str, payload: dict, http=None) -> dict:
-    """POST /pedidos → {"olist_id", "olist_numero"}."""
+def criar_pedido_venda(token: str, payload: dict, http=None, dormir=None) -> dict:
+    """POST /pedidos → {"olist_id", "olist_numero"}. Retry só em 429."""
     http = http or _http_default()
-    resp = http.post(f"{BASE}/pedidos", headers=_headers(token), json=payload)
+    resp = _requisitar(http, "post", f"{BASE}/pedidos", token,
+                       json=payload, dormir=dormir)
     if resp.status_code >= 300:
         raise OlistFalhou(_erro_legivel(resp))
     corpo = resp.json() or {}
