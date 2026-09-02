@@ -20,7 +20,8 @@ from datetime import timedelta, date
 
 from etl.daily import processar_daily
 from etl import metas
-from etl.loader import carregar_dados, carregar_config
+from etl.loader import fingerprint_config
+from ui_carga import carregar_com_feedback, rodape_frescor
 
 
 # =================================================================
@@ -76,14 +77,7 @@ def _metas_da_linha(row, prefixo: str):
     return vals if vals.get("ouro") is not None else None
 
 
-def _carregar():
-    config = carregar_config()   # yaml (defaults) + app.parametros (Supabase)
-    dados = carregar_dados()
-    return dados, config
-
-
-with st.spinner("Carregando dados..."):
-    dados, config = _carregar()
+dados, config = carregar_com_feedback()
 
 if not dados["validacao"]["ok"]:
     st.error("Dados inválidos. Verifique a página principal.")
@@ -155,12 +149,23 @@ if not lojas_selecionadas:
 # =================================================================
 # PROCESSAMENTO
 # =================================================================
-df_detalhado, df_metas_loja, df_metas_vendedor = processar_daily(
-    dados, config, competencia=competencia)
-
-situacoes_venda = config["daily"]["situacoes_venda"]
 ano_c, mes_c = int(competencia[:4]), int(competencia[5:7])
 rotulo_comp = f"{MESES_NOME[mes_c]}/{ano_c}"
+
+
+@st.cache_data(show_spinner=False)
+def _processar_daily(_dados, _config, competencia, fp_config):
+    """Cacheado por competência: sem isso, trocar o mês — ou QUALQUER rerun de
+    widget da página — recalculava 5 s do zero, em silêncio. `fp_config` sem
+    underscore é o que carrega a versão do config para dentro da cache key."""
+    return processar_daily(_dados, _config, competencia=competencia)
+
+
+with st.spinner(f"Recalculando metas de {rotulo_comp}…", show_time=True):
+    df_detalhado, df_metas_loja, df_metas_vendedor = _processar_daily(
+        dados, config, competencia, fingerprint_config(config))
+
+situacoes_venda = config["daily"]["situacoes_venda"]
 
 df_loja_base = df_detalhado[df_detalhado["LojaConfig"].isin(lojas_selecionadas)].copy()
 df_loja = df_loja_base
@@ -723,3 +728,6 @@ with st.expander("🔎 Rankings no período (vendedor e colégio)", expanded=Fal
         _ranking(df_vendas_periodo, "Vendedor", "Vendedor")
         st.markdown("**Por colégio**")
         _ranking(df_vendas_periodo, "Colegio", "Colégio")
+
+st.divider()
+rodape_frescor(dados)

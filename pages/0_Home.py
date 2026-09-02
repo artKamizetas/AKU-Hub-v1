@@ -5,17 +5,10 @@ Página: Home — Visão Geral
 import streamlit as st
 from auth import exigir_login
 exigir_login()
-from etl.loader import carregar_dados, carregar_config
+from ui_carga import carregar_com_feedback, rodape_frescor
 
 
-def _carregar():
-    config = carregar_config()   # yaml (defaults) + app.parametros (Supabase)
-    dados = carregar_dados()
-    return dados, config
-
-
-with st.spinner("Carregando dados..."):
-    dados, config = _carregar()
+dados, config = carregar_com_feedback()
 val = dados["validacao"]
 
 st.title("📊 AKU Hub")
@@ -72,6 +65,4 @@ st.dataframe(est_dep, width="stretch", hide_index=True)
 st.divider()
 st.caption(f"Fonte: {config['fonte']['nome']}")
 
-if st.button("🔄 Recarregar Dados", width="content"):
-    st.cache_data.clear()
-    st.rerun()
+rodape_frescor(dados)

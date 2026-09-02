@@ -9,6 +9,43 @@ Records). Adicione no topo as mais recentes.
 
 ---
 
+## 2026-09 · Carga de dados 11× mais rápida + invalidação cirúrgica de cache
+A queixa era de "telas lentas sem feedback", com a suspeita recaindo sobre os
+motores de cálculo. A medição mostrou o contrário: **117,5 s de leitura do
+Supabase contra 0,02–5 s de cálculo**. O `_ler_tabela` paginava em SÉRIE (1.000
+linhas por request, 166 idas e voltas só em `itens`) e o `ThreadPoolExecutor`
+paralelizava entre TABELAS, então o relógio virava a corrente serial da maior
+tabela. Trocado por uma **fila plana de páginas**: conta as 9 tabelas, monta a
+lista completa de páginas e busca todas numa pool de 16 — **117,5 s → 10,8 s**.
+Somam-se um filtro server-side em `itens` (41% das linhas tinham
+`id_pedido_bling` nulo e eram baixadas para morrer no `dropna`) e a vetorização
+da conversão de datas (5,8 s → 0,4 s). **Por quê:** melhorar só o feedback
+trataria o sintoma quando a causa tinha correção barata e medida. Spec:
+[requisitos/carregamento-e-feedback.md](requisitos/carregamento-e-feedback.md).
+
+Dois efeitos colaterais que a mudança obrigou a resolver:
+
+- **`st.cache_data.clear()` global virou `carregar_config.clear()`** nos 9 pontos
+  de "Salvar" (8 na 5_Configuracoes + 1 na 3_Fabrica). O clear global derrubava
+  junto o cache de dados de 1 h, e **cada parâmetro salvo custava uma carga fria
+  na tela seguinte** — a lentidão parecia aleatória. Os dois botões "Forçar
+  recarga" seguem globais, que é a intenção explícita deles.
+- **`fingerprint_config()`** entrou como argumento HASHÁVEL das funções pesadas
+  das páginas (`_processar`, `_processar_daily`). Elas recebem o config como
+  `_config` (fora do hash, dict não é hashável) e dependiam do clear global para
+  não servir resultado velho. Sem a assinatura, o clear cirúrgico faria o gestor
+  salvar uma meta e não ver efeito nenhum até o TTL.
+
+**Feedback ao usuário:** spinner com cronômetro (`show_time=True`) nomeando a
+etapa, `processar_daily` cacheado por competência (7,2 s → 0,3 s ao trocar de
+mês) e rodapé de frescor ("dados lidos às HH:MM" + recarregar). O loader sabe
+reportar progresso página a página (`carregar_dados(_progresso=…)`), mas **não
+dá para exibir isso em barra**: desenhar dentro da função cacheada faz o
+`st.cache_data` reproduzir os elementos no cache hit (element replay), e
+desenhar num bloco criado fora é proibido (`CacheReplayClosureError`). Restaria
+carregar em thread com polling — máquina demais para 10 s. O callback fica para
+chamadores fora do Streamlit.
+
 ## 2026-08 · Login com Google (OIDC nativo) + allowlist em `app.usuario`
 O acesso era usuário/senha (`streamlit-authenticator`) com as **pessoas cadastradas
 no `secrets.toml`**: admitir alguém exigia editar dois arquivos (local + painel do

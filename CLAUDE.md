@@ -25,9 +25,11 @@ app.py                      # Ponto de entrada — registra as páginas
 config.yaml                 # DEFAULTS estruturais (Categoria A: IDs, situações, thresholds) — os parâmetros do gestor vivem no Supabase (app.parametros)
 auth.py                     # Login Google (OIDC nativo do Streamlit) + autorização por role
 auth_store.py               # Porta de app.usuario (allowlist de acesso); PURO exceto o cache
+ui_carga.py                 # Porta ÚNICA de carregamento das páginas (spinner + rodapé de frescor)
 data/                       # Saídas locais opcionais (ex: VM_Calculado.xlsx via scripts/exportar_vm.py), não sincronizado com Bling
 etl/
   loader.py                 # Lê Supabase (via PostgREST) e valida → retorna dict de DataFrames
+                            # Paginação PARALELA em fila plana (117s → 11s); fingerprint_config()
                             # Mapas TABELAS_SUPABASE / COLUNAS_SUPABASE convertem nomes para o SCHEMA
                             # carregar_config() = ponto ÚNICO de leitura de config (yaml ← app.parametros)
   config_store.py           # Persistência dos parâmetros no Supabase (app.parametros + historico); deep_merge/extrair_parametros
@@ -95,6 +97,15 @@ docs/sql/                   # DDL versionada do schema `app` (aplicar com `pytho
 ## Convenções de código
 - Pandas para toda manipulação de dados
 - `st.cache_data` nos carregamentos pesados (leitura do Supabase via `loader.py`, TTL=3600)
+- **Páginas carregam por `ui_carga.carregar_com_feedback()`**, nunca chamando
+  `carregar_dados()`+`carregar_config()` na mão (era o `_carregar()` duplicado em 4 telas)
+- **Nunca `st.cache_data.clear()` global** ao salvar: use `carregar_config.clear()`
+  (parâmetros) ou `loader.invalidar_cache_dados()` (dados). O global levava junto a
+  leitura de 1h do Supabase e cada "Salvar" custava uma carga fria. Só os botões
+  "Forçar recarga" usam o global, que é a intenção deles
+- **Função de página cacheada que recebe `_config`** deve receber TAMBÉM
+  `fingerprint_config(config)` como argumento sem underscore — é o que entra na cache
+  key. Sem ele o resultado fica preso ao config antigo (o clear global mascarava isso)
 - **IDs entre tabelas Supabase**: sempre usar `limpar_id()` ANTES de comparar/joinar — postgrest devolve colunas int com NULL como `float64`, e `astype(str)` direto gera `'123.0'` que quebra merges com IDs vindos como int64 puros
 - Configurações sempre de `carregar_config()` (yaml defaults + Supabase), nunca hardcoded nas páginas
 - **Autenticação:** `auth.py` — login Google via `st.login()`/`st.user` (OIDC nativo, secrets
@@ -268,6 +279,44 @@ nunca atualizada.
   **Bling** em `montar_payload_venda(prazo_dias=...)` e os dois vencimentos batem
   por construção — um campo editável em dois lugares divergiria.
 
+## Carregamento de dados (etl/loader.py + ui_carga.py)
+
+A leitura do Supabase era **117 s** e dominava 99% de toda espera do app (os
+motores de cálculo somam 0,02–5 s). Hoje são **~11 s**. Spec:
+`docs/requisitos/carregamento-e-feedback.md`.
+
+- **Fila plana de páginas**: `_ler_supabase` conta as 9 tabelas em paralelo,
+  monta `planejar_paginas()` = `[(tabela, offset)…]` (162 hoje) e busca TODAS
+  numa `ThreadPoolExecutor(16)`, consumindo com `as_completed()` **na thread
+  principal**. Antes paralelizava entre TABELAS e paginava em série dentro de
+  cada uma — o relógio virava a corrente serial de `itens` (166 requests).
+  Aumentar a página não adianta: o Supabase corta em 1.000 (`max-rows`).
+- **`.order("id")` é obrigatório** em toda página. Sem ORDER BY explícito o
+  PostgREST não garante ordem estável entre requests e páginas paralelas podem
+  duplicar/pular linhas. `montar_dataframe` ainda ordena e deduplica: a ordem
+  precisa ser determinística porque `Produtos_detalhes` faz
+  `drop_duplicates(keep="last")`.
+- **`FILTROS_NAO_NULOS`** empurra para o servidor o que o loader descartaria no
+  `dropna` (`itens.id_pedido_bling`: 41% das linhas). A MESMA condição vale no
+  count e nas páginas — divergir desalinha os offsets e some com dados **sem
+  erro nenhum**. É o modo de falha mais perigoso da mudança; tem teste dedicado.
+- **Retry por página** (3×): o fan-out foi de ~9 para ~162 requests, e um 5xx
+  transitório que antes era raro derrubaria a carga inteira.
+- **`converter_serie_data`** vetoriza a conversão de datas (era 5,8 s de `apply`
+  linha a linha em 140k linhas). `converter_data_flexivel` continua sendo o
+  fallback por elemento.
+- **`carregar_dados(_progresso=…)`**: callback opcional `(feitas, total, etapa)`,
+  chamado só da thread principal. O prefixo `_` o mantém fora do hash da cache
+  key. **A UI não o usa** — desenhar dentro de função cacheada faz o
+  `st.cache_data` reproduzir os elementos no cache hit (element replay), e
+  desenhar em bloco criado fora é proibido (`CacheReplayClosureError`). Serve a
+  chamadores fora do Streamlit.
+- **`ui_carga.carregar_com_feedback()`** é a porta das páginas: spinner com
+  cronômetro (fora do cache, imune a replay) dizendo que é a primeira carga da
+  hora e quanto leva. `rodape_frescor(dados)` mostra a idade do dado e recarrega
+  via `invalidar_cache_dados()` — que limpa os DOIS caches encadeados
+  (`carregar_dados` → `_ler_supabase`); limpar só o de fora não recarregaria nada.
+
 ## Autenticação (auth.py + auth_store.py + app.usuario)
 
 Login **Google** pelo OIDC nativo do Streamlit (`st.login("google")`/`st.user`) —
@@ -332,7 +381,8 @@ Em seguida, editor independente de **Colégios** (`config.yaml["colegios"]`): ta
 Ao salvar:
 1. Valida estrutura mínima e valores numéricos
 2. Grava a Categoria B no **Supabase** via `etl/config_store.py` (`app.parametros` UPDATE + `app.parametros_historico` INSERT — auditoria de quem/quando)
-3. Limpa cache do Streamlit (`st.cache_data.clear()` — invalida também o `carregar_config`)
+3. Invalida só o cache de config (`carregar_config.clear()`) — **não** o `clear()` global,
+   que derrubaria junto a leitura de 1h do Supabase
 
 O `config.yaml` do git NÃO é mais escrito pela UI — é só a fonte dos defaults (Categoria A). Falha no Supabase → erro na tela, nada é salvo.
 
@@ -399,7 +449,7 @@ Authlib
 ---
 
 ## Testes (`tests/`)
-Suíte `pytest` focada no **motor de demanda/PCP** (`etl/demanda.py`), nos utilitários do `loader.py`, no **Comercial/metas** (`etl/metas.py` puro + `etl/daily.py` com competência fixa via fixtures `config_daily`/`dados_daily` do conftest — o default é o mês corrente, que não serviria para teste determinístico), no **domínio de pedidos** (`pedidos/` — builder e estados puros; repositório testado com fake do gateway `_inserir/_atualizar/_selecionar/_deletar`, sem Supabase) e nas **integrações/emissão** (`pedidos/integracoes/` + `emissor.py` — payloads puros, OAuth e clientes HTTP com fake injetável, emissor com repo+cliente fakes; zero rede). Sem Supabase/secrets. Instalar dev deps com `uv pip install -r requirements-dev.txt` (o venv usa **uv**, não pip) e rodar `pytest` na raiz. `tests/conftest.py` monta `config` e `dados` sintéticos; o determinismo vem de ancorar as altas em `now()` de forma constante e desligar o crescimento (ver docstring do conftest). Os fakes reusam os `RepoFake` de `test_pedidos_repositorio`/`test_integracoes_repositorio` e o `HttpFake` de `test_integracoes_payloads`. Ao mexer no motor, rode a suíte e atualize os testes junto.
+Suíte `pytest` focada no **motor de demanda/PCP** (`etl/demanda.py`), nos utilitários e na **paginação paralela** do `loader.py` (`tests/test_loader_paginacao.py` — planejamento de páginas, montagem a partir de lotes fora de ordem, filtro simétrico count/página, retry e cauda, com fake do cliente PostgREST), no **Comercial/metas** (`etl/metas.py` puro + `etl/daily.py` com competência fixa via fixtures `config_daily`/`dados_daily` do conftest — o default é o mês corrente, que não serviria para teste determinístico), no **domínio de pedidos** (`pedidos/` — builder e estados puros; repositório testado com fake do gateway `_inserir/_atualizar/_selecionar/_deletar`, sem Supabase) e nas **integrações/emissão** (`pedidos/integracoes/` + `emissor.py` — payloads puros, OAuth e clientes HTTP com fake injetável, emissor com repo+cliente fakes; zero rede). Sem Supabase/secrets. Instalar dev deps com `uv pip install -r requirements-dev.txt` (o venv usa **uv**, não pip) e rodar `pytest` na raiz. `tests/conftest.py` monta `config` e `dados` sintéticos; o determinismo vem de ancorar as altas em `now()` de forma constante e desligar o crescimento (ver docstring do conftest). Os fakes reusam os `RepoFake` de `test_pedidos_repositorio`/`test_integracoes_repositorio` e o `HttpFake` de `test_integracoes_payloads`. Ao mexer no motor, rode a suíte e atualize os testes junto.
 
 ---
 

@@ -420,7 +420,10 @@ with tab1:
             # Salvar
             if not salvar_parametros(config):
                 st.stop()
-            st.cache_data.clear()
+            # Só o cache de CONFIG — não o de dados (TTL 1 h). O clear()
+            # global levava junto a leitura do Supabase, e cada "Salvar"
+            # custava uma carga fria (~10 s) na tela seguinte.
+            carregar_config.clear()
             st.success("✅ Configurações salvas com sucesso!")
             st.info("💡 Cache limpo. Os dados serão recarregados na próxima visualização das páginas.")
 
@@ -443,7 +446,7 @@ with tab1:
     _lojas_cfg = [l["nome"] for l in config["depositos"]["lojas"]]
     _ano_atual = date.today().year
 
-    @st.cache_data(ttl=600, show_spinner=False)
+    @st.cache_data(ttl=600, show_spinner="Levantando o realizado dos últimos meses…")
     def _realizado_mensal():
         """Faturamento/peças/pedidos realizados por (ano, mês, loja) — a âncora
         que o gestor usa para decidir a meta. Vem do MESMO pipeline do Daily
@@ -666,7 +669,10 @@ with tab1:
             # delta interno da edição já gravada e poderia sobrepor a base
             # recém-salva na próxima renderização.
             st.session_state["_metas_versao"] = _versao + 1
-            st.cache_data.clear()
+            # Só o cache de CONFIG — não o de dados (TTL 1 h). O clear()
+            # global levava junto a leitura do Supabase, e cada "Salvar"
+            # custava uma carga fria (~10 s) na tela seguinte.
+            carregar_config.clear()
             st.success(f"✅ Metas de **{loja_meta}** salvas — {n_meses} mês(es) configurado(s) em {ano_meta}.")
 
     # -----------------------------------------------------------------
@@ -779,7 +785,10 @@ with tab1:
             config["daily"]["vendedores_loja"] = novo_atrib
             if not salvar_parametros(config):
                 st.stop()
-            st.cache_data.clear()
+            # Só o cache de CONFIG — não o de dados (TTL 1 h). O clear()
+            # global levava junto a leitura do Supabase, e cada "Salvar"
+            # custava uma carga fria (~10 s) na tela seguinte.
+            carregar_config.clear()
             st.success(f"✅ Atribuição de {n_atrib} vendedor(es) salva, vigente a partir de {comp_vend}.")
 
     # =================================================================
@@ -848,7 +857,10 @@ with tab1:
         config["colegios_alias"] = novo_alias
         if not salvar_parametros(config):
             st.stop()
-        st.cache_data.clear()
+        # Só o cache de CONFIG — não o de dados (TTL 1 h). O clear()
+        # global levava junto a leitura do Supabase, e cada "Salvar"
+        # custava uma carga fria (~10 s) na tela seguinte.
+        carregar_config.clear()
         n_outros = sum(1 for v in novo_alias.values() if v == "Outros")
         st.success(f"✅ {len(novo_alias)} regra(s) de colégio salva(s) ({n_outros} → Outros). Cache limpo.")
 
@@ -929,7 +941,10 @@ with tab1:
         config["colegios"] = novo_colegios
         if not salvar_parametros(config):
             st.stop()
-        st.cache_data.clear()
+        # Só o cache de CONFIG — não o de dados (TTL 1 h). O clear()
+        # global levava junto a leitura do Supabase, e cada "Salvar"
+        # custava uma carga fria (~10 s) na tela seguinte.
+        carregar_config.clear()
         st.success(f"✅ Taxa base de {len(df_colegios_editado)} colégio(s) salva!")
 
     # --- Matriz crescimento por (colégio × grupo/série) ---
@@ -1014,7 +1029,10 @@ with tab1:
         config["colegios"] = novo_colegios
         if not salvar_parametros(config):
             st.stop()
-        st.cache_data.clear()
+        # Só o cache de CONFIG — não o de dados (TTL 1 h). O clear()
+        # global levava junto a leitura do Supabase, e cada "Salvar"
+        # custava uma carga fria (~10 s) na tela seguinte.
+        carregar_config.clear()
         n = sum(len(v) for v in grupos_por_col.values())
         st.success(f"✅ {n} override(s) manual(is) salvos — o resto segue o observado (vivo).")
 
@@ -1064,7 +1082,10 @@ with tab1:
         config["grupo_segmento"] = novo_seg
         if not salvar_parametros(config):
             st.stop()
-        st.cache_data.clear()
+        # Só o cache de CONFIG — não o de dados (TTL 1 h). O clear()
+        # global levava junto a leitura do Supabase, e cada "Salvar"
+        # custava uma carga fria (~10 s) na tela seguinte.
+        carregar_config.clear()
         st.success(f"✅ Agrupamento salvo — {len(set(novo_seg.values()))} segmento(s).")
 
 # =================================================================
@@ -1160,7 +1181,10 @@ with tab2:
                         config["excecoes_sku"] = excecoes_novo
                         if not salvar_parametros(config):
                             st.stop()
-                        st.cache_data.clear()
+                        # Só o cache de CONFIG — não o de dados (TTL 1 h). O clear()
+                        # global levava junto a leitura do Supabase, e cada "Salvar"
+                        # custava uma carga fria (~10 s) na tela seguinte.
+                        carregar_config.clear()
                         st.success(f"✅ {len(excecoes_novo)} exceção(ões) aplicada(s)!")
 
             except Exception as e:
@@ -1659,8 +1683,10 @@ with tab3:
 
     with col3:
         if st.button("🔄 Forçar Recarga de Dados"):
+            # Clear GLOBAL de propósito: é a intenção explícita do botão
+            # (relê o espelho do Bling, não só os parâmetros).
             st.cache_data.clear()
-            st.success("✅ Cache limpo. Próxima página vai recarregar os dados.")
+            st.success("✅ Cache limpo. A próxima tela relê o Supabase (~10 s).")
 
     with col4:
         # Backup do config EFETIVO (yaml defaults + parâmetros do Supabase
