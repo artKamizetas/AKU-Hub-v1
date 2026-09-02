@@ -11,31 +11,28 @@ import pandas as pd
 from etl.logistica import processar_logistica
 from etl.vm_dinamico import calcular_vm_por_sku
 
-from etl.loader import carregar_dados, carregar_config
+from etl.loader import fingerprint_config
+from ui_carga import carregar_com_feedback, rodape_frescor
 
 
-def _carregar():
-    config = carregar_config()   # yaml (defaults) + app.parametros (Supabase)
-    dados = carregar_dados()
-    return dados, config
-
-
-with st.spinner("Carregando dados..."):
-    dados, config = _carregar()
+dados, config = carregar_com_feedback()
 
 if not dados["validacao"]["ok"]:
     st.error("Dados inválidos. Verifique a página principal.")
     st.stop()
 
 
-@st.cache_data
-def _processar(_dados, _config):
+@st.cache_data(show_spinner=False)
+def _processar(_dados, _config, fp_config):
+    # `fp_config` SEM underscore de propósito: é o único argumento que ENTRA na
+    # cache key (os `_` ficam fora). É ele que faz o resultado não ficar preso
+    # ao config antigo depois de um "Salvar" em Configurações.
     vm_map = calcular_vm_por_sku(_dados, _config)
     return processar_logistica(_dados, _config, vm_map)
 
 
-with st.spinner("Processando logística..."):
-    df = _processar(dados, config)
+# Sem spinner: leva ~0,5 s e o flash gera mais ruído do que confiança.
+df = _processar(dados, config, fingerprint_config(config))
 
 st.title("📦 Logística — Reposição de Loja")
 
@@ -228,3 +225,6 @@ if df_filtrado["Categoria"].notna().any() and df_filtrado["Categoria"].str.strip
             showlegend=False, height=400,
         )
         st.plotly_chart(fig_pareto, width="stretch")
+
+st.divider()
+rodape_frescor(dados)

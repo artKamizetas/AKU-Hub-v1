@@ -36,7 +36,7 @@ CHAVES_PARAMETROS = {
     "vm": None,
     "colegios": None,
     "colegios_alias": None,
-    "daily": ["metas", "status_ids"],                 # situacoes_venda é estrutural
+    "daily": ["metas", "metas_mensais", "vendedores_loja", "status_ids"],  # situacoes_venda é estrutural
     "fabrica": ["crescimento_pct", "cobertura_meses", "correcao_manual"],
     "demanda": ["janela_alta", "nivel_servico_alta", "nivel_servico_baixa",
                 "variacao_demanda", "aplicar_crescimento_fabrica",
@@ -51,6 +51,7 @@ CHAVES_PARAMETROS = {
 CAMINHOS_SUBSTITUICAO = {
     "colegios", "colegios_alias", "grupo_segmento", "excecoes_sku",
     "planejamento.cobertura_override",
+    "daily.metas_mensais", "daily.vendedores_loja",
 }
 
 

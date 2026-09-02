@@ -6,4 +6,4 @@ pyyaml>=6.0
 plotly>=6.8
 postgrest>=2.31
 httpx>=0.27              # chamadas às APIs Bling/Olist (era transitivo via postgrest)
-streamlit-authenticator>=0.4
+Authlib>=1.3.2           # exigido pelo st.login()/OIDC nativo do Streamlit

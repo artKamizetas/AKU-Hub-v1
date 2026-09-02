@@ -80,10 +80,29 @@ daily:
     em_andamento: 15
     pronto_retirada: 28488
 
-  # Metas financeiras do mês atual (R$)
+  # LEGADO — fallback quando o mês não tem entrada em metas_mensais (vira o
+  # nível Ouro de faturamento; Prata=0.85x, Diamante=1.20x, PA sem meta).
+  # Ver docs/requisitos/metas-escalonadas.md.
   metas:
     Natal: 70000.0
     Mossoró: 50000.0
+
+  # Metas escalonadas (Prata/Ouro/Diamante) por loja × mês, em Faturamento
+  # e PA. Fonte primária — editável na página de Configurações → "Metas
+  # Mensais". Vazio no yaml (é Categoria B: vive em app.parametros); a
+  # estrutura fica documentada aqui para referência.
+  # metas_mensais:
+  #   "2026-01":
+  #     Natal:
+  #       faturamento: {prata: 120000, ouro: 150000, diamante: 180000}
+  #       pa:          {prata: 2.0, ouro: 2.5, diamante: 3.0}
+
+  # Atribuição vendedor→loja com vigência mensal (herda do mês anterior
+  # mais recente quando ausente). Usada para ratear a meta da loja entre
+  # vendedores — a meta do vendedor nunca é digitada diretamente.
+  # vendedores_loja:
+  #   "2026-01":
+  #     "203400111": {loja: "Natal", peso: 1.0, ativo: true}
 
 # --- PCP / FÁBRICA ---
 fabrica:

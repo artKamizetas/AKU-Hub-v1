@@ -9,8 +9,9 @@ O topo guarda só o que é transversal às duas; cada aba tem seu contexto.
 """
 
 import streamlit as st
-from auth import exigir_login
-exigir_login()
+from auth import identidade_atual, e_admin
+
+_nome, usuario, role = identidade_atual()
 import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
@@ -21,17 +22,11 @@ from etl.demanda import listar_rodadas_selecionaveis
 from pedidos import builder as pedidos_builder
 from pedidos.repositorio import obter_repositorio, RodadaJaCongelada
 
-from etl.loader import carregar_dados, carregar_config
+from etl.loader import carregar_config, fingerprint_config
+from ui_carga import carregar_com_feedback, rodape_frescor
 
 
-def _carregar():
-    config = carregar_config()   # yaml (defaults) + app.parametros (Supabase)
-    dados = carregar_dados()
-    return dados, config
-
-
-with st.spinner("Carregando dados..."):
-    dados, config = _carregar()
+dados, config = carregar_com_feedback()
 
 if not dados["validacao"]["ok"]:
     st.error("Dados inválidos. Verifique a página principal.")
@@ -41,8 +36,12 @@ if not dados["validacao"]["ok"]:
 # PROCESSAMENTO FÁBRICA (cacheado)
 # =================================================================
 
-@st.cache_data
-def _processar(_dados, _config, mes_disparo=None, ano_disparo=None, ativo_crescimento=None):
+@st.cache_data(show_spinner=False)
+def _processar(_dados, _config, fp_config, mes_disparo=None, ano_disparo=None,
+               ativo_crescimento=None):
+    # `fp_config` SEM underscore: é o que ENTRA na cache key (os `_` ficam
+    # fora). Sem ele, o resultado ficaria preso ao config antigo depois de um
+    # "Salvar plano" ou de uma edição em Configurações.
     return processar_fabrica(
         _dados, _config, mes_disparo=mes_disparo, ano_disparo=ano_disparo,
         ativo_crescimento=ativo_crescimento,
@@ -153,10 +152,7 @@ with st.container(border=True):
     # Datas E coberturas formam "o plano": editam-se JUNTOS aqui, onde o efeito
     # (produção migrando entre rodadas) é visível ao vivo. Preview de sessão
     # vence o salvo até "Salvar plano". Ver docs/requisitos/cobertura-alvo-rodada.md.
-    _role = (dict(st.secrets.get("auth_config", {}))
-             .get("credentials", {}).get("usernames", {})
-             .get(st.session_state.get("username", ""), {}).get("role", ""))
-    _is_admin = _role == "admin"
+    _is_admin = e_admin()
 
     # Placeholders p/ ordenar a tela: KPIs (topo) → Calendário → Rodadas (inline).
     # O calendário é preenchido PRIMEIRO no código (define as datas da simulação),
@@ -235,16 +231,17 @@ with st.container(border=True):
     if not tem_rodadas:
         st.warning("Adicione **2+ datas** no calendário acima para simular as rodadas.")
     else:
-        sim = simular_rodadas(dados, config_sim, sazonalidade,
-                              cobertura_override=_cob_ativo,
-                              ativo_crescimento=ativo_cresc)
+        with st.spinner(f"Simulando {len(datas_rodadas)} rodadas…", show_time=True):
+            sim = simular_rodadas(dados, config_sim, sazonalidade,
+                                  cobertura_override=_cob_ativo,
+                                  ativo_crescimento=ativo_cresc)
 
-        # Simulação NATURAL (sem overrides) só quando há antecipação ativa —
-        # referência p/ o planejador ver a gordura migrando entre rodadas
-        sim_nat = (simular_rodadas(dados, config_sim, sazonalidade,
-                                   cobertura_override={},
-                                   ativo_crescimento=ativo_cresc)
-                   if _cob_ativo else sim)
+            # Simulação NATURAL (sem overrides) só quando há antecipação ativa —
+            # referência p/ o planejador ver a gordura migrando entre rodadas
+            sim_nat = (simular_rodadas(dados, config_sim, sazonalidade,
+                                       cobertura_override={},
+                                       ativo_crescimento=ativo_cresc)
+                       if _cob_ativo else sim)
 
         # --- KPIs macro (renderizados no topo, em _ph_kpi): dois grupos ---
         # Agregados por ANO DE CHEGADA das rodadas — cada rodada contribui pro
@@ -424,10 +421,13 @@ with st.container(border=True):
                             _cfg_novo["planejamento"].pop("cobertura_override", None)
                         obter_repositorio_parametros().salvar(
                             extrair_parametros(_cfg_novo),
-                            usuario=st.session_state.get("username", "") or "admin")
+                            usuario=usuario)
                         st.session_state.pop("cobertura_alvo_preview", None)
                         st.session_state.pop(_CAL_KEY, None)   # resemeia calendário do salvo
-                        st.cache_data.clear()
+                        # Só o cache de CONFIG — não o de dados (TTL 1 h). O clear()
+                        # global levava junto a leitura do Supabase, e cada "Salvar"
+                        # custava uma carga fria (~10 s) na tela seguinte.
+                        carregar_config.clear()
                         st.rerun()
                     except Exception as exc:
                         st.error(f"❌ Falha ao salvar plano: {exc}")
@@ -612,9 +612,13 @@ with st.container(border=True):
                  "A primeira opção é a rodada mais próxima de ser disparada.",
         )
         sel = rodadas_opts[idx]
-        df = _processar(dados, config, sel["mes_disparo"], sel["ano_disparo"], ativo_cresc)
+        with st.spinner("Calculando sugestão da rodada…", show_time=True):
+            df = _processar(dados, config, fingerprint_config(config),
+                            sel["mes_disparo"], sel["ano_disparo"], ativo_cresc)
     else:
-        df = _processar(dados, config, None, None, ativo_cresc)
+        with st.spinner("Calculando sugestão da rodada…", show_time=True):
+            df = _processar(dados, config, fingerprint_config(config),
+                            None, None, ativo_cresc)
 
     df["Tamanho"] = df["SKU"].map(_tam_map).fillna("")
 
@@ -787,12 +791,7 @@ with st.container(border=True):
     # --- Congelar rodada → Pedidos de Compra (admin only) ---
     # Gate explícito de role (mesmo padrão de 5_Configuracoes.py) — defesa em
     # profundidade além do filtro de páginas por role no app.py.
-    _usuario = st.session_state.get("username", "")
-    _role = (dict(st.secrets.get("auth_config", {}))
-             .get("credentials", {}).get("usernames", {})
-             .get(_usuario, {}).get("role", ""))
-
-    if _role == "admin" and rodadas_opts:
+    if e_admin() and rodadas_opts:
         st.divider()
         st.subheader("🧊 Congelar rodada → Pedidos de Compra")
         st.caption(
@@ -823,10 +822,10 @@ with st.container(border=True):
                         try:
                             snapshot = pedidos_builder.montar_snapshot_rodada(
                                 df_fresco, config, sel["mes_disparo"], sel["ano_disparo"],
-                                ativo_crescimento=bool(ativo_cresc), usuario=_usuario,
+                                ativo_crescimento=bool(ativo_cresc), usuario=usuario,
                             )
                             grupos = pedidos_builder.agrupar_pedidos(
-                                df_fresco, dados["produtos"], _usuario,
+                                df_fresco, dados["produtos"], usuario,
                                 sel["mes_disparo"], sel["ano_disparo"],
                             )
                             res = obter_repositorio().congelar_rodada(snapshot, grupos)
@@ -849,3 +848,6 @@ with st.container(border=True):
             getattr(st, nivel)(texto)
             if nivel in ("success", "warning"):
                 st.page_link("pages/4_Pedidos.py", label="Abrir Pedidos de Compra", icon="🧾")
+
+st.divider()
+rodape_frescor(dados)

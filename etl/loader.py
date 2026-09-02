@@ -12,7 +12,8 @@ Uso:
     dados["pedidos"]  # DataFrame dos pedidos
 """
 
-from concurrent.futures import ThreadPoolExecutor
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import streamlit as st
@@ -129,7 +130,36 @@ def converter_data_flexivel(valor):
     except Exception:
         return pd.NaT
 
-_PAGE_SIZE = 1000  # limite default do PostgREST por request
+def converter_serie_data(serie: pd.Series) -> pd.Series:
+    """
+    Versão VETORIZADA de converter_data_flexivel, para uma coluna inteira.
+
+    O espelho entrega ISO (YYYY-MM-DD) em praticamente 100% das linhas, mas a
+    conversão elemento a elemento custava ~5,8 s nas 140k linhas de
+    Pedidos+Itens — mais da metade do tempo de transformação depois que a
+    leitura ficou rápida. Faz UMA passada vetorizada no formato ISO e cai no
+    elemento a elemento só no que sobrou (datas BR, lixo), preservando
+    exatamente a semântica de converter_data_flexivel.
+    """
+    conv = pd.to_datetime(serie, format="%Y-%m-%d", errors="coerce")
+    resto = conv.isna() & serie.notna()
+    if resto.any():
+        conv = conv.copy()
+        conv.loc[resto] = serie[resto].apply(converter_data_flexivel)
+    return conv
+
+
+_PAGE_SIZE = 1000        # teto do PostgREST (max-rows) — não adianta aumentar
+_MAX_WORKERS = 16       # 16 pega ~90% do ganho; 32 rende só +10% (medido)
+_TENTATIVAS_PAGINA = 3  # o fan-out multiplicou os requests: 5xx vira provável
+
+# Colunas que o loader descarta logo depois (dropna) — filtro empurrado para o
+# servidor. Em `itens`, 41% das linhas têm id_pedido_bling nulo: baixá-las custa
+# ~68 páginas para nada.
+FILTROS_NAO_NULOS = {"itens": ("id_pedido_bling",)}
+
+# tabela real → aba do SCHEMA (rótulo humano usado no progresso)
+_ABA_POR_TABELA = {v: k for k, v in TABELAS_SUPABASE.items() if v}
 
 
 @st.cache_data(ttl=300)
@@ -173,6 +203,25 @@ def carregar_config() -> dict:
     return config
 
 
+def fingerprint_config(config: dict) -> str:
+    """
+    Assinatura curta do config efetivo, para entrar na cache key das funções
+    pesadas das páginas (`_processar`, `_processar_daily`).
+
+    Essas funções recebem o config como `_config` — fora do hash, porque dict
+    não é hashável. Enquanto a invalidação era `st.cache_data.clear()` global,
+    isso não fazia falta: salvar um parâmetro derrubava tudo junto. Agora que o
+    clear é cirúrgico (só `carregar_config`), sem esta assinatura o resultado
+    ficaria preso ao config ANTIGO até o TTL — o gestor salvaria uma meta e não
+    veria efeito nenhum na tela.
+    """
+    import hashlib
+    import json
+
+    bruto = json.dumps(config, sort_keys=True, default=str)
+    return hashlib.sha256(bruto.encode("utf-8")).hexdigest()[:12]
+
+
 @st.cache_resource
 def _conn_supabase():
     """
@@ -199,7 +248,7 @@ def _conn_supabase():
     http_client = httpx.Client(
         http2=False,
         headers=headers,
-        limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+        limits=httpx.Limits(max_connections=20, max_keepalive_connections=20),
     )
     return SyncPostgrestClient(
         f"{cfg['url'].rstrip('/')}/rest/v1",
@@ -209,31 +258,103 @@ def _conn_supabase():
     )
 
 
-def _ler_tabela(client, tabela: str) -> pd.DataFrame:
-    """Lê tabela inteira paginando em blocos de _PAGE_SIZE (limite PostgREST)."""
-    linhas = []
-    inicio = 0
-    while True:
-        resp = (
-            client.from_(tabela)
-            .select("*")
-            .range(inicio, inicio + _PAGE_SIZE - 1)
-            .execute()
+def _aplicar_filtros(q, tabela: str):
+    """
+    Aplica os filtros server-side da tabela. A MESMA função é usada no count e
+    na leitura das páginas — se as duas condições divergirem, os offsets
+    desalinham e a leitura fica silenciosamente furada (linhas puladas).
+    """
+    for col in FILTROS_NAO_NULOS.get(tabela, ()):
+        q = q.not_.is_(col, "null")
+    return q
+
+
+def _contar(client, tabela: str):
+    """Contagem exata (já filtrada) — base do plano de páginas."""
+    q = _aplicar_filtros(client.from_(tabela).select("id", count="exact"), tabela)
+    return tabela, (q.limit(1).execute().count or 0)
+
+
+def planejar_paginas(contagens: dict, tamanho: int = _PAGE_SIZE) -> list:
+    """
+    {tabela: n_linhas} → lista plana [(tabela, offset), ...] de páginas a buscar.
+
+    PURA (sem rede) para ser testável. Tabela vazia rende 1 job: a contagem pode
+    estar velha, e a leitura confirma. Contagem múltipla exata do tamanho NÃO
+    gera job vazio extra (a cauda cuida do crescimento).
+    """
+    jobs = []
+    for tabela, n in contagens.items():
+        for inicio in range(0, max(int(n or 0), 1), tamanho):
+            jobs.append((tabela, inicio))
+    return jobs
+
+
+def _ler_pagina(client, tabela: str, inicio: int) -> list:
+    """
+    Uma página de _PAGE_SIZE linhas, com retry próprio.
+
+    `.order("id")` é OBRIGATÓRIO: sem ORDER BY explícito o PostgREST não garante
+    ordenação estável entre requests, e páginas buscadas em paralelo podem
+    duplicar ou pular linhas.
+
+    O retry existe porque o fan-out multiplicou os requests (de ~9 para ~162):
+    um 5xx transitório que antes era raro agora derrubaria a carga inteira.
+    """
+    erro = None
+    for tentativa in range(_TENTATIVAS_PAGINA):
+        try:
+            q = _aplicar_filtros(client.from_(tabela).select("*").order("id"), tabela)
+            return q.range(inicio, inicio + _PAGE_SIZE - 1).execute().data or []
+        except Exception as e:
+            erro = e
+            if tentativa < _TENTATIVAS_PAGINA - 1:
+                time.sleep(0.5 * (tentativa + 1))
+    raise RuntimeError(
+        f"Falha ao ler '{tabela}' (offset {inicio}) após "
+        f"{_TENTATIVAS_PAGINA} tentativas: {erro}"
+    )
+
+
+def montar_dataframe(lotes: list) -> pd.DataFrame:
+    """
+    Lotes (em qualquer ordem — as_completed não preserva) → DataFrame único.
+
+    PURA. Ordena por `id` e remove duplicatas: a ordem das linhas precisa ser
+    determinística porque o tratamento de 'Produtos_detalhes' faz
+    drop_duplicates(keep="last") — com ordem instável, qual linha sobrevive
+    mudaria a cada carga.
+    """
+    linhas = [linha for lote in lotes for linha in lote]
+    df = pd.DataFrame(linhas)
+    if "id" in df.columns:
+        df = (
+            df.drop_duplicates(subset=["id"], keep="last")
+            .sort_values("id", kind="stable")
+            .reset_index(drop=True)
         )
-        lote = resp.data or []
-        linhas.extend(lote)
+    return df
+
+
+def _drenar_cauda(client, tabela: str, lotes: list, ultimo_offset: int) -> None:
+    """
+    Se a última página planejada veio CHEIA, a tabela cresceu entre o count e a
+    leitura (a pipeline externa escreve o tempo todo). Continua em série até uma
+    página curta. Normalmente não roda nenhuma vez.
+    """
+    inicio = ultimo_offset + _PAGE_SIZE
+    while True:
+        lote = _ler_pagina(client, tabela, inicio)
+        if not lote:
+            return
+        lotes.append(lote)
         if len(lote) < _PAGE_SIZE:
-            break
+            return
         inicio += _PAGE_SIZE
-    return pd.DataFrame(linhas)
 
 
-def _ler_e_renomear(client, aba: str, tabela: str):
-    """Lê uma tabela e aplica rename — unidade paralelizável por _ler_supabase."""
-    if not tabela:
-        return aba, None  # aba não mapeada — validação acusa aba ausente
-    df = _ler_tabela(client, tabela)
-
+def _renomear(aba: str, df: pd.DataFrame) -> pd.DataFrame:
+    """Aplica COLUNAS_SUPABASE e normaliza strings vazias."""
     rename = COLUNAS_SUPABASE.get(aba)
     if rename:
         # Evita colisão: Supabase tem colunas surrogate (ex: 'id_situacao')
@@ -247,31 +368,69 @@ def _ler_e_renomear(client, aba: str, tabela: str):
         df = df.rename(columns=rename)
 
     # Strings vazias → pd.NA p/ dropna() funcionar corretamente
-    return aba, df.replace("", pd.NA)
+    return df.replace("", pd.NA)
 
 
 @st.cache_data(ttl=3600)
-def _ler_supabase() -> dict:
+def _ler_supabase(_progresso=None) -> dict:
     """
-    Lê cada tabela do Supabase (via supabase-py) e retorna
-    {nome_aba_SCHEMA: DataFrame}. Cacheado por 1 hora. Tabelas via
-    TABELAS_SUPABASE; colunas renomeadas via COLUNAS_SUPABASE quando necessário.
+    Lê todas as tabelas do Supabase e retorna {nome_aba_SCHEMA: DataFrame}.
+    Cacheado por 1 hora.
 
-    9 tabelas lidas em paralelo (ThreadPoolExecutor). SyncPostgrestClient usa
-    httpx.Client (thread-safe); cliente cacheado por sessão em _conn_supabase.
+    Estratégia: FILA PLANA DE PÁGINAS. Conta as 9 tabelas (paralelo, ~1 s),
+    monta a lista completa de páginas de _PAGE_SIZE linhas e busca TODAS numa
+    pool só. A versão anterior paralelizava entre TABELAS e paginava em série
+    dentro de cada uma — o relógio de parede virava a corrente serial da maior
+    tabela (`itens`, 166 idas e voltas), ~117 s. Com a fila plana: ~10 s.
+
+    Aumentar a página não é opção: o Supabase corta em 1.000 linhas (max-rows).
+
+    `_progresso`: callback opcional (feitas, total, etapa). O prefixo `_` é a
+    convenção do Streamlit para NÃO entrar no hash da cache key — sem ele cada
+    rerun traria um callback novo, chave nova, e o cache nunca acertaria.
+    É chamado SÓ da thread principal: chamada de st.* de dentro de um worker
+    não tem ScriptRunContext, não renderiza e ainda polui o log.
     """
     client = _conn_supabase()
+    tabelas = [t for t in TABELAS_SUPABASE.values() if t]
 
+    # 1) Contagem exata de cada tabela (já com o filtro server-side aplicado)
+    if _progresso:
+        _progresso(0, 1, "Contando registros")
+    with ThreadPoolExecutor(max_workers=len(tabelas)) as pool:
+        contagens = dict(pool.map(lambda t: _contar(client, t), tabelas))
+
+    # 2) Plano de páginas e 3) busca paralela
+    jobs = planejar_paginas(contagens)
+    total = len(jobs)
+    lotes = {t: [] for t in tabelas}
+    feitas = 0
+
+    with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+        futuros = {pool.submit(_ler_pagina, client, t, i): (t, i) for t, i in jobs}
+        for fut in as_completed(futuros):
+            tabela, _ = futuros[fut]
+            lotes[tabela].append(fut.result())
+            feitas += 1
+            if _progresso:
+                _progresso(feitas, total, _ABA_POR_TABELA.get(tabela, tabela))
+
+    # 4) Cauda: tabela que cresceu entre o count e a leitura.
+    # A última página planejada tem offset ((n-1)//PAGE)*PAGE e devolve
+    # n - offset linhas — ou seja, ela só vem CHEIA quando n é múltiplo exato
+    # de _PAGE_SIZE. Nesse caso pode haver linhas novas depois dela.
+    if _progresso:
+        _progresso(total, total, "Finalizando")
+    for tabela, n in contagens.items():
+        if n and n % _PAGE_SIZE == 0:
+            _drenar_cauda(client, tabela, lotes[tabela], n - _PAGE_SIZE)
+
+    # 5) Monta os DataFrames e aplica o rename
     todas_abas = {}
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        futuros = [
-            pool.submit(_ler_e_renomear, client, aba, tabela)
-            for aba, tabela in TABELAS_SUPABASE.items()
-        ]
-        for f in futuros:
-            aba, df = f.result()
-            if df is not None:
-                todas_abas[aba] = df
+    for aba, tabela in TABELAS_SUPABASE.items():
+        if not tabela:
+            continue  # aba não mapeada — validação acusa aba ausente
+        todas_abas[aba] = _renomear(aba, montar_dataframe(lotes[tabela]))
 
     # ----------------------------------------------------------------
     # Ajustes de schema (diferenças estruturais Supabase × SCHEMA)
@@ -297,11 +456,29 @@ def _ler_supabase() -> dict:
         itn = itn.merge(chave[["_k", "Data"]], on="_k", how="left").drop(columns="_k")
         todas_abas["Itens"] = itn
 
+    # Instante da leitura — alimenta o rodapé de frescor das páginas. Chave
+    # com prefixo `_`: fica fora do laço de validação, que itera sobre SCHEMA.
+    todas_abas["_carregado_em"] = pd.Timestamp.now()
+
     return todas_abas
 
 
+def invalidar_cache_dados() -> None:
+    """
+    Derruba o cache de dados (leitura + transformação) sem tocar no resto.
+
+    São DOIS caches encadeados: `carregar_dados` (tipagem/limpeza) consome
+    `_ler_supabase` (rede). Limpar só o primeiro relê o cache do segundo e a
+    "recarga" não recarregaria nada — por isso os dois, sempre juntos.
+    Preferir esta função ao `st.cache_data.clear()` global, que levaria junto
+    o cache de config e o da allowlist de acesso.
+    """
+    carregar_dados.clear()
+    _ler_supabase.clear()
+
+
 @st.cache_data(ttl=3600)
-def carregar_dados() -> dict:
+def carregar_dados(_progresso=None) -> dict:
     """
     Lê os dados do Bling do Supabase e retorna um dicionário de DataFrames.
 
@@ -316,14 +493,20 @@ def carregar_dados() -> dict:
             "lojas":         DataFrame,
             "situacoes":     DataFrame,
             "depositos":     DataFrame,
+            "carregado_em":  Timestamp,   ← instante da leitura (rodapé de frescor)
             "validacao": {"ok": bool, "erros": list, "avisos": list}
         }
+
+    `_progresso`: callback opcional (feitas, total, etapa) repassado ao
+    `_ler_supabase`. Prefixo `_` = fora do hash da cache key (convenção do
+    Streamlit); em cache hit o corpo não roda e o callback nunca é chamado —
+    correto, não há o que reportar quando é instantâneo.
     """
     erros = []
     avisos = []
 
     try:
-        todas_abas = _ler_supabase()
+        todas_abas = _ler_supabase(_progresso=_progresso)
     except Exception as e:
         st.error(f"❌ Erro ao conectar ao Supabase: {e}")
         return {"validacao": {"ok": False, "erros": [f"Erro ao ler Supabase: {e}"], "avisos": []}}
@@ -361,7 +544,7 @@ def carregar_dados() -> dict:
     df["Vendedor"] = df["Vendedor"].apply(limpar_id)
     df["id_situacao"] = pd.to_numeric(df["id_situacao"], errors="coerce")
     # Converte datas em formato ISO (YYYY-MM-DD) ou BR (DD/MM/YYYY)
-    df["Data"] = df["Data"].apply(converter_data_flexivel)
+    df["Data"] = converter_serie_data(df["Data"])
     df["Total Venda"] = pd.to_numeric(
         df["Total Venda"].astype(str).str.replace(",", "."), errors="coerce"
     ).fillna(0)
@@ -382,7 +565,7 @@ def carregar_dados() -> dict:
     df["Desconto Item"] = pd.to_numeric(
         df["Desconto Item"].astype(str).str.replace(",", "."), errors="coerce"
     ).fillna(0)
-    df["Data"] = df["Data"].apply(converter_data_flexivel)
+    df["Data"] = converter_serie_data(df["Data"])
     dados["itens"] = df
 
     # --- Produtos ---
@@ -441,6 +624,7 @@ def carregar_dados() -> dict:
     df["ID"] = df["ID"].apply(limpar_id)
     dados["depositos"] = df
 
+    dados["carregado_em"] = todas_abas.get("_carregado_em")
     dados["validacao"] = {"ok": True, "erros": [], "avisos": avisos}
     return dados
 

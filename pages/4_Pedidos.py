@@ -13,8 +13,7 @@ confundiria o pós-escrita).
 """
 
 import streamlit as st
-from auth import exigir_login
-exigir_login()
+from auth import exigir_admin
 
 import pandas as pd
 
@@ -24,15 +23,9 @@ from pedidos.repositorio import (
 )
 from pedidos.integracoes.repositorio import obter_repositorio_integracoes
 
-# Gate explícito de role (mesmo padrão de 5_Configuracoes.py)
-username = st.session_state.get("username", "")
-auth_config = dict(st.secrets.get("auth_config", {}))
-usernames = auth_config.get("credentials", {}).get("usernames", {})
-role = usernames.get(username, {}).get("role", "")
-
-if role != "admin":
-    st.error("⛔ Acesso negado. Apenas administradores podem acessar esta página.")
-    st.stop()
+# Gate de admin (login + role numa chamada). `usuario` é o e-mail: alimenta as
+# colunas de auditoria de toda escrita desta página.
+_nome, usuario, role = exigir_admin()
 
 
 BADGES_RODADA = {
@@ -245,7 +238,7 @@ with st.container(border=True):
             )
             if st.button("Confirmar cancelamento da rodada", type="primary"):
                 try:
-                    repo.cancelar_rodada(rodada_id, username)
+                    repo.cancelar_rodada(rodada_id, usuario)
                     _flash("success", "Rodada cancelada — pode congelar de novo no Simulador.")
                 except TransicaoInvalida as exc:
                     _flash("error", str(exc))
@@ -451,7 +444,7 @@ def _secao_pedido():
                         _flash("info", "Nenhuma quantidade alterada.")
                     else:
                         try:
-                            n = repo.atualizar_quantidades(pedido_id, alteracoes, username)
+                            n = repo.atualizar_quantidades(pedido_id, alteracoes, usuario)
                             _flash("success", f"{n} item(ns) atualizado(s).")
                         except PedidoNaoEditavel as exc:
                             _flash("warning", str(exc))
@@ -459,7 +452,7 @@ def _secao_pedido():
             with c2:
                 if st.button("✅ Marcar como Pronto", width="stretch"):
                     ok = repo.transicionar_pedido(
-                        pedido_id, estados.RASCUNHO, estados.PRONTO, username)
+                        pedido_id, estados.RASCUNHO, estados.PRONTO, usuario)
                     _flash("success", "Pedido marcado como **Pronto**.") if ok else _flash(
                         "warning", "O pedido mudou de estado em outra sessão — recarregado.")
                     st.rerun()
@@ -468,7 +461,7 @@ def _secao_pedido():
                     st.caption("O pedido cancelado sai do fluxo (fica registrado p/ auditoria).")
                     if st.button("Confirmar cancelamento", key=f"cancel_{pedido_id}"):
                         ok = repo.transicionar_pedido(
-                            pedido_id, estados.RASCUNHO, estados.CANCELADO, username)
+                            pedido_id, estados.RASCUNHO, estados.CANCELADO, usuario)
                         _flash("success", "Pedido cancelado.") if ok else _flash(
                             "warning", "O pedido mudou de estado em outra sessão — recarregado.")
                         st.rerun()
@@ -483,7 +476,7 @@ def _secao_pedido():
                     with st.status("📤 Emitindo compra no Bling…", expanded=True) as _s:
                         try:
                             res = emissor.emitir_compra_bling(
-                                pedido_id, username, repo, obter_repositorio_integracoes())
+                                pedido_id, usuario, repo, obter_repositorio_integracoes())
                             _s.update(label=f"Compra emitida · nº {res['bling_numero']}",
                                       state="complete")
                             _flash("success",
@@ -495,7 +488,7 @@ def _secao_pedido():
             with c2:
                 if st.button("↩️ Reabrir rascunho", width="stretch", key=f"reabrir_{pedido_id}"):
                     ok = repo.transicionar_pedido(
-                        pedido_id, estados.PRONTO, estados.RASCUNHO, username)
+                        pedido_id, estados.PRONTO, estados.RASCUNHO, usuario)
                     _flash("success", "Pedido reaberto para edição.") if ok else _flash(
                         "warning", "O pedido mudou de estado em outra sessão — recarregado.")
                     st.rerun()
@@ -503,7 +496,7 @@ def _secao_pedido():
                 with st.popover("🚫 Cancelar pedido", width="stretch"):
                     if st.button("Confirmar cancelamento", key=f"cancelp_{pedido_id}"):
                         ok = repo.transicionar_pedido(
-                            pedido_id, estados.PRONTO, estados.CANCELADO, username)
+                            pedido_id, estados.PRONTO, estados.CANCELADO, usuario)
                         _flash("success", "Pedido cancelado.") if ok else _flash(
                             "warning", "O pedido mudou de estado em outra sessão — recarregado.")
                         st.rerun()
@@ -519,7 +512,7 @@ def _secao_pedido():
                     with st.status("📤 Emitindo venda no Olist…", expanded=True) as _s:
                         try:
                             res = emissor.emitir_venda_olist(
-                                pedido_id, username, repo, obter_repositorio_integracoes(),
+                                pedido_id, usuario, repo, obter_repositorio_integracoes(),
                                 mapa_sku=_mapa)
                             _s.update(label=f"Venda emitida · nº {res['olist_numero']}",
                                       state="complete")
@@ -539,7 +532,7 @@ def _secao_pedido():
                     st.caption("Volta o pedido ao estado anterior. Confirme antes que o "
                                "pedido NÃO foi criado no ERP (senão vira duplicata).")
                     if st.button("Confirmar destravamento", key=f"destr_{pedido_id}"):
-                        ok = emissor.destravar(pedido_id, username, repo,
+                        ok = emissor.destravar(pedido_id, usuario, repo,
                                                obter_repositorio_integracoes())
                         _flash("success", "Pedido destravado.") if ok else _flash(
                             "warning", "O estado mudou em outra sessão — recarregado.")
@@ -632,7 +625,7 @@ def _secao_lote():
                     suc, fal = _executar_lote(
                         _rasc, lambda r: (
                             repo.transicionar_pedido(
-                                r["id"], estados.RASCUNHO, estados.PRONTO, username),
+                                r["id"], estados.RASCUNHO, estados.PRONTO, usuario),
                             "o estado mudou em outra sessão"))
                     _flash_resumo_lote("Aprovação", suc, fal)
                     st.rerun()
@@ -645,7 +638,7 @@ def _secao_lote():
                     suc, fal = _executar_lote(
                         _pronto, lambda r: (
                             repo.transicionar_pedido(
-                                r["id"], estados.PRONTO, estados.RASCUNHO, username),
+                                r["id"], estados.PRONTO, estados.RASCUNHO, usuario),
                             "o estado mudou em outra sessão"))
                     _flash_resumo_lote("Reabertura", suc, fal)
                     st.rerun()
@@ -661,7 +654,7 @@ def _secao_lote():
                         suc, fal = _executar_lote(
                             _cancelaveis, lambda r: (
                                 repo.transicionar_pedido(
-                                    r["id"], r["status"], estados.CANCELADO, username),
+                                    r["id"], r["status"], estados.CANCELADO, usuario),
                                 "o estado mudou em outra sessão"))
                         _flash_resumo_lote("Cancelamento", suc, fal)
                         st.rerun()
@@ -687,7 +680,7 @@ def _secao_lote():
                             suc, fal = _executar_lote(
                                 _pronto, lambda r: (
                                     bool(emissor.emitir_compra_bling(
-                                        r["id"], username, repo,
+                                        r["id"], usuario, repo,
                                         obter_repositorio_integracoes())), ""))
                             _s.update(
                                 label=f"Compras processadas: {suc} ok, {len(fal)} com problema",
@@ -729,7 +722,7 @@ def _secao_lote():
                             suc, fal = _executar_lote(
                                 _compra, lambda r: (
                                     bool(emissor.emitir_venda_olist(
-                                        r["id"], username, repo,
+                                        r["id"], usuario, repo,
                                         obter_repositorio_integracoes(),
                                         mapa_sku=_mapa_lote)), ""))
                             _s.update(

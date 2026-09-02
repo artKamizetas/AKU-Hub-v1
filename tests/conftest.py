@@ -117,3 +117,108 @@ def dados(hoje):
         "estoque": estoque,
         "pedidos": pedidos,
     }
+
+
+# =====================================================================
+# Fixtures do COMERCIAL (etl/daily.py) — independentes das de demanda:
+# o Daily precisa de colunas que o motor de PCP não usa (Vendedor, Loja
+# ID, Valor Unidade, Desconto) e de metas escalonadas no config.
+# =====================================================================
+
+LOJA_A = "900001"    # "Natal" na config_daily
+LOJA_B = "900002"    # "Mossoró"
+
+
+@pytest.fixture
+def config_daily():
+    """Config mínimo do Comercial, com metas escalonadas em 2026-03."""
+    return {
+        "daily": {
+            "situacoes_venda": [9],
+            "status_ids": {"em_aberto": 6, "em_andamento": 15, "pronto_retirada": 28488},
+            "metas": {"Natal": 10000.0},           # legado → fallback
+            "metas_mensais": {
+                "2026-03": {
+                    "Natal": {
+                        "faturamento": {"prata": 1000, "ouro": 2000, "diamante": 3000},
+                        "pa": {"prata": 1.5, "ouro": 2.0, "diamante": 2.5},
+                    },
+                },
+            },
+            "vendedores_loja": {
+                "2026-03": {
+                    "V1": {"loja": "Natal", "peso": 1.0, "ativo": True},
+                    "V2": {"loja": "Natal", "peso": 1.0, "ativo": True},
+                },
+            },
+        },
+        "depositos": {
+            "lojas": [
+                {"nome": "Natal", "loja_id": LOJA_A, "deposito_id": "1"},
+                {"nome": "Mossoró", "loja_id": LOJA_B, "deposito_id": "2"},
+            ],
+        },
+        "colegios_alias": {},
+    }
+
+
+@pytest.fixture
+def dados_daily():
+    """
+    Vendas de Março/2026 (competência fixa → determinismo):
+      P1 · Natal · V1 · 2 peças × R$ 500 = 1000, sem desconto
+      P2 · Natal · V2 · 3 peças × R$ 400 = 1200, desconto 200 → 1000
+      P3 · Mossoró · V3 · 1 peça × R$ 300 = 300
+      P4 · Natal · V1 · situação 6 (em aberto) → NÃO conta como venda
+    Natal (vendas efetivas): R$ 2000, 5 peças, 2 pedidos → PA 2.5
+    """
+    pedidos = pd.DataFrame({
+        "ID": ["P1", "P2", "P3", "P4"],
+        "Pedido": ["1", "2", "3", "4"],
+        "id_situacao": [9, 9, 9, 6],
+        "Vendedor": ["V1", "V2", "V3", "V1"],
+        "Loja ID": [LOJA_A, LOJA_A, LOJA_B, LOJA_A],
+        "Data": [pd.Timestamp("2026-03-10")] * 4,
+        "Cliente": ["C1", "C2", "C3", "C4"],
+        "Desconto": [0.0, 200.0, 0.0, 0.0],
+    })
+
+    itens = pd.DataFrame({
+        "ID_pedido": ["P1", "P2", "P3", "P4"],
+        "ID_produto": [ID_A, ID_A, ID_B, ID_A],
+        "Quantidade": [2, 3, 1, 5],
+        "Valor Unidade": [500.0, 400.0, 300.0, 100.0],
+        "Desconto Item": [0.0, 0.0, 0.0, 0.0],
+    })
+
+    detalhes = pd.DataFrame({
+        "ID_produto": [ID_A, ID_B],
+        "Marca_sku": ["COL", "OUTRO"],
+        "Grupo": ["EME", "EDF"],
+        "categoria": ["Camisa", "Camisa"],
+        "Super_categoria": ["Uniforme", "Uniforme"],
+    })
+
+    vendedores = pd.DataFrame({
+        "ID": ["V1", "V2", "V3"],
+        "nome": ["Ana", "Bruno", "Carla"],
+    })
+
+    lojas = pd.DataFrame({
+        "ID": [LOJA_A, LOJA_B],
+        "descricao": ["Loja Natal", "Loja Mossoró"],
+    })
+
+    situacoes = pd.DataFrame({
+        "ID": [9, 6, 15],
+        "descricao": ["Atendido", "Em aberto", "Em andamento"],
+    })
+
+    return {
+        "pedidos": pedidos,
+        "itens": itens,
+        "detalhes": detalhes,
+        "vendedores": vendedores,
+        "lojas": lojas,
+        "situacoes": situacoes,
+    }
