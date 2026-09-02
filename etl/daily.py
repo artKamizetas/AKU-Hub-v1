@@ -1,35 +1,95 @@
 """
-daily.py — ETL Comercial / Acompanhamento de Metas
+daily.py — ETL Comercial / Acompanhamento de Metas Escalonadas
 
-Gera tabela detalhada de vendas e KPIs de meta com Run Rate.
-Equivale ao Daily.gs V3/V4 do Google Apps Script.
+Gera a tabela detalhada de vendas e os resumos de meta (Prata/Ouro/Diamante,
+por Faturamento e PA) por Loja e por Vendedor, para uma competência (mês)
+dada. A regra de meta em si (classificação de nível, rateio vendedor←loja,
+agregação) vive em etl/metas.py — este módulo só monta os DataFrames a
+partir dos dados brutos. Modelo em docs/requisitos/metas-escalonadas.md.
 
 Uso:
     from etl.daily import processar_daily
-    detalhado, metas = processar_daily(dados, config)
+    detalhado, metas_loja, metas_vendedor = processar_daily(dados, config)
+    # ou revisando um mês fechado:
+    detalhado, metas_loja, metas_vendedor = processar_daily(dados, config, competencia="2026-03")
 """
 
 import pandas as pd
-import numpy as np
 from datetime import datetime
 
 from etl import demanda
+from etl import metas
 
 
-def processar_daily(dados: dict, config: dict) -> tuple:
+def _linha_resumo(vendido, pecas, pedidos, desconto, metas_fat, metas_pa,
+                   dia_atual, dias_no_mes, origem) -> dict:
+    """Colunas comuns a uma linha de Loja ou Vendedor: realizado + resumo de
+    meta (faturamento e PA), delegando a classificação a etl/metas.py."""
+    rf = metas.resumo_faturamento(vendido, metas_fat, dia_atual, dias_no_mes)
+    rp = metas.resumo_pa(pecas, pedidos, metas_pa)
+    ticket_medio = (vendido / pedidos) if pedidos > 0 else 0.0
+
+    # Colunas de TEXTO saem como "" (nunca None): o pandas converteria None
+    # para NaN numa coluna string, e a UI teria que distinguir os dois.
+    # Os campos numéricos seguem None → NaN (célula vazia, comportamento certo).
+    def _txt(v):
+        return v if v else ""
+
+    return {
+        "Vendido": rf["vendido"],
+        "Pecas": pecas,
+        "Pedidos": pedidos,
+        "Desconto": desconto,
+        "Ticket Medio": ticket_medio,
+        "Meta Prata": (metas_fat or {}).get("prata"),
+        "Meta Ouro": (metas_fat or {}).get("ouro"),
+        "Meta Diamante": (metas_fat or {}).get("diamante"),
+        "Nivel": _txt(rf["nivel"]),
+        "Proximo Nivel": _txt(rf["proximo_nivel"]),
+        "Falta Proximo": rf["falta"],
+        "Run Rate": rf["run_rate"],
+        "Nivel Projetado": _txt(rf["nivel_projetado"]),
+        "Ritmo Necessario": rf["ritmo_necessario"],
+        "PA": rp["pa"],
+        "PA Meta Prata": (metas_pa or {}).get("prata"),
+        "PA Meta Ouro": (metas_pa or {}).get("ouro"),
+        "PA Meta Diamante": (metas_pa or {}).get("diamante"),
+        "PA Nivel": _txt(rp["nivel"]),
+        "PA Proximo Nivel": _txt(rp["proximo_nivel"]),
+        "PA Falta Proximo": rp["falta"],
+        "Origem Meta": origem,
+    }
+
+
+def _metas_dict(row_prefixo: str, row: dict) -> dict:
+    """Reconstrói {prata,ouro,diamante} a partir das colunas 'Meta *'/'PA Meta *'
+    de uma linha já montada — usado para agregar a linha TOTAL sem duplicar
+    a leitura do config."""
+    p, o, d = row[f"{row_prefixo} Prata"], row[f"{row_prefixo} Ouro"], row[f"{row_prefixo} Diamante"]
+    if o is None:
+        return None
+    return {"prata": p, "ouro": o, "diamante": d}
+
+
+def processar_daily(dados: dict, config: dict, competencia: str = None) -> tuple:
     """
-    Processa vendas e calcula metas.
+    Processa vendas e calcula metas escalonadas.
+
+    Args:
+        competencia: "AAAA-MM" a revisar; None = mês corrente (default).
 
     Retorna:
-        (df_detalhado, df_metas)
+        (df_detalhado, df_metas_loja, df_metas_vendedor)
 
         df_detalhado: cada pedido enriquecido com Vendedor, Loja, Situação, Colégio
-        df_metas: resumo por loja com % atingido, run rate, status
+        df_metas_loja: resumo por loja (+ linha TOTAL) com metas Prata/Ouro/
+            Diamante de Faturamento e PA, nível, falta, projeção
+        df_metas_vendedor: idem por vendedor, com meta DERIVADA por rateio
+            da loja a que está atribuído na competência (etl/metas.py)
     """
     cfg_daily = config["daily"]
     cfg_dep = config["depositos"]
     situacoes_venda = cfg_daily["situacoes_venda"]
-    metas_config = cfg_daily["metas"]
 
     pedidos = dados["pedidos"]
     itens = dados["itens"]
@@ -56,16 +116,15 @@ def processar_daily(dados: dict, config: dict) -> tuple:
     # ---------------------------------------------------------------
     # 2. Enriquecer Itens com dados do Pedido e Produto
     # ---------------------------------------------------------------
-    # Pega colunas necessárias do pedido
     ped = pedidos.drop_duplicates(subset=["ID"]).copy()
     ped["NomeLoja"] = ped["Loja ID"].map(map_loja).fillna("Loja " + ped["Loja ID"])
     ped["NomeVendedor"] = ped["Vendedor"].map(map_vend).fillna("Vend " + ped["Vendedor"])
     ped["Situacao"] = ped["id_situacao"].map(map_sit).fillna("Sit " + ped["id_situacao"].astype(str))
     ped["LojaConfig"] = ped["Loja ID"].map(map_id_nome).fillna("")
 
-    ped_cols = ped[["ID", "Data", "NomeLoja", "NomeVendedor", "Cliente",
+    ped_cols = ped[["ID", "Data", "NomeLoja", "NomeVendedor", "Vendedor", "Cliente",
                      "Pedido", "Situacao", "id_situacao", "Loja ID", "LojaConfig", "Desconto",
-                     ]].rename(columns={"ID": "ID_pedido"})
+                     ]].rename(columns={"ID": "ID_pedido", "Vendedor": "VendedorID"})
 
     # Enriquecer itens com colégio
     itens_c = itens.copy()
@@ -75,14 +134,11 @@ def processar_daily(dados: dict, config: dict) -> tuple:
     # ---------------------------------------------------------------
     # 3. Agregar Itens por Pedido (peças reais + valor + desconto)
     # ---------------------------------------------------------------
-    # Peças reais: soma de Quantidade na aba Itens
     pecas_por_pedido = itens_c.groupby("ID_pedido")["Quantidade"].sum().to_dict()
 
-    # Valor bruto por pedido: Σ(Quantidade × Valor Unidade)
     itens_c["_valor_bruto"] = itens_c["Quantidade"] * itens_c["Valor Unidade"]
     valor_bruto_por_pedido = itens_c.groupby("ID_pedido")["_valor_bruto"].sum().to_dict()
 
-    # Desconto por pedido: Σ(Desconto Item)
     desconto_por_pedido = itens_c.groupby("ID_pedido")["Desconto Item"].sum().to_dict()
 
     # Colégio dominante = o que tem mais peças no pedido
@@ -113,101 +169,90 @@ def processar_daily(dados: dict, config: dict) -> tuple:
     }).sort_values("Data", ascending=False).reset_index(drop=True)
 
     # ---------------------------------------------------------------
-    # 4. Acumulado do Mês Atual (para Metas)
+    # 4. Competência (mês de referência das metas — pode ser um mês fechado)
     # ---------------------------------------------------------------
     hoje = datetime.now()
-    mes_atual = hoje.month
-    ano_atual = hoje.year
-    dia_atual = hoje.day
-    dias_no_mes = pd.Timestamp(ano_atual, mes_atual, 1).days_in_month
+    competencia_atual = metas.chave_competencia(hoje.year, hoje.month)
+    if competencia is None:
+        competencia = competencia_atual
+    ano_c, mes_c = int(competencia[:4]), int(competencia[5:7])
+    dias_no_mes = pd.Timestamp(ano_c, mes_c, 1).days_in_month
+    # Mês fechado (≠ mês corrente): já está completo, run rate = realizado.
+    dia_atual = hoje.day if competencia == competencia_atual else dias_no_mes
 
-    # Filtra: mês atual + situações que contam como venda
-    mask_mes = (df_detalhado["Data"].dt.month == mes_atual) & (df_detalhado["Data"].dt.year == ano_atual)
+    mask_mes = (df_detalhado["Data"].dt.month == mes_c) & (df_detalhado["Data"].dt.year == ano_c)
     mask_sit = df_detalhado["id_situacao"].isin(situacoes_venda)
     vendas_mes = df_detalhado[mask_mes & mask_sit]
 
-    # Acumulado por loja
-    acumulado = {}
-    acumulado_pecas = {}
-    acumulado_desconto = {}
+    # ---------------------------------------------------------------
+    # 5. Metas por Loja (+ linha TOTAL)
+    # ---------------------------------------------------------------
+    linhas_loja = []
     for loja_cfg in cfg_dep["lojas"]:
+        nome_loja = loja_cfg["nome"]
         id_loja = str(loja_cfg["loja_id"]).strip()
-        nome_loja = loja_cfg["nome"]
         vendas_loja = vendas_mes[vendas_mes["Loja ID"] == id_loja]
-        acumulado[nome_loja] = vendas_loja["Valor"].sum()
-        acumulado_pecas[nome_loja] = vendas_loja["Qtd Peças"].sum()
-        acumulado_desconto[nome_loja] = vendas_loja["Desconto"].sum()
+
+        vendido = float(vendas_loja["Valor"].sum())
+        pecas = float(vendas_loja["Qtd Peças"].sum())
+        desconto = float(vendas_loja["Desconto"].sum())
+        n_pedidos = float(vendas_loja["ID_pedido"].nunique())
+
+        m = metas.metas_da_loja(config, nome_loja, competencia)
+        linha = {"Loja": nome_loja}
+        linha.update(_linha_resumo(vendido, pecas, n_pedidos, desconto,
+                                    m["faturamento"], m["pa"], dia_atual, dias_no_mes, m["origem"]))
+        linhas_loja.append(linha)
+
+    # Linha TOTAL: soma direta do realizado; meta agregada via etl/metas.py
+    # (faturamento soma, PA pondera por pedidos — nunca a média simples)
+    agg_fat = metas.agregar_faturamento([
+        {"vendido": r["Vendido"], "metas": _metas_dict("Meta", r)} for r in linhas_loja
+    ])
+    agg_pa = metas.agregar_pa([
+        {"pecas": r["Pecas"], "pedidos": r["Pedidos"], "metas": _metas_dict("PA Meta", r)} for r in linhas_loja
+    ])
+    total_desconto = sum(r["Desconto"] for r in linhas_loja)
+    linha_total = {"Loja": "TOTAL"}
+    linha_total.update(_linha_resumo(agg_fat["vendido"], agg_pa["pecas"], agg_pa["pedidos"], total_desconto,
+                                      agg_fat["metas"], agg_pa["metas"], dia_atual, dias_no_mes, "agregada"))
+    linhas_loja.append(linha_total)
+
+    df_metas_loja = pd.DataFrame(linhas_loja)
 
     # ---------------------------------------------------------------
-    # 5. Tabela de Metas + Run Rate
+    # 6. Metas por Vendedor (meta DERIVADA por rateio da loja atribuída)
     # ---------------------------------------------------------------
-    linhas_meta = []
-    total_vendido = 0
-    total_meta = 0
-    total_pecas = 0
-    total_desconto = 0
+    atrib = metas.atribuicao_vendedores(config, competencia)
 
-    for loja_cfg in cfg_dep["lojas"]:
-        nome_loja = loja_cfg["nome"]
-        vendido = acumulado.get(nome_loja, 0)
-        pecas = acumulado_pecas.get(nome_loja, 0)
-        desconto = acumulado_desconto.get(nome_loja, 0)
-        meta = metas_config.get(nome_loja, 1)
+    if len(vendas_mes) > 0:
+        grp = vendas_mes.groupby("VendedorID").agg(
+            Vendido=("Valor", "sum"), Pecas=("Qtd Peças", "sum"),
+            Desconto=("Desconto", "sum"), Pedidos=("ID_pedido", "nunique"),
+        )
+        realizado_vendedor = grp.to_dict("index")
+    else:
+        realizado_vendedor = {}
 
-        pct_atingido = vendido / meta if meta > 0 else 0
-        falta = meta - vendido
+    vendedor_ids = set(realizado_vendedor.keys()) | set(atrib.keys())
+    linhas_vend = []
+    for vid in sorted(vendedor_ids):
+        dado = realizado_vendedor.get(vid, {"Vendido": 0.0, "Pecas": 0.0, "Desconto": 0.0, "Pedidos": 0.0})
+        nome_v = map_vend.get(vid, f"Vend {vid}")
+        info = atrib.get(vid)
 
-        # Run Rate: projeção linear
-        run_rate = (vendido / dia_atual * dias_no_mes) if dia_atual > 0 else 0
-        pct_projetado = run_rate / meta if meta > 0 else 0
-
-        # Status
-        if pct_atingido >= 1:
-            status = "🏆 Batida"
-        elif pct_projetado >= 1:
-            status = "📈 No Ritmo"
-        elif pct_projetado >= 0.8:
-            status = "🏃 Correndo"
+        if info and info.get("ativo", True) and info.get("loja"):
+            loja_v = info["loja"]
+            m = metas.metas_do_vendedor(config, vid, loja_v, competencia)
+            fat_m, pa_m, origem, peso_v = m["faturamento"], m["pa"], m["origem"], m["peso"]
         else:
-            status = "⚠️ Abaixo"
+            loja_v, fat_m, pa_m, origem, peso_v = "Sem atribuição", None, None, "ausente", None
 
-        linhas_meta.append({
-            "Loja": nome_loja,
-            "Mês": f"{mes_atual:02d}/{ano_atual}",
-            "Vendido": vendido,
-            "Pecas": pecas,
-            "Desconto": desconto,
-            "Meta": meta,
-            "% Atingido": pct_atingido,
-            "Falta Vender": falta,
-            "Run Rate": run_rate,
-            "% Projetado": pct_projetado,
-            "Status": status,
-        })
+        linha = {"VendedorID": vid, "Vendedor": nome_v, "Loja": loja_v, "Peso": peso_v}
+        linha.update(_linha_resumo(float(dado["Vendido"]), float(dado["Pecas"]), float(dado["Pedidos"]),
+                                    float(dado["Desconto"]), fat_m, pa_m, dia_atual, dias_no_mes, origem))
+        linhas_vend.append(linha)
 
-        total_vendido += vendido
-        total_meta += meta
-        total_pecas += pecas
-        total_desconto += desconto
+    df_metas_vendedor = pd.DataFrame(linhas_vend)
 
-    # Linha Total
-    pct_total = total_vendido / total_meta if total_meta > 0 else 0
-    rr_total = (total_vendido / dia_atual * dias_no_mes) if dia_atual > 0 else 0
-    pct_proj_total = rr_total / total_meta if total_meta > 0 else 0
-
-    linhas_meta.append({
-        "Loja": "TOTAL",
-        "Mês": f"{mes_atual:02d}/{ano_atual}",
-        "Vendido": total_vendido,
-        "Pecas": total_pecas,
-        "Desconto": total_desconto,
-        "Meta": total_meta,
-        "% Atingido": pct_total,
-        "Falta Vender": total_meta - total_vendido,
-        "Run Rate": rr_total,
-        "% Projetado": pct_proj_total,
-        "Status": "🏆 Batida" if pct_total >= 1 else ("📈 No Ritmo" if pct_proj_total >= 1 else "🏃 Correndo"),
-    })
-
-    df_metas = pd.DataFrame(linhas_meta)
-    return df_detalhado, df_metas
+    return df_detalhado, df_metas_loja, df_metas_vendedor

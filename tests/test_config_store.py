@@ -110,6 +110,67 @@ class TestExtrairParametros:
 
 
 # ---------------------------------------------------------------------------
+# Metas escalonadas — os dois blocos novos precisam ser Categoria B E
+# substituição de bloco inteiro (senão um mês/vendedor apagado na UI
+# ressuscitaria do yaml no merge seguinte).
+# Spec: docs/requisitos/metas-escalonadas.md
+# ---------------------------------------------------------------------------
+class TestMetasEscalonadas:
+    def _config(self):
+        return {
+            "daily": {
+                "situacoes_venda": [9],
+                "metas": {"Natal": 70000.0},
+                "metas_mensais": {
+                    "2026-01": {"Natal": {"faturamento": {"prata": 1, "ouro": 2, "diamante": 3}}},
+                },
+                "vendedores_loja": {
+                    "2026-01": {"V1": {"loja": "Natal", "peso": 1.0, "ativo": True}},
+                },
+                "status_ids": {"em_aberto": 6},
+            },
+        }
+
+    def test_metas_mensais_e_categoria_b(self):
+        dados = extrair_parametros(self._config())
+        assert dados["daily"]["metas_mensais"]["2026-01"]["Natal"]["faturamento"]["ouro"] == 2
+        assert dados["daily"]["vendedores_loja"]["2026-01"]["V1"]["loja"] == "Natal"
+        # situacoes_venda continua estrutural (só no yaml)
+        assert "situacoes_venda" not in dados["daily"]
+
+    def test_mes_apagado_na_ui_nao_ressuscita_do_yaml(self):
+        yaml_base = {"daily": {"metas_mensais": {
+            "2026-01": {"Natal": {"faturamento": {"ouro": 999}}},
+            "2026-02": {"Natal": {"faturamento": {"ouro": 888}}},
+        }}}
+        # O gestor apagou fevereiro na UI: o Supabase manda só janeiro
+        supabase = {"daily": {"metas_mensais": {
+            "2026-01": {"Natal": {"faturamento": {"ouro": 111}}},
+        }}}
+        out = deep_merge(yaml_base, supabase)
+        assert out["daily"]["metas_mensais"] == {
+            "2026-01": {"Natal": {"faturamento": {"ouro": 111}}}}
+        assert "2026-02" not in out["daily"]["metas_mensais"]
+
+    def test_vendedor_removido_nao_ressuscita(self):
+        yaml_base = {"daily": {"vendedores_loja": {
+            "2026-01": {"V1": {"loja": "Natal"}, "V2": {"loja": "Natal"}}}}}
+        supabase = {"daily": {"vendedores_loja": {"2026-01": {"V1": {"loja": "Mossoró"}}}}}
+        out = deep_merge(yaml_base, supabase)
+        assert out["daily"]["vendedores_loja"] == {"2026-01": {"V1": {"loja": "Mossoró"}}}
+
+    def test_metas_legado_continua_mesclando_chave_a_chave(self):
+        # `daily.metas` NÃO está em CAMINHOS_SUBSTITUICAO: segue merge normal
+        out = deep_merge({"daily": {"metas": {"Natal": 1.0, "Mossoró": 2.0}}},
+                         {"daily": {"metas": {"Natal": 9.0}}})
+        assert out["daily"]["metas"] == {"Natal": 9.0, "Mossoró": 2.0}
+
+    def test_roundtrip_preserva_metas(self):
+        cfg = self._config()
+        assert deep_merge(cfg, extrair_parametros(cfg)) == cfg
+
+
+# ---------------------------------------------------------------------------
 # RepositorioParametros — gateway fake
 # ---------------------------------------------------------------------------
 class RepoFake(RepositorioParametros):

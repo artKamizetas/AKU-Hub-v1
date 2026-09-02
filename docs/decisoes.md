@@ -9,6 +9,106 @@ Records). Adicione no topo as mais recentes.
 
 ---
 
+## 2026-08 · Login com Google (OIDC nativo) + allowlist em `app.usuario`
+O acesso era usuário/senha (`streamlit-authenticator`) com as **pessoas cadastradas
+no `secrets.toml`**: admitir alguém exigia editar dois arquivos (local + painel do
+Cloud), gerar um hash bcrypt na mão e redeploy — sem auditoria e com senhas para
+guardar. Agora o login é a **conta Google** e a lista de quem entra vive na tabela
+`app.usuario`, editável na aba **👥 Usuários** de Configurações. Mesmo movimento dos
+parâmetros em 2026-07: o secrets volta a ser credencial de infraestrutura, não
+cadastro.
+
+- **OIDC nativo do Streamlit (`st.login`/`st.user`), não fluxo próprio.** O 1.59 já
+  traz tudo (redirect, PKCE, cookie assinado); só faltava a dependência `Authlib`.
+  O callback é a rota `/oauth2callback`, servida pelo servidor do Streamlit, e por
+  isso **não colide** com o `/configuracoes?code&state` das integrações Bling/Olist —
+  são paths diferentes e aquele bloco no topo da página segue intacto. De quebra, o
+  cookie de identidade é lido no handshake do websocket em qualquer path: a sessão
+  nova pós-redirect do Bling já volta logada.
+- **Tabela própria, não `auth.users` (Supabase Auth/GoTrue).** O GoTrue está
+  provisionado no projeto, mas com 3 contas de e-mail/senha (a de serviço da pipeline
+  externa e duas nossas) — nada a reaproveitar. E adotá-lo não pagaria: o app conecta
+  com a `service_key`, que ignora RLS, e autoriza em Python — o benefício do GoTrue
+  (RLS por usuário) não seria usado; o schema `auth` não é exposto no PostgREST
+  (exigiria a Admin API por HTTP, com mais uma chave); o fluxo PKCE dele também volta
+  com `?code=`, disputando o parâmetro com o OAuth das integrações; e o GoTrue **não
+  guarda perfil** — a doc do próprio Supabase manda criar uma tabela companheira.
+  Ou seja, `app.usuario` existiria de todo jeito, e o resto seria custo puro.
+- **Sem auto-cadastro** (chegou a ser desenhado e foi cortado): e-mail desconhecido vê
+  "peça acesso ao administrador" e **nada é escrito**. Deixar uma conta Google
+  qualquer inserir linha no nosso banco exigiria teto de pendentes, kill-switch e
+  disciplina de limpeza — complexidade para um fluxo de convite que acontece poucas
+  vezes por ano.
+- **Fail-closed com break-glass.** Allowlist ilegível = ninguém entra, exceto os
+  e-mails de `[acesso] admins` no secrets, que passam antes de qualquer consulta ao
+  banco. Essa lista é SOBERANA — tirar alguém dela faz parte de revogar o acesso.
+  Dentro de uma sessão já autorizada há fail-soft (último acesso conhecido), porque a
+  `5_Configuracoes` chama `st.cache_data.clear()` em vários pontos e um piscar do
+  Supabase logo depois de um "Salvar" expulsaria o próprio admin no meio da edição.
+- **Cache da allowlist INTEIRA** (`ttl=300`), não uma consulta por e-mail: são poucas
+  linhas, o `cache_data` é global entre sessões (1 query/5 min para o app todo) e a
+  invalidação vira global — `invalidar_cache_usuarios()` ao salvar faz a revogação
+  valer no rerun seguinte de qualquer sessão, sem esperar o TTL.
+- **Dois bugs latentes corrigidos junto.** (1) `PAGINAS_POR_ROLE.get(role)` devolvia
+  `None` para role fora do mapa — o mesmo valor que significa "todas as páginas", ou
+  seja, um perfil desconhecido **liberava o app inteiro**; `paginas_do_role()` agora
+  devolve tupla vazia. (2) A leitura de role a partir do secrets estava **duplicada em
+  3 páginas** (`4_Pedidos`, `3_Fabrica` ×2); virou `e_admin()`/`exigir_admin()`.
+- **A identidade agora é o e-mail.** A tupla passou de `(nome, username, role)` para
+  `(nome, email, role)` — é o e-mail que vai para `atualizado_por`/`congelada_por`/
+  `criado_por`. Auditoria melhor, mas os valores históricos ficam em outro formato.
+- **RLS em `app.usuario`**, mesmo o schema `app` já sendo service_role-only (verificado:
+  `anon`/`authenticated` não têm nem USAGE). É a tabela que decide quem é admin —
+  `service_role` ignora RLS, então não muda nada no runtime, mas faz uma exposição
+  futura acidental do schema falhar fechada.
+
+## 2026-08 · Metas escalonadas (Prata/Ouro/Diamante) por loja × mês
+A meta comercial era **um número por loja**, igual o ano inteiro, com os nomes das
+lojas hardcoded na página de Configurações. Passou a ser **três níveis por loja e por
+mês**, em Faturamento e PA. **Por quê:** um número só é binário (bateu/não bateu) e
+não distingue Janeiro (pico) de Julho (baixa); três níveis dão à equipe um próximo
+degrau sempre visível, e a competência mensal permite revisar meses fechados.
+
+Decisões de modelo (spec completa em `requisitos/metas-escalonadas.md`):
+- **Meta só por loja.** Colégio é recorte de *leitura* do realizado, nunca meta
+  cadastrada — cadastrar por colégio multiplicaria o volume por ~9 sem ganho
+  proporcional. Vendedor não digita meta: é **derivada por rateio** da meta da loja
+  pelo peso na atribuição vendedor→loja, então a soma dos vendedores fecha a meta da
+  loja por construção (dois cadastros manuais divergiriam).
+- **PA entra como meta; peças e ticket ficam como indicadores sem meta.** Uma tela de
+  5 métricas × 3 níveis × 12 meses por loja não se preenche na prática. PA **não é
+  aditivo**: agregar é Σpeças/Σpedidos, e o PA parcial do mês já é a própria projeção.
+- **Persistência em `app.parametros`, não em tabela nova.** Dimensionado antes de
+  decidir: 2 lojas × 12 meses × 2 métricas × 3 níveis ≈ **144 valores/ano** (~10 KB).
+  É configuração de baixa frequência de escrita, mesmo perfil de `colegios`. Uma DDL +
+  porta de escrita + fakes custaria ~1,5 dia sem ganho. *(A avaliação inicial recomendou
+  tabela dedicada supondo meta por colégio e por vendedor — ~10.000 valores/ano; ao
+  fechar o escopo em "meta só por loja", o volume caiu 70× e a decisão inverteu.)*
+- **Meta não herda entre meses; atribuição de vendedor herda.** Mês sem meta é lacuna
+  sinalizada na tela (Julho herdar a meta de Janeiro seria pior que não ter meta). Já a
+  atribuição vendedor→loja resolve pela competência editada mais recente **≤** a pedida,
+  então revisar Março não é afetado por uma contratação de Agosto.
+- **Dois regimes temporais separados na tela** (competência × período). Antes os KPIs de
+  meta eram sempre do mês corrente enquanto o filtro de Período controlava o resto da
+  página, sem aviso — leitura errada garantida.
+- **Bullet chart com faixas em rampa neutra**, não três matizes (prata/ouro/diamante é
+  escala **ordinal**, não identidade); a identidade vem do emoji 🥈🥇💎, nunca da cor
+  sozinha. O gráfico de **eixo duplo** do histórico (R$ em barra + peças em linha no y2)
+  foi substituído por um seletor de métrica em eixo único — duas escalas diferentes num
+  gráfico distorcem a comparação.
+
+**Pendência de dados descoberta na validação:** `pedidos.id_situacao_bling` tem **duas
+codificações incompatíveis** — o histórico até fev/2026 usa códigos órfãos (`0,1,2,3,11`,
+ausentes de `situacoes_vendas`) vindos da rotina de **carga em massa**, e o incremental
+diário grava os códigos corretos da API v3 (`6,9,12,24,28488`). O código `1` sozinho é 95%
+da base (42.514 pedidos, R$ 9,71 M) e tem perfil financeiro idêntico ao `9`/Atendido.
+Efeito no Daily: a coluna "Realizado ano anterior" fica vazia e o botão *Propor* é
+desabilitado, com a causa explicada na tela — vazio silencioso enganaria quem define a
+meta. Investigação completa e proposta de backfill (para a equipe da pipeline) em
+`requisitos/backfill-situacao-pedidos.md`. **Do lado do dashboard nada muda:**
+`situacoes_venda = [9]` já é o filtro certo; incluir `1` trataria o sintoma e
+contaminaria o motor de demanda, que lê a mesma chave. **Aguardando a pipeline.**
+
 ## 2026-07 · Emissão da venda no Olist: 429 e a resolução SKU→id em camadas
 A 1ª emissão de venda real quebrou com **HTTP 429** (rate limit). Causa: o mapeamento
 SKU→id do Olist **varria o catálogo inteiro** (paginado 100/pág), dezenas de GETs por
@@ -77,12 +177,15 @@ Tiny/Olist é a fonte da verdade da execução (qtd/data reais deslizam na fábr
 o nosso banco guarda a intenção; o `ref:<uuid>` costura os dois.
 
 ## 2026-07 · Guard de auth leve nas páginas (`identidade_atual`) + UI de Pedidos em 2 modos
-- **`auth.identidade_atual()`**: a `5_Configuracoes.py` passou a usar um guard leve
+- ~~**`auth.identidade_atual()`**: a `5_Configuracoes.py` passou a usar um guard leve
   que lê `name`/`username`/`role` do `session_state`, em vez de chamar
   `verificar_acesso()` de novo. O `app.py` já reautentica pelo cookie a cada
   execução (inclusive na sessão nova pós-redirect OAuth) ANTES de a página rodar;
   chamar `verificar_acesso()` de novo criava um 2º `CookieManager` com a mesma
-  `key="init"` e estourava `StreamlitDuplicateElementKey` no retorno do OAuth.
+  `key="init"` e estourava `StreamlitDuplicateElementKey` no retorno do OAuth.~~
+  → O motivo desapareceu com a migração para o login Google (2026-08): `st.user` vem
+  do cookie lido no handshake do websocket e não instancia widget nenhum. A função
+  continua existindo, agora como leitura barata do `session_state`.
 - **Pré-validação simétrica da emissão**: `validar_pre_emissao_bling` espelha o
   `_olist` — dá o feedback (config incompleta, nada a emitir, item sem id) ANTES
   do clique, em vez de o erro do payload sumir.
