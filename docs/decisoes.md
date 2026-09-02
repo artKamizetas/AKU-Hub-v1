@@ -144,7 +144,12 @@ desabilitado, com a causa explicada na tela — vazio silencioso enganaria quem 
 meta. Investigação completa e proposta de backfill (para a equipe da pipeline) em
 `requisitos/backfill-situacao-pedidos.md`. **Do lado do dashboard nada muda:**
 `situacoes_venda = [9]` já é o filtro certo; incluir `1` trataria o sintoma e
-contaminaria o motor de demanda, que lê a mesma chave. **Aguardando a pipeline.**
+contaminaria o motor de demanda, que lê a mesma chave. **RESOLVIDO em set/2026:** a
+pipeline aplicou o backfill e o espelho passou a ter zero códigos órfãos (`id_situacao
+_bling = 9` foi de 1.371 para 44.088 linhas), confirmando o de-para `1 → 9` que a
+investigação levantara como hipótese. Nenhuma linha de código mudou no dashboard — a
+coluna de referência voltou a popular e o *Propor* destravou sozinho, que era
+exatamente o comportamento desenhado para a degradação.
 
 ## 2026-07 · Emissão da venda no Olist: 429 e a resolução SKU→id em camadas
 A 1ª emissão de venda real quebrou com **HTTP 429** (rate limit). Causa: o mapeamento

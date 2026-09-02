@@ -1,6 +1,17 @@
 # Achado de Dados — `pedidos.id_situacao_bling` com duas codificações incompatíveis
 
-**Status:** 🔴 ABERTO — requer investigação e backfill na pipeline Bling→Supabase
+**Status:** ✅ **RESOLVIDO** (set/2026) — backfill executado pela equipe da pipeline
+
+> **Fechamento (2026-09).** A pipeline aplicou o backfill. Verificado no espelho:
+> **zero códigos órfãos** (eram 43.089), `id_situacao_bling = 9` passou de 1.371
+> para 44.088 linhas, e 42.540 dos 43.135 pedidos anteriores a mar/2026 agora
+> respondem pelo código correto — confirmando o mapeamento `1 → 9` que a §3
+> levantava como hipótese. Do lado do dashboard **nada precisou mudar**: a coluna
+> "Realizado ano anterior" voltou a popular, o atalho *Propor a partir do
+> realizado* destravou e o aviso de degradação sumiu sozinho. O documento fica
+> como registro da investigação e do de-para aplicado.
+
+**Status original:** 🔴 ABERTO — requer investigação e backfill na pipeline Bling→Supabase
 **Descoberto em:** 2026-08-05, durante a implementação das metas escalonadas do dashboard
 **Destinatário:** equipe da pipeline de ingestão Bling→Supabase
 **Escopo:** tabela `public.pedidos`, coluna `id_situacao_bling` (e a FK derivada `id_situacao`)

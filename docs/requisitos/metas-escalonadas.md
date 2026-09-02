@@ -7,8 +7,8 @@
 > (15) e a classe `TestMetasEscalonadas` de `tests/test_config_store.py`. Validado com
 > `streamlit.testing.v1.AppTest` contra o Supabase real: fallback legado e caminho
 > completo (metas cadastradas → níveis, rateio e projeção) sem exceções; troca de
-> competência para mês fechado confirma projeção = realizado. **Pendência de dados
-> descoberta na validação:** ver §11.
+> competência para mês fechado confirma projeção = realizado. **Pendência de dados descoberta na
+> validação e RESOLVIDA em set/2026:** ver §11.
 
 ## 1. Problema
 
@@ -284,6 +284,18 @@ nível conquistado, sobre as três linhas de meta na rampa neutra.
   também é celebrado (o bullet não deve "cortar" no topo).
 
 ## 11. Pendência de dados — `situacoes_venda` × histórico do espelho
+
+> ✅ **RESOLVIDA em set/2026.** A pipeline aplicou o backfill: zero códigos
+> órfãos no espelho e `id_situacao_bling = 9` saltou de 1.371 para 44.088
+> linhas (42.540 dos 43.135 pedidos anteriores a mar/2026), confirmando o
+> de-para `1 → 9`. **Nenhuma linha de código mudou aqui** — a coluna
+> "Realizado ano anterior" voltou a popular, o *Propor* destravou e o aviso
+> sumiu, que era o comportamento desenhado para a degradação. O histórico de
+> atingimento passou a ter 12 meses reais, com a sazonalidade visível
+> (jan/2026 R$ 936k contra jun/2026 R$ 31k). O texto abaixo fica como registro
+> do diagnóstico. Fechamento em
+> [backfill-situacao-pedidos.md](backfill-situacao-pedidos.md).
+
 
 Descoberto ao validar a coluna "Realizado ano anterior": o espelho tem o
 histórico **até 2025 quase todo em `id_situacao = 1`**, enquanto

@@ -162,10 +162,12 @@ Meta comercial em **três níveis** (Prata < Ouro < Diamante) por **loja × mês
   diamante é escala ordinal, não identidade — a identidade vem do emoji 🥈🥇💎, nunca
   da cor sozinha) e **nada de eixo duplo** (o histórico usa seletor de métrica em eixo
   único; R$ e peças em escalas diferentes no mesmo gráfico distorcem a comparação).
-- **Caveat de dados (aberto):** o espelho tem o histórico até 2025 quase todo em
-  `id_situacao=1`, e `daily.situacoes_venda` é `[9]` — a coluna "Realizado ano anterior"
-  da tela de configuração fica vazia e o botão *Propor* é desabilitado com explicação.
-  Ver `docs/decisoes.md`.
+- **Caveat de dados (RESOLVIDO set/2026):** o espelho tinha o histórico até fev/2026
+  em códigos de situação órfãos (`1` = 95% da base) enquanto `daily.situacoes_venda`
+  é `[9]` — a coluna "Realizado ano anterior" ficava vazia e o *Propor* desabilitado.
+  A pipeline aplicou o backfill (`1 → 9`): zero órfãos, 12 meses de histórico reais.
+  **Nada mudou no dashboard** — a degradação levantou sozinha, que era o desenho.
+  Registro em `docs/requisitos/backfill-situacao-pedidos.md`.
 
 ## Motor de Demanda + Abastecimento (etl/demanda.py)
 
