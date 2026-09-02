@@ -9,8 +9,9 @@ O topo guarda só o que é transversal às duas; cada aba tem seu contexto.
 """
 
 import streamlit as st
-from auth import exigir_login
-exigir_login()
+from auth import identidade_atual, e_admin
+
+_nome, usuario, role = identidade_atual()
 import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
@@ -153,10 +154,7 @@ with st.container(border=True):
     # Datas E coberturas formam "o plano": editam-se JUNTOS aqui, onde o efeito
     # (produção migrando entre rodadas) é visível ao vivo. Preview de sessão
     # vence o salvo até "Salvar plano". Ver docs/requisitos/cobertura-alvo-rodada.md.
-    _role = (dict(st.secrets.get("auth_config", {}))
-             .get("credentials", {}).get("usernames", {})
-             .get(st.session_state.get("username", ""), {}).get("role", ""))
-    _is_admin = _role == "admin"
+    _is_admin = e_admin()
 
     # Placeholders p/ ordenar a tela: KPIs (topo) → Calendário → Rodadas (inline).
     # O calendário é preenchido PRIMEIRO no código (define as datas da simulação),
@@ -424,7 +422,7 @@ with st.container(border=True):
                             _cfg_novo["planejamento"].pop("cobertura_override", None)
                         obter_repositorio_parametros().salvar(
                             extrair_parametros(_cfg_novo),
-                            usuario=st.session_state.get("username", "") or "admin")
+                            usuario=usuario)
                         st.session_state.pop("cobertura_alvo_preview", None)
                         st.session_state.pop(_CAL_KEY, None)   # resemeia calendário do salvo
                         st.cache_data.clear()
@@ -787,12 +785,7 @@ with st.container(border=True):
     # --- Congelar rodada → Pedidos de Compra (admin only) ---
     # Gate explícito de role (mesmo padrão de 5_Configuracoes.py) — defesa em
     # profundidade além do filtro de páginas por role no app.py.
-    _usuario = st.session_state.get("username", "")
-    _role = (dict(st.secrets.get("auth_config", {}))
-             .get("credentials", {}).get("usernames", {})
-             .get(_usuario, {}).get("role", ""))
-
-    if _role == "admin" and rodadas_opts:
+    if e_admin() and rodadas_opts:
         st.divider()
         st.subheader("🧊 Congelar rodada → Pedidos de Compra")
         st.caption(
@@ -823,10 +816,10 @@ with st.container(border=True):
                         try:
                             snapshot = pedidos_builder.montar_snapshot_rodada(
                                 df_fresco, config, sel["mes_disparo"], sel["ano_disparo"],
-                                ativo_crescimento=bool(ativo_cresc), usuario=_usuario,
+                                ativo_crescimento=bool(ativo_cresc), usuario=usuario,
                             )
                             grupos = pedidos_builder.agrupar_pedidos(
-                                df_fresco, dados["produtos"], _usuario,
+                                df_fresco, dados["produtos"], usuario,
                                 sel["mes_disparo"], sel["ano_disparo"],
                             )
                             res = obter_repositorio().congelar_rodada(snapshot, grupos)

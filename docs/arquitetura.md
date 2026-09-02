@@ -65,8 +65,11 @@ O **Simulador de Produção** é o processo mais complexo — ver
 
 ## Autenticação e perfis
 
-`auth.py` (streamlit-authenticator), credenciais em `st.secrets["auth_config"]`.
-Perfis (roles) controlam quais páginas cada usuário vê (`app.py`):
+Login **Google** pelo OIDC nativo do Streamlit (`st.login()`/`st.user`), configurado
+em `st.secrets["auth"]` + `["auth.google"]`. Quem pode entrar e com qual perfil vive
+na tabela `app.usuario` (DDL 006), editável na aba **Usuários** de Configurações —
+não no secrets. **Não há auto-cadastro**: e-mail fora da allowlist é barrado e nada
+é gravado.
 
 | Role | Acesso |
 |---|---|
@@ -75,13 +78,16 @@ Perfis (roles) controlam quais páginas cada usuário vê (`app.py`):
 | `vendedor` | Home, Daily |
 | `estoque` | Logística |
 
-`app.py` chama `verificar_acesso()` uma vez por execução (reautentica pelo cookie,
-inclusive na sessão nova pós-redirect OAuth). As páginas usam o guard leve
-`exigir_login()`; a **`5_Configuracoes.py` usa `identidade_atual()`** (lê
-`name`/`username`/`role` do `session_state`, sem instanciar um 2º
-`Authenticate`/`CookieManager`) — chamar `verificar_acesso()` de novo na página
-criava dois `CookieManager` com a mesma `key="init"` e estourava
-`StreamlitDuplicateElementKey` no retorno do OAuth.
+`app.py` chama `auth.verificar_acesso()` uma vez por execução, antes da navegação;
+o mapa role→páginas (`PAGINAS_POR_ROLE`) e a resolução vivem no `auth.py`. As
+páginas usam `exigir_login()` (defesa em profundidade), `identidade_atual()`,
+`e_admin()` (gate não bloqueante) ou `exigir_admin()` (gate de página inteira) —
+nenhuma relê role de secrets ou `session_state`.
+
+A allowlist é lida inteira e cacheada por 5 min (`@st.cache_data`), global entre
+sessões; `auth.invalidar_cache_usuarios()` ao salvar faz a revogação valer no rerun
+seguinte. Se a allowlist não puder ser lida, o login falha **fechado** — exceto os
+e-mails de `st.secrets["acesso"]["admins"]` (break-glass contra lockout).
 
 ## Como rodar
 
@@ -91,11 +97,11 @@ venv\Scripts\activate
 streamlit run app.py
 ```
 
-Requer `.streamlit/secrets.toml` com as credenciais do Supabase e da autenticação
+Requer `.streamlit/secrets.toml` com as credenciais do Supabase e do login Google
 (ver `.streamlit/secrets.toml.example`).
 
 ## Dependências principais
 
 `streamlit`, `pandas`, `plotly`, `postgrest`, `pyyaml`
-(preserva comentários ao salvar `config.yaml`), `streamlit-authenticator`,
+(preserva comentários ao salvar `config.yaml`), `Authlib` (exigido pelo `st.login()`),
 `openpyxl` (só para exportar `data/VM_Calculado.xlsx`).

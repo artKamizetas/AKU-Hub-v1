@@ -17,9 +17,9 @@ st.set_page_config(
 # =================================================================
 # AUTENTICAÇÃO
 # =================================================================
-from auth import verificar_acesso
+import auth
 
-nome, username, role = verificar_acesso()
+nome, usuario, role = auth.verificar_acesso()
 
 # =================================================================
 # NAVEGAÇÃO (filtrada por perfil)
@@ -36,19 +36,19 @@ pages_all = [
             url_path="configuracoes"),
 ]
 
-# Perfis de acesso
-PAGINAS_POR_ROLE = {
-    "admin": None,  # None = todas
-    "supervisor": ("Daily", "Logística"),
-    "vendedor": ("Página Inicial", "Daily"),
-    "estoque": ("Logística",),
-}
-
-paginas_permitidas = PAGINAS_POR_ROLE.get(role)
+# Perfis de acesso: o mapa role → páginas vive no auth.py (junto da resolução
+# de acesso e do teste que garante que todo perfil enxerga ao menos uma página).
+paginas_permitidas = auth.paginas_do_role(role)
 if paginas_permitidas is None:
     pages = pages_all
 else:
     pages = [p for p in pages_all if p.title in paginas_permitidas]
+
+if not pages:
+    # st.navigation([]) levanta exceção. Um perfil sem nenhuma página só
+    # acontece com dado inconsistente, mas a tela precisa dizer isso.
+    st.error("Seu perfil não tem nenhuma página liberada. Fale com o administrador.")
+    st.stop()
 
 nav = st.navigation(pages)
 nav.run()

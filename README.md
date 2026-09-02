@@ -71,19 +71,28 @@ url = "https://SEU_PROJECT_REF.supabase.co"
 service_key = "SEU_SERVICE_ROLE_KEY"
 schema = "public"           # opcional (default: public)
 
-# Autenticação do dashboard
-[auth_config]
-cookie_name = "bling_dashboard_auth"
-cookie_key = "SEU_COOKIE_SECRET"
-cookie_expiry_days = 7
+# Login com Google (OIDC nativo do Streamlit)
+# Credenciais em console.cloud.google.com → APIs & Services → Credentials →
+# OAuth client ID → Web application. Cadastre lá o mesmo redirect_uri abaixo.
+[auth]
+redirect_uri = "http://localhost:8501/oauth2callback"
+cookie_secret = "SEU_COOKIE_SECRET"   # python -c "import secrets;print(secrets.token_hex(32))"
 
-[auth_config.credentials.usernames.admin]
-name = "Admin"
-password = "BCRYPT_HASH_AQUI"   # hash bcrypt, não a senha em texto puro
-role = "admin"
+[auth.google]
+client_id = "....apps.googleusercontent.com"
+client_secret = "GOCSPX-..."
+server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
+
+# Break-glass: entra como admin mesmo com o Supabase fora do ar.
+[acesso]
+admins = ["admin@empresa.com"]
 ```
 
-**Perfis de acesso** (`role`) controlam quais páginas cada usuário vê: `admin` (tudo), `supervisor` (Daily, Logística), `vendedor` (Home, Daily), `estoque` (Logística).
+**Quem pode entrar** não fica no secrets: fica na tabela `app.usuario`, gerida na aba
+**👥 Usuários** de Configurações (admin). Quem não estiver lá não entra — não há
+auto-cadastro. **Perfis de acesso** (`role`) controlam quais páginas cada usuário vê:
+`admin` (tudo), `supervisor` (Daily, Logística), `vendedor` (Home, Daily), `estoque`
+(Logística).
 
 ---
 
@@ -132,7 +141,7 @@ Deploy gratuito no [share.streamlit.io](https://share.streamlit.io) — o Supaba
    - **Repository:** `SEU_USUARIO/AKU-Hub-v1`
    - **Branch:** `main`
    - **Main file path:** `app.py`
-3. Em **Advanced settings → Secrets**, cole o conteúdo do seu `secrets.toml` (bloco `[supabase]` + `[auth_config]` da seção acima).
+3. Em **Advanced settings → Secrets**, cole o conteúdo do seu `secrets.toml` (blocos `[supabase]`, `[auth]`, `[auth.google]` e `[acesso]` da seção acima) — trocando o `redirect_uri` pela URL do app no Cloud + `/oauth2callback`, que também precisa estar cadastrada no Google Cloud Console.
 4. Clique em **Deploy!** — o Streamlit instala o `requirements.txt` e sobe o app em alguns minutos.
 
 Para atualizar o app após mudanças no código, basta `git push` — o redeploy é automático. Para restringir acesso, use **Share → Invite viewers** no painel do Streamlit Cloud (além da autenticação própria do dashboard).
@@ -144,7 +153,8 @@ Para atualizar o app após mudanças no código, basta `git push` — o redeploy
 ```
 AKU-Hub-v1/
 ├── app.py                         # Ponto de entrada do Streamlit
-├── auth.py                        # Autenticação e controle de acesso por perfil
+├── auth.py                        # Login Google (OIDC) + controle de acesso por perfil
+├── auth_store.py                  # Allowlist de usuários (app.usuario)
 ├── config.yaml                    # Metas, IDs e configurações operacionais
 ├── requirements.txt               # Dependências Python (produção)
 ├── requirements-dev.txt           # Dependências de desenvolvimento (pytest)
@@ -217,7 +227,7 @@ python scripts/memoria_calculo_fabrica.py <SKU>        # passo a passo do PCP (o
 → Verifique se `[supabase].url` e `[supabase].service_key` nos secrets estão corretos e se o projeto Supabase está ativo.
 
 **Acesso negado / página não aparece**
-→ Confira o `role` do usuário em `[auth_config]`. Cada perfil vê um subconjunto das páginas (ver [Configuração dos Secrets](#configuração-dos-secrets)).
+→ Confira o `role` do usuário na aba **Usuários** de Configurações. Cada perfil vê um subconjunto das páginas (ver [Configuração dos Secrets](#configuração-dos-secrets)).
 
 **"No module named ..."**
 → O ambiente virtual não está ativado ou as dependências não foram instaladas. Rode `venv\Scripts\activate` e `pip install -r requirements.txt`.
