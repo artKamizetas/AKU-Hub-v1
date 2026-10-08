@@ -13,6 +13,10 @@ from etl.vm_dinamico import calcular_vm_por_sku
 
 from etl.loader import fingerprint_config
 from ui_carga import carregar_com_feedback, rodape_frescor
+from ui_tabelas import (
+    FILA, MEMORIA, exibir, num,
+    col_sku, col_produto, col_colegio, col_tamanho, col_texto, col_pecas, col_numero,
+)
 
 
 dados, config = carregar_com_feedback()
@@ -107,43 +111,43 @@ ruptura = df_filtrado[df_filtrado["Acao"] == "🚨 Ruptura"]
 negativo = df_filtrado[df_filtrado["Acao"] == "🚫 Estoque Negativo"]
 ok = df_filtrado[df_filtrado["Acao"] == "✅ OK"]
 
-c1.metric("✨ Repor", f"{len(repor)} SKUs", f"{repor['SugestaoQtd'].sum():.0f} pçs")
-c2.metric("🚨 Ruptura", f"{len(ruptura)} SKUs")
-c3.metric("🚫 Negativo", f"{len(negativo)} SKUs")
-c4.metric("✅ OK", f"{len(ok)} SKUs")
+c1.metric("✨ Repor", f"{num(len(repor))} SKUs", f"{num(repor['SugestaoQtd'].sum())} pçs")
+c2.metric("🚨 Ruptura", f"{num(len(ruptura))} SKUs")
+c3.metric("🚫 Negativo", f"{num(len(negativo))} SKUs")
+c4.metric("✅ OK", f"{num(len(ok))} SKUs")
 
 # =================================================================
 # TABELA PRINCIPAL
 # =================================================================
 st.subheader("Detalhamento por SKU")
 
+# Ordem de leitura: identidade → DECISÃO (ação, sugestão) → evidência (estoques e
+# alvo). A linha já chega ordenada por urgência (Negativo → Ruptura → Repor).
 colunas_principais = [
-    "Loja", "SKU", "Produto", "Colegio", "Categoria", "Tamanho",
-    "EstoqueCentral", "EstoqueLoja", "VM", "Pulmao", "Total",
-    "SugestaoQtd", "Acao",
+    "SKU", "Produto", "Tamanho", "Colegio", "Loja",
+    "Acao", "SugestaoQtd",
+    "EstoqueLoja", "EstoqueCentral", "VM", "Pulmao", "Total", "Categoria",
 ]
 
-# Exibe com verde claro na Sugestão Qtd via Styler
-df_exibir = df_filtrado[colunas_principais].copy()
-df_exibir = df_exibir.rename(columns={
-    "EstoqueCentral": "Est. Central",
-    "EstoqueLoja": "Est. Loja",
-    "Pulmao": "Pulmão",
-    "Total": "VM+Pulmão",
-    "SugestaoQtd": "Sugestão Qtd",
-    "Acao": "Ação",
+# Sem fundo colorido na sugestão: pintava toda linha com sugestão > 0, então
+# não destacava nada. O estado já está na coluna Ação.
+exibir(df_filtrado[colunas_principais], FILA, {
+    "SKU": col_sku(),
+    "Produto": col_produto(largura="large"),
+    "Tamanho": col_tamanho(),
+    "Colegio": col_colegio(),
+    "Loja": col_texto("Loja", largura="small"),
+    "Acao": col_texto("Ação"),
+    "SugestaoQtd": col_pecas("Sugestão (pçs)", largura=None),
+    "EstoqueLoja": col_pecas("Est. Loja"),
+    "EstoqueCentral": col_pecas("Est. CD"),
+    "VM": col_pecas("VM"),
+    "Pulmao": col_pecas("Pulmão"),
+    "Total": col_pecas("VM+Pulmão"),
+    "Categoria": col_texto("Categoria"),
 })
 
-def _verde_sugestao(val):
-    if isinstance(val, (int, float)) and val > 0:
-        return "background-color: #E8F5E9"
-    return ""
-
-styled = df_exibir.style.map(_verde_sugestao, subset=["Sugestão Qtd"])
-
-st.dataframe(styled, width="stretch", hide_index=True)
-
-st.caption(f"**{len(df_filtrado)}** SKUs exibidos")
+st.caption(f"**{num(len(df_filtrado))}** SKUs exibidos")
 
 # =================================================================
 # DIAGNÓSTICO VM (expander)
@@ -161,21 +165,20 @@ with st.expander("🔍 Diagnóstico VM Dinâmico — Detalhes do Cálculo"):
 
     df_diag = df_filtrado[colunas_diag].drop_duplicates(subset=["SKU"]).sort_values("Total", ascending=False)
 
-    st.dataframe(
-        df_diag,
-        width="stretch",
-        hide_index=True,
-        column_config={
-            "Pulmao": st.column_config.NumberColumn("Pulmão"),
-            "Total": st.column_config.NumberColumn("VM+Pulmão"),
-            "PA": st.column_config.NumberColumn("PA (pçs/atend)", format="%.1f"),
-            "Sigma": st.column_config.NumberColumn("Desvio-Padrão", format="%.2f"),
-            "D_Alta": st.column_config.NumberColumn("Demanda/Dia", format="%.3f"),
-            "TaxaCresc": st.column_config.NumberColumn("Taxa Cresc.", format="%.2f"),
-            "Correcao": st.column_config.NumberColumn("Correção", format="%.2f"),
-            "FonteVM": st.column_config.TextColumn("Fonte VM"),
-        },
-    )
+    exibir(df_diag, MEMORIA, {
+        "SKU": col_sku(),
+        "Produto": col_produto(),
+        "Colegio": col_colegio(),
+        "VM": col_pecas("VM"),
+        "Pulmao": col_pecas("Pulmão"),
+        "Total": col_pecas("VM+Pulmão"),
+        "FonteVM": col_texto("Fonte VM", largura="small"),
+        "PA": col_numero("PA (pçs/atend)", casas=1, largura="small"),
+        "Sigma": col_numero("Desvio-Padrão", casas=2, largura="small"),
+        "D_Alta": col_numero("Demanda/Dia", casas=3, largura="small"),
+        "TaxaCresc": col_numero("Taxa Cresc.", casas=2, largura="small"),
+        "Correcao": col_numero("Correção", casas=2, largura="small"),
+    })
 
     st.caption(
         "**Desvio-Padrão alto** = vendas irregulares → pulmão maior. "
