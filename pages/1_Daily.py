@@ -22,6 +22,10 @@ from etl.daily import processar_daily
 from etl import metas
 from etl.loader import fingerprint_config
 from ui_carga import carregar_com_feedback, rodape_frescor
+from ui_tabelas import (
+    PLACAR, exibir, brl as _brl, num as _num,
+    col_texto, col_colegio, col_numero, col_pecas, col_moeda, col_progresso,
+)
 
 
 # =================================================================
@@ -43,21 +47,6 @@ MESES_NOME = {
     1: "Janeiro", 2: "Fevereiro", 3: "Março", 4: "Abril", 5: "Maio", 6: "Junho",
     7: "Julho", 8: "Agosto", 9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro",
 }
-
-
-def _brl(v, casas=0) -> str:
-    """Formata em Real com separador pt-BR (milhar '.', decimal ',')."""
-    if v is None or (isinstance(v, float) and pd.isna(v)):
-        return "—"
-    s = f"{v:,.{casas}f}"
-    return "R$ " + s.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
-
-
-def _num(v, casas=0) -> str:
-    if v is None or (isinstance(v, float) and pd.isna(v)):
-        return "—"
-    s = f"{v:,.{casas}f}"
-    return s.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
 
 
 def _badge_nivel(nivel) -> str:
@@ -390,22 +379,18 @@ with st.expander(f"📋 Detalhe por loja — {rotulo_comp}", expanded=False):
     det_loja["PA Nível"] = det_loja["PA Nivel"].map(lambda v: _badge_nivel(v))
     cols = ["Loja", "Vendido", "Meta Prata", "Meta Ouro", "Meta Diamante", "Nível",
             "Falta Proximo", "Run Rate", "PA", "PA Meta Ouro", "PA Nível", "Pecas", "Pedidos"]
-    st.dataframe(
-        det_loja[cols],
-        width="stretch", hide_index=True,
-        column_config={
-            "Vendido": st.column_config.NumberColumn("Vendido", format="R$ %.0f"),
-            "Meta Prata": st.column_config.NumberColumn("🥈 Prata", format="R$ %.0f"),
-            "Meta Ouro": st.column_config.NumberColumn("🥇 Ouro", format="R$ %.0f"),
-            "Meta Diamante": st.column_config.NumberColumn("💎 Diamante", format="R$ %.0f"),
-            "Falta Proximo": st.column_config.NumberColumn("Falta p/ próximo", format="R$ %.0f"),
-            "Run Rate": st.column_config.NumberColumn("Projeção", format="R$ %.0f"),
-            "PA": st.column_config.NumberColumn("PA", format="%.2f"),
-            "PA Meta Ouro": st.column_config.NumberColumn("PA 🥇", format="%.2f"),
-            "Pecas": st.column_config.NumberColumn("Peças", format="%d"),
-            "Pedidos": st.column_config.NumberColumn("Pedidos", format="%d"),
-        },
-    )
+    exibir(det_loja[cols], PLACAR, {
+        "Vendido": col_moeda("Vendido"),
+        "Meta Prata": col_moeda("🥈 Prata"),
+        "Meta Ouro": col_moeda("🥇 Ouro"),
+        "Meta Diamante": col_moeda("💎 Diamante"),
+        "Falta Proximo": col_moeda("Falta p/ próximo"),
+        "Run Rate": col_moeda("Projeção"),
+        "PA": col_numero("PA", casas=2, largura="small"),
+        "PA Meta Ouro": col_numero("PA 🥇", casas=2, largura="small"),
+        "Pecas": col_pecas("Peças"),
+        "Pedidos": col_pecas("Pedidos"),
+    })
 
 # -----------------------------------------------------------------
 # Histórico de atingimento — os 12 meses até a competência
@@ -513,23 +498,23 @@ else:
     vend_sel["PA Nível"] = vend_sel["PA Nivel"].map(lambda v: _badge_nivel(v))
     vend_sel = vend_sel.sort_values("Vendido", ascending=False)
 
-    st.dataframe(
-        vend_sel[["Vendedor", "Loja", "Vendido", "Meta Ouro", "% da Meta", "Nível",
-                  "Falta Proximo", "PA", "PA Meta Ouro", "PA Nível",
+    # Ordem de leitura: quem é → como está na meta → os números que explicam.
+    exibir(
+        vend_sel[["Vendedor", "Loja", "Nível", "% da Meta", "Falta Proximo",
+                  "Vendido", "Meta Ouro", "PA", "PA Meta Ouro", "PA Nível",
                   "Pecas", "Pedidos", "Ticket Medio"]],
-        width="stretch", hide_index=True,
-        column_config={
-            "Vendido": st.column_config.NumberColumn("Vendido", format="R$ %.0f"),
-            "Meta Ouro": st.column_config.NumberColumn("Meta 🥇 Ouro", format="R$ %.0f",
-                                                       help="Rateada da meta da loja pelo peso do vendedor."),
-            "% da Meta": st.column_config.ProgressColumn("% da meta Ouro", format="%.0f%%",
-                                                          min_value=0, max_value=120),
-            "Falta Proximo": st.column_config.NumberColumn("Falta p/ próximo", format="R$ %.0f"),
-            "PA": st.column_config.NumberColumn("PA", format="%.2f"),
-            "PA Meta Ouro": st.column_config.NumberColumn("PA 🥇", format="%.2f"),
-            "Pecas": st.column_config.NumberColumn("Peças", format="%d"),
-            "Pedidos": st.column_config.NumberColumn("Pedidos", format="%d"),
-            "Ticket Medio": st.column_config.NumberColumn("Ticket médio", format="R$ %.2f"),
+        PLACAR,
+        {
+            "% da Meta": col_progresso("% da meta Ouro", maximo=120),
+            "Falta Proximo": col_moeda("Falta p/ próximo"),
+            "Vendido": col_moeda("Vendido"),
+            "Meta Ouro": col_moeda(
+                "Meta 🥇 Ouro", ajuda="Rateada da meta da loja pelo peso do vendedor."),
+            "PA": col_numero("PA", casas=2, largura="small"),
+            "PA Meta Ouro": col_numero("PA 🥇", casas=2, largura="small"),
+            "Pecas": col_pecas("Peças"),
+            "Pedidos": col_pecas("Pedidos"),
+            "Ticket Medio": col_moeda("Ticket médio", casas=2),
         },
     )
     st.caption(
@@ -576,18 +561,18 @@ if len(vendas_comp) > 0:
         )
         st.plotly_chart(fig_col, width="stretch")
     with col_t:
-        st.dataframe(
+        exibir(
             por_colegio[["Colegio", "Valor", "Participacao", "Pecas", "Pedidos", "PA"]],
-            width="stretch", hide_index=True, height=max(260, 32 * min(len(por_colegio), 10)),
-            column_config={
-                "Colegio": st.column_config.TextColumn("Colégio"),
-                "Valor": st.column_config.NumberColumn("Faturamento", format="R$ %.0f"),
-                "Participacao": st.column_config.ProgressColumn("Participação", format="%.1f%%",
-                                                                 min_value=0, max_value=100),
-                "Pecas": st.column_config.NumberColumn("Peças", format="%d"),
-                "Pedidos": st.column_config.NumberColumn("Pedidos", format="%d"),
-                "PA": st.column_config.NumberColumn("PA", format="%.2f"),
+            PLACAR,
+            {
+                "Colegio": col_colegio(),
+                "Valor": col_moeda("Faturamento"),
+                "Participacao": col_progresso("Participação"),
+                "Pecas": col_pecas("Peças"),
+                "Pedidos": col_pecas("Pedidos"),
+                "PA": col_numero("PA", casas=2, largura="small"),
             },
+            max_linhas=10,   # casa com o gráfico dos 10 maiores ao lado
         )
     st.caption("Colégio não tem meta própria — é o detalhamento do resultado da loja no mês.")
 else:
@@ -708,17 +693,14 @@ with st.expander("🔎 Rankings no período (vendedor e colégio)", expanded=Fal
             perf["Ticket"] = perf["Valor"] / perf["Pedidos"]
             perf["PA"] = perf["Pecas"] / perf["Pedidos"]
             perf = perf.sort_values("Valor", ascending=False).reset_index(drop=True)
-            st.dataframe(
-                perf, width="stretch", hide_index=True,
-                column_config={
-                    coluna: st.column_config.TextColumn(rotulo),
-                    "Valor": st.column_config.NumberColumn("Faturamento", format="R$ %.0f"),
-                    "Pecas": st.column_config.NumberColumn("Peças", format="%d"),
-                    "Pedidos": st.column_config.NumberColumn("Pedidos", format="%d"),
-                    "Ticket": st.column_config.NumberColumn("Ticket médio", format="R$ %.2f"),
-                    "PA": st.column_config.NumberColumn("PA", format="%.2f"),
-                },
-            )
+            exibir(perf, PLACAR, {
+                coluna: col_texto(rotulo),
+                "Valor": col_moeda("Faturamento"),
+                "Pecas": col_pecas("Peças"),
+                "Pedidos": col_pecas("Pedidos"),
+                "Ticket": col_moeda("Ticket médio", casas=2),
+                "PA": col_numero("PA", casas=2, largura="small"),
+            })
             st.caption(
                 f"**{len(perf)}** {rotulo.lower()}(s) · **{perf['Pedidos'].sum()}** pedidos · "
                 f"**{_brl(perf['Valor'].sum())}** no período"

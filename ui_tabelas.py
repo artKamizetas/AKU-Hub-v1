@@ -69,7 +69,7 @@ MAX_LINHAS = {FILA: 24, MEMORIA: 16, PLACAR: 15, EDITOR: 15}
 # =================================================================
 def num(v, casas: int = 0) -> str:
     """Número em pt-BR (milhar '.', decimal ','). Vazio/NaN vira '—'."""
-    if v is None or (isinstance(v, float) and math.isnan(v)):
+    if v is None or pd.isna(v):
         return "—"
     s = f"{v:,.{casas}f}"
     return s.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
