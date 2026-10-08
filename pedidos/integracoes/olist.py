@@ -22,6 +22,8 @@ import time
 
 import pandas as pd
 
+from pedidos import grade
+
 
 BASE = "https://api.tiny.com.br/public-api/v3"
 _PAGINA = 100   # limit máximo aceito pelo GET /produtos
@@ -194,15 +196,10 @@ def mapear_produtos_por_sku(token: str, skus: list, http=None, dormir=None) -> t
     return mapa, faltantes
 
 
-def _sku_pai(sku: str):
-    """
-    SKU do produto-pai a partir do SKU-filho, tirando o sufixo de tamanho
-    ('SES024MOLDIA-G' → 'SES024MOLDIA'). Heurística deliberadamente ingênua
-    (corta no último '-'): se errar, a família não é encontrada e o SKU cai no
-    fallback exato — nunca casa errado. None se não há '-' para cortar.
-    """
-    base = str(sku).rpartition("-")[0].strip()
-    return base or None
+# Regra única do SKU pai: mora em pedidos/grade.py (a grade da 4_Pedidos usa a
+# mesma). Aqui, se a heurística errar, a família não é encontrada e o SKU cai
+# no fallback exato — nunca casa errado.
+_sku_pai = grade.sku_pai
 
 
 def obter_variacoes(token: str, id_pai: int, http=None, dormir=None) -> dict:

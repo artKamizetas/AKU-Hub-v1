@@ -31,6 +31,10 @@ RODADA_CONGELANDO = "CONGELANDO"   # inserção multi-request em andamento/abort
 RODADA_ABERTA = "ABERTA"           # congelamento concluído (commit lógico)
 RODADA_CANCELADA = "CANCELADA"     # descartada — libera novo congelamento
 
+# --- Origem do ITEM do pedido (DDL 007) ---
+ORIGEM_SIMULACAO = "SIMULACAO"   # nasceu do congelamento (o motor sugeriu)
+ORIGEM_MANUAL = "MANUAL"         # incluído pelo gestor no rascunho
+
 # Transições permitidas: de → {para}
 TRANSICOES = {
     RASCUNHO: {PRONTO, CANCELADO},

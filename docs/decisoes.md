@@ -9,6 +9,75 @@ Records). Adicione no topo as mais recentes.
 
 ---
 
+## 2026-10 · Revisão do rascunho enxerga a família inteira (zerados do snapshot)
+O painel "Por que essas quantidades?" da 4_Pedidos só mostrava os SKUs que viraram
+item — e item só nasce de sugestão > 0. Quem revisava o pedido `LMN · Calção` via
+1 tamanho e nenhuma pista de que os outros 9 SKUs do grupo tinham sido avaliados
+e zerados. O dado sempre esteve congelado (`rodada_congelada.resultado_skus` guarda
+a rede inteira); faltava a tela lê-lo.
+
+- **Toggle "Mostrar também o que ficou fora do pedido"** dentro do expander: junta
+  à tabela os SKUs do mesmo Colégio × SuperCategoria, com a coluna **Situação**
+  (`No pedido` / `Coberto pelo estoque` / `Sem demanda no período`).
+  `builder.memoria_do_grupo` (puro) faz o recorte com o MESMO `_normalizar_dim` do
+  congelamento e devolve a memória no formato da `memoria_sugerida`.
+- **Os zerados NÃO viraram item de pedido.** Continuam só no snapshot. **Por quê:**
+  item zerado entraria na grade, nos totais e no caminho de emissão; o pedido é o
+  que se compra, o snapshot é o que se avaliou.
+- **Única leitura cacheada do schema `app` na página** (`_resultado_skus_rodada`,
+  1h): o snapshot é imutável, então não há pós-escrita para o cache confundir.
+  Lido só com o toggle ligado (`repositorio.obter_resultado_skus` traz só essa
+  coluna, sem o `config_snapshot`).
+
+## 2026-10 · Pedido de compra: visão em grade + inclusão manual de itens
+Duas limitações da revisão do rascunho na 4_Pedidos. (1) A lista por SKU esconde
+a grade: quem produz pensa em "um produto, os tamanhos lado a lado", e é nessa
+forma que uma grade furada aparece. (2) O pedido era fechado na simulação — só
+se ajustava quantidade; produto que o motor não sugeriu não entrava.
+
+- **Grade é só outra visão da MESMA tabela** (`pedidos/grade.py`, puro): linhas =
+  SKU pai + nome sem a variação, colunas = tamanhos, valores = `quantidade_final`.
+  Editável, e a volta para o banco é por **id do item**, nunca por posição.
+  Célula vazia ≠ zero: vazia é "tamanho fora do pedido", zero é item zerado.
+- **Dica por célula ao passar o mouse: não dá no `st.data_editor`** (Streamlit
+  1.59) — só existe `help` no CABEÇALHO da coluna; o frontend até desenha
+  tooltip de célula, mas nada no Python o alimenta (conferido no código
+  instalado; o Styler também não leva tooltips). O pedido era mostrar ali o
+  resumo da sugestão (venda na alta, estoque na rede, demanda do período,
+  sugerido). Uma tabela-espelho de indicadores abaixo da grade foi testada e
+  **descartada pela diretoria**: sem o gesto do mouse ela só repete o painel
+  "Por que essas quantidades?". Reabrir se o Streamlit expuser tooltip por célula.
+- **Ordem dos tamanhos por REGRA, não por lista fixa** (`grade.chave_tamanho`):
+  cada P desce um degrau, M é o zero, cada G sobe, X empurra para a ponta; depois
+  números pelo valor; `Único` por último. **Por quê:** lista fixa quebra em
+  silêncio no primeiro tamanho novo (cai no fim, fora de ordem); a regra já
+  ordena um `XXXGG` que ninguém cadastrou ainda.
+- **O nome sem variação corta o último bloco `Rótulo:valor`**, não só
+  `Tamanho:` — o catálogo tem `Numeração:`, `Idade:` e compostos
+  (`Numeração:29;COR:BRANCO`). Conferido no catálogo ativo: casa os 1.173
+  produtos com pai e nenhum dos 258 sem.
+- **Item manual é marcado, não disfarçado** (DDL 007): `origem = MANUAL`,
+  `quantidade_sugerida = 0`, memória vazia, `adicionado_por/em`. Impostos pelo
+  repositório, não confiados à tela. Na "Descrição detalhada" do Bling sai
+  `Incluído manualmente por <e-mail> → N pç`. **Por quê:** o delta
+  sugerido × final é a auditoria da intervenção; um item manual com sugestão
+  inventada a falsificaria.
+- **A trava de RASCUNHO passou a cobrir o INSERT.** O trigger era
+  `before update or delete` — suficiente enquanto item só nascia no
+  congelamento. Sem a mudança o banco aceitaria item novo num pedido já
+  emitido, que ficaria no nosso registro sem nunca ter ido aos ERPs.
+- **Item da simulação não se apaga, zera-se**; só o manual é removível (regra
+  no repositório + no trigger).
+- **Escopo da inclusão = mesmo Colégio × SuperCategoria do pedido**, com opção
+  de escape. O título do pedido (`NEVES - CALÇAS - R08/2026`) vai para o Bling;
+  liberar tudo por padrão faria o título mentir. O escape avisa na hora.
+- **Catálogo VIVO, não o snapshot** (`pedidos/catalogo.py`): o caso de uso é o
+  produto que a simulação não trouxe, inclusive o cadastrado depois do
+  congelamento. O registro-PAI do Bling sai do catálogo (é agrupador, não peça).
+- **Fica de fora (2ª etapa):** criar pedido manual para um Colégio ×
+  SuperCategoria em que o motor não sugeriu nada. E continua valendo a pendência
+  de on-order: o item manual não retroalimenta a rodada seguinte.
+
 ## 2026-09 · Carga de dados 11× mais rápida + invalidação cirúrgica de cache
 A queixa era de "telas lentas sem feedback", com a suspeita recaindo sobre os
 motores de cálculo. A medição mostrou o contrário: **117,5 s de leitura do

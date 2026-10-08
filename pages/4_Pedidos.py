@@ -9,7 +9,8 @@ Integrações de Configurações.
 
 Três níveis: rodadas congeladas → pedidos da rodada → itens do pedido.
 Leituras do schema `app` sem st.cache_data (tabelas pequenas; cache
-confundiria o pós-escrita).
+confundiria o pós-escrita) — exceto o resultado por SKU do snapshot, que é
+imutável (ver _resultado_skus_rodada).
 """
 
 import streamlit as st
@@ -17,11 +18,13 @@ from auth import exigir_admin
 
 import pandas as pd
 
-from pedidos import builder, estados, emissor
+from pedidos import builder, catalogo, estados, emissor, grade
 from pedidos.repositorio import (
     obter_repositorio, TransicaoInvalida, PedidoNaoEditavel,
+    ItemJaExiste, ItemNaoRemovivel, MigracaoPendente,
 )
 from pedidos.integracoes.repositorio import obter_repositorio_integracoes
+from ui_carga import carregar_com_feedback
 
 # Gate de admin (login + role numa chamada). `usuario` é o e-mail: alimenta as
 # colunas de auditoria de toda escrita desta página.
@@ -98,35 +101,51 @@ _MEMORIA_COLS = {
 }
 
 
-def _memoria_sugestao(itens: pd.DataFrame) -> None:
+_SITUACAO_NO_PEDIDO = "No pedido"
+
+
+@st.cache_data(ttl=3600, max_entries=4, show_spinner="Lendo o snapshot da rodada…")
+def _resultado_skus_rodada(rodada_id: str) -> list:
+    """
+    Resultado por SKU do snapshot (rede inteira). É a ÚNICA leitura do schema
+    `app` cacheada nesta página: o snapshot é imutável, então não existe
+    pós-escrita para o cache confundir — e sem ele cada rerun do fragment com o
+    toggle ligado baixaria o jsonb inteiro de novo.
+    """
+    return obter_repositorio().obter_resultado_skus(rodada_id)
+
+
+def _linha_memoria(sku: str, tamanho, mem: dict, qtd_sugerida: int,
+                   situacao: str = None) -> dict:
+    linha = {"SKU": sku}
+    if situacao is not None:
+        linha["Situação"] = situacao
+    for chave, rotulo in _MEMORIA_COLS.items():
+        valor = mem.get(chave)
+        linha[rotulo] = round(valor, 1) if isinstance(valor, (int, float)) else None
+    ns = mem.get("nivel_servico")   # já em pontos percentuais (99, 92…)
+    linha["Nível serviço"] = f"{ns:.0f}%" if isinstance(ns, (int, float)) else "—"
+    linha["Qtd sugerida"] = int(qtd_sugerida)
+    # ordem da grade (família, depois tamanho pela regra da confecção)
+    linha["_ordem"] = (grade.familia(sku),
+                       grade.chave_tamanho(grade.tamanho_efetivo(tamanho, sku)))
+    return linha
+
+
+def _memoria_sugestao(itens: pd.DataFrame, pedido_sel) -> None:
     """
     Painel read-only 'por que essa quantidade': os drivers congelados da
     sugestão (memoria_sugerida por item), ao lado do SKU e da qtd sugerida —
     sem carregar o resultado_skus pesado da rodada. Degrada com aviso quando
-    a rodada foi congelada antes desta memória existir (jsonb vazio)."""
+    a rodada foi congelada antes desta memória existir (jsonb vazio).
+
+    Atrás de um toggle, completa a FAMÍLIA com o que ficou fora do pedido: os
+    SKUs do mesmo Colégio × SuperCategoria com sugestão 0 só existem no
+    snapshot da rodada (não viram item), e é ele que é lido nesse caso.
+    """
     with st.expander("🧮 Por que essas quantidades? (memória de cálculo)"):
         if "memoria_sugerida" not in itens.columns:
             st.info("Rodada congelada antes desta versão — memória indisponível.")
-            return
-        linhas = []
-        for _, it in itens.iterrows():
-            mem = it["memoria_sugerida"] or {}
-            if not isinstance(mem, dict) or not mem:
-                continue
-            linha = {"SKU": it["sku"]}
-            for chave, rotulo in _MEMORIA_COLS.items():
-                valor = mem.get(chave)
-                linha[rotulo] = round(valor, 1) if isinstance(valor, (int, float)) else None
-            ns = mem.get("nivel_servico")   # já em pontos percentuais (99, 92…)
-            linha["Nível serviço"] = f"{ns:.0f}%" if isinstance(ns, (int, float)) else "—"
-            linha["Qtd sugerida"] = int(it["quantidade_sugerida"])
-            linhas.append(linha)
-
-        if not linhas:
-            st.info(
-                "Esta rodada foi congelada antes da memória de cálculo por item "
-                "existir — abra o snapshot da rodada para conferir."
-            )
             return
 
         st.caption(
@@ -135,7 +154,249 @@ def _memoria_sugestao(itens: pd.DataFrame) -> None:
             "(`Estoque rede − Backlog`, consumido até a rodada chegar) → **Qtd "
             "sugerida**. Valores congelados no momento do cálculo."
         )
-        st.dataframe(pd.DataFrame(linhas), width="stretch", hide_index=True)
+        ver_fora = st.toggle(
+            "Mostrar também o que ficou fora do pedido",
+            key=f"mem_fora_{pedido_sel['id']}",
+            help="Os outros tamanhos e modelos deste Colégio × Super Categoria "
+                 "que o cálculo zerou (cobertos pelo estoque ou sem demanda). "
+                 "Lidos do snapshot da rodada.",
+        )
+
+        linhas = []
+        for _, it in itens.iterrows():
+            mem = it["memoria_sugerida"] or {}
+            if not isinstance(mem, dict) or not mem:
+                continue
+            linhas.append(_linha_memoria(
+                it["sku"], it["tamanho"], mem, it["quantidade_sugerida"],
+                _SITUACAO_NO_PEDIDO if ver_fora else None))
+
+        if ver_fora:
+            grupo = builder.memoria_do_grupo(
+                _resultado_skus_rodada(pedido_sel["rodada_id"]),
+                pedido_sel["colegio"], pedido_sel["super_categoria"])
+            ja_listados = {linha["SKU"] for linha in linhas}
+            manuais = set(itens.loc[itens["origem"] == estados.ORIGEM_MANUAL, "sku"])
+            fora = [g for g in grupo
+                    if g["sku"] not in ja_listados and g["sku"] not in manuais]
+            for g in grupo:
+                if g["sku"] in ja_listados:
+                    continue
+                # item incluído à mão: o snapshot explica por que o motor o zerou
+                situacao = (f"Incluído à mão · {g['motivo'].lower()}"
+                            if g["sku"] in manuais else g["motivo"])
+                linhas.append(_linha_memoria(
+                    g["sku"], g["tamanho"], g["memoria"],
+                    g["quantidade_sugerida"], situacao))
+
+            rotulo_grupo = f"{pedido_sel['colegio']} · {pedido_sel['super_categoria']}"
+            if not grupo:
+                st.info("O snapshot desta rodada não traz o resultado por SKU — "
+                        "só é possível mostrar os itens do pedido.")
+            elif not fora:
+                st.caption(f"Nenhum outro SKU de **{rotulo_grupo}** nesta rodada — "
+                           "tudo o que o cálculo avaliou está no pedido.")
+            else:
+                n_coberto = sum(g["motivo"] == builder.MOTIVO_COBERTO for g in fora)
+                n_sem = sum(g["motivo"] == builder.MOTIVO_SEM_DEMANDA for g in fora)
+                st.caption(
+                    f"**{len(fora)}** SKU(s) de **{rotulo_grupo}** ficaram fora do "
+                    f"pedido: **{n_coberto}** coberto(s) pelo estoque · "
+                    f"**{n_sem}** sem demanda no período."
+                )
+
+        if not linhas:
+            st.info(
+                "Esta rodada foi congelada antes da memória de cálculo por item "
+                "existir — abra o snapshot da rodada para conferir."
+            )
+            return
+
+        linhas.sort(key=lambda linha: linha["_ordem"])
+        st.dataframe(pd.DataFrame(linhas).drop(columns="_ordem"),
+                     width="stretch", hide_index=True)
+
+
+# =================================================================
+# Itens do pedido — duas visões da MESMA tabela + inclusão manual
+# =================================================================
+VISAO_LISTA, VISAO_GRADE = "Lista", "Grade por tamanho"
+_ROTULO_ORIGEM = {estados.ORIGEM_SIMULACAO: "Simulação", estados.ORIGEM_MANUAL: "Manual"}
+
+
+def _rev() -> int:
+    """
+    Revisão dos editores: entra na `key` de todo data_editor de itens. Subir a
+    revisão descarta as edições pendentes — obrigatório depois de incluir ou
+    remover item, porque o editor guarda a edição por POSIÇÃO da linha e, com a
+    tabela mudando de tamanho, ela reapareceria em outro SKU.
+    """
+    return st.session_state.get("pc_editor_rev", 0)
+
+
+def _nova_rev() -> None:
+    st.session_state["pc_editor_rev"] = _rev() + 1
+
+
+def _chave_editor(visao: str, pedido_id: str) -> str:
+    prefixo = "grade" if visao == VISAO_GRADE else "editor"
+    return f"{prefixo}_{pedido_id}_{_rev()}"
+
+
+def _editor_sujo(chave: str) -> bool:
+    estado = st.session_state.get(chave)
+    return bool(isinstance(estado, dict) and estado.get("edited_rows"))
+
+
+def _ao_trocar_visao(pedido_id: str) -> None:
+    """
+    Callback do seletor Lista/Grade. As duas visões são editores diferentes:
+    trocar com quantidade digitada e não salva a perderia em silêncio. Aqui a
+    troca é DESFEITA e a tela avisa — quem decide descartar é o usuário.
+    """
+    anterior = st.session_state.get("pc_visao_ativa", VISAO_LISTA)
+    nova = st.session_state.get("pc_visao")
+    if nova is None:   # clicar na opção já marcada a desmarca — mantém a atual
+        st.session_state["pc_visao"] = anterior
+        return
+    if nova != anterior and _editor_sujo(_chave_editor(anterior, pedido_id)):
+        st.session_state["pc_visao"] = anterior
+        st.session_state["pc_visao_bloqueada"] = nova
+        return
+    st.session_state["pc_visao_ativa"] = nova
+
+
+def _descartar_e_trocar(visao: str) -> None:
+    _nova_rev()
+    st.session_state["pc_visao"] = visao
+    st.session_state["pc_visao_ativa"] = visao
+
+
+def _catalogo() -> pd.DataFrame:
+    """Produtos ativos para a inclusão manual (carga do loader: cache de 1h)."""
+    dados, _ = carregar_com_feedback()
+    return catalogo.montar_catalogo(dados["produtos"], dados["detalhes"])
+
+
+def _adicionar_produto(pedido_sel, itens: pd.DataFrame, pendente: bool) -> None:
+    """
+    Inclui no rascunho um produto que a simulação não trouxe: escolhe o
+    produto e digita a grade de tamanhos inteira de uma vez. Atrás de um
+    toggle para o catálogo só ser carregado quando alguém vai mesmo incluir.
+    """
+    pedido_id = pedido_sel["id"]
+    if not st.toggle("➕ Adicionar produto que não veio da simulação",
+                     key=f"add_on_{pedido_id}"):
+        return
+
+    with st.container(border=True):
+        cat = _catalogo()
+        todos = st.checkbox(
+            "Mostrar produtos de outros colégios e categorias",
+            key=f"add_todos_{pedido_id}",
+            help=f"Por padrão aparecem só os produtos de {pedido_sel['colegio']} · "
+                 f"{pedido_sel['super_categoria']} — é o que o título do pedido "
+                 "promete no Bling.",
+        )
+        base = cat if todos else catalogo.filtrar_escopo(
+            cat, pedido_sel["colegio"], pedido_sel["super_categoria"])
+        familias = catalogo.listar_familias(base)
+        if len(familias) == 0:
+            st.info(f"Nenhum produto ativo em {pedido_sel['colegio']} · "
+                    f"{pedido_sel['super_categoria']}. Marque a opção acima para "
+                    "buscar em todo o catálogo.")
+            return
+
+        nomes = dict(zip(familias["familia"], familias["produto_pai"]))
+        fam = st.selectbox(
+            "Produto", options=list(nomes), index=None,
+            format_func=lambda f: f"{f} — {nomes[f]}",
+            placeholder="Busque pelo SKU ou pelo nome do produto",
+            key=f"add_fam_{pedido_id}_{int(todos)}",
+        )
+        if fam is None:
+            return
+
+        membros = catalogo.tamanhos_da_familia(cat, fam)
+        no_pedido = set(itens["sku"])
+        livres = membros[~membros["sku"].isin(no_pedido)]
+        ja = membros[membros["sku"].isin(no_pedido)]
+        if len(ja):
+            st.caption("Já no pedido (ajuste na tabela acima): "
+                       + ", ".join(ja["tamanho_grade"]))
+        if len(livres) == 0:
+            st.info("Todos os tamanhos deste produto já estão no pedido — "
+                    "ajuste as quantidades na tabela acima.")
+            return
+
+        fora = membros.iloc[0]
+        if (fora["colegio"], fora["super_categoria"]) != (
+                pedido_sel["colegio"], pedido_sel["super_categoria"]):
+            st.warning(
+                f"Este produto é de **{fora['colegio']} · {fora['super_categoria']}**. "
+                f"O pedido continua saindo no Bling como `{pedido_sel['titulo']}`.")
+
+        tamanhos = list(livres["tamanho_grade"])
+        linha = pd.DataFrame([{t: None for t in tamanhos}]).astype("Int64")
+        editada = st.data_editor(
+            linha, key=f"add_grade_{pedido_id}_{fam}_{_rev()}",
+            hide_index=True, num_rows="fixed", width="stretch",
+            column_config={t: st.column_config.NumberColumn(t, min_value=0, step=1)
+                           for t in tamanhos},
+        )
+        qtds = {sku: grade._qtd(editada.iloc[0][t])
+                for sku, t in zip(livres["sku"], tamanhos)}
+        novos = catalogo.montar_itens_manuais(livres, qtds)
+        pecas = sum(i["quantidade_final"] for i in novos)
+        valor = sum(i["quantidade_final"] * i["custo_unit"] for i in novos)
+
+        c_txt, c_btn = st.columns([3, 1], vertical_alignment="center")
+        with c_txt:
+            if pendente:
+                st.caption("⚠️ Salve as quantidades editadas na tabela antes de "
+                           "incluir — a inclusão recarrega o pedido.")
+            elif novos:
+                st.caption(f"{len(novos)} tamanho(s) · {pecas} peça(s) · {_fmt_brl(valor)} "
+                           "— entram com **sugerido 0** e origem **Manual**.")
+            else:
+                st.caption("Digite a quantidade nos tamanhos que quer incluir.")
+        with c_btn:
+            if st.button("Adicionar ao pedido", width="stretch",
+                         disabled=pendente or not novos, key=f"add_btn_{pedido_id}"):
+                try:
+                    n = repo.adicionar_itens(pedido_id, novos, usuario)
+                    _nova_rev()
+                    _flash("success", f"**{n}** item(ns) de `{fam}` incluído(s) no pedido.")
+                except (PedidoNaoEditavel, ItemJaExiste) as exc:
+                    _flash("warning", str(exc))
+                except MigracaoPendente as exc:
+                    _flash("error", str(exc))
+                st.rerun()
+
+
+def _remover_manuais(pedido_id: str, itens: pd.DataFrame, pendente: bool) -> None:
+    """Remoção de item incluído à mão. Item da simulação não aparece aqui: zera-se."""
+    manuais = itens[itens["origem"] == estados.ORIGEM_MANUAL]
+    if len(manuais) == 0:
+        return
+    with st.popover(f"🗑️ Remover item manual ({len(manuais)})", width="stretch"):
+        st.caption("Só itens incluídos à mão saem do pedido. Os da simulação ficam "
+                   "como registro — para não comprar, zere a quantidade final.")
+        rotulo = {r["id"]: f"{r['sku']} · {int(r['quantidade_final'])} pç"
+                  for _, r in manuais.iterrows()}
+        alvo = st.multiselect("Itens incluídos à mão", options=list(rotulo),
+                              format_func=rotulo.get, key=f"rem_sel_{pedido_id}_{_rev()}")
+        if pendente:
+            st.caption("⚠️ Salve as quantidades editadas antes de remover.")
+        if st.button("Remover do pedido", disabled=pendente or not alvo,
+                     key=f"rem_btn_{pedido_id}"):
+            try:
+                n = repo.remover_itens_manuais(pedido_id, alvo, usuario)
+                _nova_rev()
+                _flash("success", f"**{n}** item(ns) manual(is) removido(s).")
+            except (PedidoNaoEditavel, ItemNaoRemovivel) as exc:
+                _flash("warning", str(exc))
+            st.rerun()
 
 
 st.title("🧾 Pedidos de Compra")
@@ -297,34 +558,109 @@ def _secao_pedido():
         if not pode_editar and pedido_sel["status"] == estados.PRONTO:
             st.info("Pedido **Pronto** — reabra o rascunho para editar quantidades.")
 
-        # --- Itens (editor) ---
-        cols_editor = ["sku", "produto", "tamanho", "categoria",
-                       "quantidade_sugerida", "quantidade_final"]
-        df_editor = itens[cols_editor].copy()
-        editado = st.data_editor(
-            df_editor,
-            key=f"editor_{pedido_id}",
-            width="stretch", hide_index=True, num_rows="fixed",
-            disabled=(True if not pode_editar
-                      else ["sku", "produto", "tamanho", "categoria", "quantidade_sugerida"]),
-            column_config={
-                "sku": st.column_config.TextColumn("SKU"),
-                "produto": st.column_config.TextColumn("Produto"),
-                "tamanho": st.column_config.TextColumn("Tam."),
-                "categoria": st.column_config.TextColumn("Categoria"),
-                "quantidade_sugerida": st.column_config.NumberColumn(
-                    "Qtd Sugerida", help="Congelada no snapshot — imutável (auditoria)"),
-                "quantidade_final": st.column_config.NumberColumn(
-                    "Qtd Final", min_value=0, step=1,
-                    help="Quantidade que será emitida — editável no rascunho"),
-            },
-        )
+        # --- Itens: a MESMA tabela em duas visões (lista por SKU × grade por tamanho) ---
+        st.session_state.setdefault("pc_visao", VISAO_LISTA)
+        visao = st.segmented_control(
+            "Visualização dos itens", [VISAO_LISTA, VISAO_GRADE],
+            key="pc_visao", on_change=_ao_trocar_visao, args=(pedido_id,),
+            label_visibility="collapsed",
+        ) or VISAO_LISTA
+        st.session_state["pc_visao_ativa"] = visao
+
+        _bloqueada = st.session_state.pop("pc_visao_bloqueada", None)
+        if _bloqueada:
+            _av, _bt = st.columns([3, 1], vertical_alignment="center")
+            _av.warning("Há quantidades editadas e **não salvas** nesta visão. "
+                        "Salve antes de trocar — ou descarte.")
+            _bt.button("Descartar e trocar", width="stretch",
+                       on_click=_descartar_e_trocar, args=(_bloqueada,))
+
+        tem_manual = bool((itens["origem"] == estados.ORIGEM_MANUAL).any())
+        _novas = []   # células da grade sem item que receberam quantidade
+
+        if visao == VISAO_GRADE:
+            df_grade, celulas = grade.montar_grade(itens)
+            tamanhos = [c for c in df_grade.columns
+                        if c not in (grade.COL_SKU, grade.COL_PRODUTO)]
+            editado = st.data_editor(
+                df_grade,
+                key=_chave_editor(VISAO_GRADE, pedido_id),
+                width="stretch", hide_index=True, num_rows="fixed",
+                disabled=(True if not pode_editar
+                          else [grade.COL_SKU, grade.COL_PRODUTO]),
+                column_config={
+                    grade.COL_SKU: st.column_config.TextColumn("SKU", pinned=True),
+                    grade.COL_PRODUTO: st.column_config.TextColumn("Produto", width="large"),
+                    **{t: st.column_config.NumberColumn(t, min_value=0, step=1, width="small")
+                       for t in tamanhos},
+                },
+            )
+            _por_item = grade.quantidades_por_item(editado, celulas)
+            _qtd_final = itens["id"].map(_por_item).fillna(0).astype(int)
+            _alteracoes, _novas = grade.diff_grade(editado, itens, celulas)
+
+            _legenda = ["Valores = **quantidade final**. Célula vazia = tamanho fora do pedido."]
+            if pode_editar:
+                _legenda.append("Digitar numa célula vazia **inclui** o tamanho ao salvar.")
+            if tem_manual:
+                _legenda.append("Incluídos à mão: " + ", ".join(
+                    itens.loc[itens["origem"] == estados.ORIGEM_MANUAL, "sku"]) + ".")
+            st.caption(" ".join(_legenda))
+            if _novas:
+                st.info(f"**{len(_novas)}** tamanho(s) novo(s) serão incluídos ao salvar: "
+                        + ", ".join(f"{n['sku_pai']}-{n['tamanho']} ({n['quantidade']})"
+                                    for n in _novas[:8]) + ("…" if len(_novas) > 8 else ""))
+        else:
+            cols_fixas = ["sku", "produto", "tamanho", "categoria"]
+            if tem_manual:   # a coluna só aparece quando distingue alguma coisa
+                cols_fixas.append("origem")
+            cols_editor = cols_fixas + ["quantidade_sugerida", "quantidade_final"]
+            df_editor = itens[cols_editor].copy()
+            if tem_manual:
+                df_editor["origem"] = df_editor["origem"].map(_ROTULO_ORIGEM)
+            editado = st.data_editor(
+                df_editor,
+                key=_chave_editor(VISAO_LISTA, pedido_id),
+                width="stretch", hide_index=True, num_rows="fixed",
+                disabled=(True if not pode_editar
+                          else cols_fixas + ["quantidade_sugerida"]),
+                column_config={
+                    "sku": st.column_config.TextColumn("SKU"),
+                    "produto": st.column_config.TextColumn("Produto"),
+                    "tamanho": st.column_config.TextColumn("Tam."),
+                    "categoria": st.column_config.TextColumn("Categoria"),
+                    "origem": st.column_config.TextColumn(
+                        "Origem", help="Manual = incluído pelo gestor, fora da simulação"),
+                    "quantidade_sugerida": st.column_config.NumberColumn(
+                        "Qtd Sugerida", help="Congelada no snapshot — imutável (auditoria)"),
+                    "quantidade_final": st.column_config.NumberColumn(
+                        "Qtd Final", min_value=0, step=1,
+                        help="Quantidade que será emitida — editável no rascunho"),
+                },
+            )
+            _qtd_final = pd.to_numeric(editado["quantidade_final"], errors="coerce").fillna(0)
+            # Diff editor × banco: só linhas alteradas (ordem preservada —
+            # num_rows="fixed" mantém o alinhamento posicional com itens)
+            _alteracoes = [
+                {"id": iid, "quantidade_final": int(qf)}
+                for iid, qf, q0 in zip(itens["id"], _qtd_final, itens["quantidade_final"])
+                if int(qf) != int(q0)
+            ]
+
         # Totais recalculados do editor (exibidos mais abaixo, acima dos botões)
-        _qtd_final = pd.to_numeric(editado["quantidade_final"], errors="coerce").fillna(0)
         _delta = int(_qtd_final.sum() - itens["quantidade_sugerida"].sum())
         _invest = float((_qtd_final.values * itens["custo_unit"].values).sum())
+        _pendente = bool(_alteracoes or _novas)
 
-        _memoria_sugestao(itens)
+        # --- Inclusão/remoção manual de itens (só no rascunho) ---
+        if pode_editar:
+            _c_add, _c_rem = st.columns([3, 1], vertical_alignment="top")
+            with _c_rem:
+                _remover_manuais(pedido_id, itens, _pendente)
+            with _c_add:
+                _adicionar_produto(pedido_sel, itens, _pendente)
+
+        _memoria_sugestao(itens, pedido_sel)
 
         # --- Banners de estado (informativos) ---
         if pedido_sel["status"] == estados.COMPRA_EMITIDA:
@@ -398,11 +734,13 @@ def _secao_pedido():
             st.code(obs_bling, language=None)
 
         # --- CSV do pedido (preparado aqui; botão renderizado na linha de ações) ---
-        df_csv = itens[["sku", "produto", "tamanho", "categoria",
+        df_csv = itens[["sku", "produto", "tamanho", "categoria", "origem",
                         "quantidade_sugerida", "quantidade_final", "custo_unit"]].copy()
+        df_csv["origem"] = df_csv["origem"].map(_ROTULO_ORIGEM)
         df_csv["investimento"] = df_csv["quantidade_final"] * df_csv["custo_unit"]
         df_csv = df_csv.rename(columns={
             "sku": "SKU", "produto": "Produto", "tamanho": "Tam", "categoria": "Categoria",
+            "origem": "Origem",
             "quantidade_sugerida": "Qtd Sugerida", "quantidade_final": "Qtd Final",
             "custo_unit": "Custo Unit (R$)", "investimento": "Investimento (R$)",
         })
@@ -433,21 +771,31 @@ def _secao_pedido():
             c1, c2, c3, c4 = st.columns(4)
             with c1:
                 if st.button("💾 Salvar alterações", type="primary", width="stretch"):
-                    # Diff editor × banco: só linhas alteradas (ordem preservada —
-                    # num_rows="fixed" mantém o alinhamento posicional com itens)
-                    alteracoes = [
-                        {"id": iid, "quantidade_final": int(qf)}
-                        for iid, qf, q0 in zip(itens["id"], _qtd_final, itens["quantidade_final"])
-                        if int(qf) != int(q0)
-                    ]
-                    if not alteracoes:
-                        _flash("info", "Nenhuma quantidade alterada.")
+                    # Células novas da grade só viram item se o tamanho existe
+                    # no cadastro ativo — o que não existe volta como aviso.
+                    _incluir, _faltantes = [], []
+                    if _novas:
+                        _incluir, _faltantes = catalogo.resolver_celulas(_catalogo(), _novas)
+                    _aviso = (" Não incluído(s) — tamanho sem cadastro ativo no Bling: "
+                              + ", ".join(_faltantes) + "." if _faltantes else "")
+                    if not _alteracoes and not _incluir:
+                        _flash("warning" if _faltantes else "info",
+                               "Nenhuma quantidade alterada." + _aviso)
                     else:
                         try:
-                            n = repo.atualizar_quantidades(pedido_id, alteracoes, usuario)
-                            _flash("success", f"{n} item(ns) atualizado(s).")
-                        except PedidoNaoEditavel as exc:
+                            n = (repo.atualizar_quantidades(pedido_id, _alteracoes, usuario)
+                                 if _alteracoes else 0)
+                            m = (repo.adicionar_itens(pedido_id, _incluir, usuario)
+                                 if _incluir else 0)
+                            _nova_rev()
+                            _partes = ([f"{n} item(ns) atualizado(s)"] if n else []) + (
+                                [f"{m} tamanho(s) incluído(s)"] if m else [])
+                            _flash("warning" if _faltantes else "success",
+                                   " · ".join(_partes) + "." + _aviso)
+                        except (PedidoNaoEditavel, ItemJaExiste) as exc:
                             _flash("warning", str(exc))
+                        except MigracaoPendente as exc:
+                            _flash("error", str(exc))
                     st.rerun()
             with c2:
                 if st.button("✅ Marcar como Pronto", width="stretch"):

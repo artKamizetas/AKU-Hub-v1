@@ -10,5 +10,7 @@ via API v3 e sincronização com o espelho).
 Módulos:
     estados.py      — máquina de estados pura (constantes + transições)
     builder.py      — puro: DataFrame congelado → payloads (snapshot, grupos)
+    grade.py        — puro: itens ↔ grade SKU pai × tamanho (pivot + diff da edição)
+    catalogo.py     — puro: catálogo de produtos p/ a inclusão manual de itens
     repositorio.py  — ÚNICA porta de escrita/leitura do schema `app`
 """

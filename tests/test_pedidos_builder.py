@@ -154,6 +154,64 @@ class TestAgruparPedidos:
 
 
 # ---------------------------------------------------------------------------
+# memoria_do_grupo — a família inteira no snapshot, inclusive os zerados
+# ---------------------------------------------------------------------------
+def linha_snapshot(sku, colegio, supercat, sugestao, demanda, estoque=0.0, tamanho="P"):
+    """Uma linha do resultado_skus como o jsonb devolve (dict, NaN já virou None)."""
+    return {"SKU": sku, "Produto": f"Prod {sku}", "Tamanho": tamanho,
+            "Colegio": colegio, "SuperCategoria": supercat,
+            "SugestaoProducao": sugestao, "DemandaProjetada": demanda,
+            "EstoqueRede": estoque, "EstoqueProjetado": estoque,
+            "EstoqueMeta": round(demanda), "NivelServico": 92}
+
+
+class TestMemoriaDoGrupo:
+    def test_traz_os_zerados_do_grupo_com_o_motivo(self):
+        snap = [
+            linha_snapshot("A-GG", "LMN", "Calção", 2, 6.4, 7),
+            linha_snapshot("A-G", "LMN", "Calção", 0, 5.0, 12),    # estoque cobre
+            linha_snapshot("B-G", "LMN", "Calção", 0, 0.0, 4),     # sem demanda
+            linha_snapshot("C-P", "LMN", "Camisa", 0, 3.0, 9),     # outra supercategoria
+            linha_snapshot("D-P", "NEVES", "Calção", 0, 3.0, 9),   # outro colégio
+        ]
+        grupo = builder.memoria_do_grupo(snap, "LMN", "Calção")
+        assert {g["sku"]: g["motivo"] for g in grupo} == {
+            "A-GG": builder.MOTIVO_SUGERIDO,
+            "A-G": builder.MOTIVO_COBERTO,
+            "B-G": builder.MOTIVO_SEM_DEMANDA,
+        }
+
+    def test_memoria_no_mesmo_formato_dos_itens(self):
+        snap = [linha_snapshot("A-G", "LMN", "Calção", 0, 5.0, 12, tamanho="G")]
+        g = builder.memoria_do_grupo(snap, "LMN", "Calção")[0]
+        assert g["quantidade_sugerida"] == 0 and g["tamanho"] == "G"
+        assert set(g["memoria"]) == set(builder._DRIVERS_MEMORIA)
+        assert g["memoria"]["demanda_periodo"] == 5.0
+        assert g["memoria"]["estoque_rede"] == 12.0
+        assert g["memoria"]["backlog"] is None      # coluna ausente no snapshot
+
+    def test_grupo_sem_colegio_usa_a_mesma_normalizacao_do_congelamento(self):
+        # SKU pai sem detalhes sai do motor com Colegio/SuperCategoria vazios —
+        # o pedido correspondente foi gravado com os rótulos "(sem ...)"
+        snap = [linha_snapshot("PAI", "", None, 0, 0.0)]
+        assert builder.memoria_do_grupo(snap, "LMN", "Calção") == []
+        grupo = builder.memoria_do_grupo(
+            snap, builder.SEM_COLEGIO, builder.SEM_SUPERCATEGORIA)
+        assert [g["sku"] for g in grupo] == ["PAI"]
+
+    def test_snapshot_vazio_ou_nulo_nao_quebra(self):
+        assert builder.memoria_do_grupo([], "LMN", "Calção") == []
+        assert builder.memoria_do_grupo(None, "LMN", "Calção") == []
+
+    def test_campos_nulos_do_jsonb_viram_zero(self):
+        snap = [{"SKU": "A", "Colegio": "LMN", "SuperCategoria": "Calção",
+                 "SugestaoProducao": None, "DemandaProjetada": None}]
+        g = builder.memoria_do_grupo(snap, "LMN", "Calção")[0]
+        assert g["quantidade_sugerida"] == 0
+        assert g["motivo"] == builder.MOTIVO_SEM_DEMANDA
+
+
+# ---------------------------------------------------------------------------
 # montar_descricao_item — memória de cálculo enxuta p/ o campo do ERP
 # ---------------------------------------------------------------------------
 MEM = {"demanda_periodo": 30.0, "estoque_seguranca": 12.0,
@@ -200,6 +258,16 @@ class TestDescricaoItem:
     def test_driver_faltando_vazio(self):
         mem = dict(MEM, estoque_meta=None)
         assert builder.montar_descricao_item({"memoria_sugerida": mem}, 8, 2026) == ""
+
+    def test_item_manual_diz_que_nao_veio_da_simulacao(self):
+        """Item incluído à mão (DDL 007) não tem conta order-up-to a mostrar."""
+        item = {"origem": "MANUAL", "memoria_sugerida": {}, "quantidade_sugerida": 0,
+                "quantidade_final": 12, "adicionado_por": "gestor@ak"}
+        assert builder.montar_descricao_item(item, 8, 2026) == (
+            "Incluído manualmente por gestor@ak → 12 pç | R08/2026")
+        # veio pela linha do DataFrame (pd.Series), como no payload do Bling
+        assert builder.montar_descricao_item(pd.Series(item), 8, 2026).startswith(
+            "Incluído manualmente por gestor@ak")
 
 
 # ---------------------------------------------------------------------------
