@@ -24,6 +24,11 @@ from pedidos.repositorio import obter_repositorio, RodadaJaCongelada
 
 from etl.loader import carregar_config, fingerprint_config
 from ui_carga import carregar_com_feedback, rodape_frescor
+from ui_tabelas import (
+    FILA, MEMORIA, EDITOR, exibir, padrao_tabela, num, brl,
+    col_sku, col_produto, col_colegio, col_tamanho, col_texto,
+    col_pecas, col_moeda, col_pct,
+)
 
 
 dados, config = carregar_com_feedback()
@@ -263,11 +268,11 @@ with st.container(border=True):
             def _bloco_kpis(rods):
                 dem, prod, inv, custo, cob = _kpis(rods)
                 k1, k2, k3, k4 = st.columns(4)
-                k1.metric("Demanda", f"{dem:,.0f} pçs")
-                k2.metric("Produção", f"{prod:,.0f} pçs",
+                k1.metric("Demanda", f"{num(dem)} pçs")
+                k2.metric("Produção", f"{num(prod)} pçs",
                           delta=f"cobre {cob:.0f}% da demanda", delta_color="off")
-                k3.metric("Investimento", f"R$ {inv:,.2f}")
-                k4.metric("Custo Médio", f"R$ {custo:.2f}/pç")
+                k3.metric("Investimento", brl(inv, 2))
+                k4.metric("Custo Médio", f"{brl(custo, 2)}/pç")
 
             rodadas_ano = [r for r in rodadas if r["ano_chegada"] == ano_atual]
 
@@ -282,7 +287,7 @@ with st.container(border=True):
             _bloco_kpis(rodadas)
 
             st.caption(f"Estoque líquido atual da rede (ponto de partida da projeção): "
-                       f"{sim['totais'].get('estoque_inicial', 0):,.0f} pçs")
+                       f"{num(sim['totais'].get('estoque_inicial', 0))} pçs")
 
         # --- Resumo das rodadas (comparação de relance) ANTES do detalhe ---
         st.subheader("🏭 Rodadas de Produção")
@@ -300,8 +305,9 @@ with st.container(border=True):
             "Rodada": r["rodada"],
             "_iso": r["data_disparo_iso"],
             "Disparo → Chegada": f"{r['nome_disparo']} → {r['nome_chegada']}/{r['ano_chegada']}",
-            "Demanda": r["demanda_periodo"],
-            "Produção": r["producao"],
+            # arredondado aqui: o Streamlit TRUNCA na precisão da coluna
+            "Demanda": round(r["demanda_periodo"]),
+            "Produção": round(r["producao"]),
             "% anual": r["pct_anual"],
             "Cobertura natural": float(round(_nat_por_iso.get(r["data_disparo_iso"], 0) * 100)),
             # NaN (não None) quando NÃO há antecipação → célula VAZIA no editor.
@@ -320,7 +326,7 @@ with st.container(border=True):
             _cols_ro = _cols_ro + ["Cobertura alvo"]
 
         resumo_edit = st.data_editor(
-            resumo, hide_index=True, width="stretch", key="editor_cobertura_alvo",
+            resumo, **padrao_tabela(EDITOR, len(resumo)), key="editor_cobertura_alvo",
             disabled=_cols_ro,
             column_config={
                 "Rodada": st.column_config.NumberColumn(
@@ -333,14 +339,14 @@ with st.container(border=True):
                     help="Quando a produção é disparada e quando as peças chegam "
                          "prontas para vender. O intervalo entre os dois é o lead "
                          "time de fabricação."),
-                "Demanda": st.column_config.NumberColumn(
-                    "Demanda (pçs)", format="%.0f",
-                    help="Quantas peças o mercado deve pedir no período que esta "
+                "Demanda": col_pecas(
+                    "Demanda (pçs)", largura=None,
+                    ajuda="Quantas peças o mercado deve pedir no período que esta "
                          "rodada precisa cobrir (da chegada dela até a próxima rodada "
                          "chegar). É a necessidade — não o que será fabricado."),
-                "Produção": st.column_config.NumberColumn(
-                    "Produção (pçs)", format="%.0f",
-                    help="Quantas peças fabricar nesta rodada. Pode ser menor que a "
+                "Produção": col_pecas(
+                    "Produção (pçs)", largura=None,
+                    ajuda="Quantas peças fabricar nesta rodada. Pode ser menor que a "
                          "demanda porque o estoque que você já tem (e o que rodadas "
                          "anteriores anteciparam) abate parte da necessidade."),
                 "% anual": st.column_config.NumberColumn(
@@ -369,9 +375,9 @@ with st.container(border=True):
                     help="Data em que a proteção desta rodada termina. Normalmente é "
                          "quando a próxima rodada chega; o ícone ⬆ indica que a "
                          "cobertura alvo esticou essa data para frente."),
-                "Investimento": st.column_config.NumberColumn(
-                    "Investimento", format="R$ %.2f",
-                    help="Custo de fabricar as peças desta rodada (produção × custo "
+                "Investimento": col_moeda(
+                    "Investimento", casas=2,
+                    ajuda="Custo de fabricar as peças desta rodada (produção × custo "
                          "unitário de cada SKU). É quanto de capital a rodada imobiliza."),
             },
         )
@@ -443,17 +449,17 @@ with st.container(border=True):
         for _, r in rodadas_df.iterrows():
             with st.expander(f"Rodada {r['rodada']} — {r['nome_disparo']} → chega {r['nome_chegada']}/{r['ano_chegada']}"):
                 cols = st.columns(4)
-                cols[0].metric("Demanda no período", f"{r['demanda_periodo']:,.0f}")
-                cols[1].metric("Produção", f"{r['producao']:,.0f}", f"{r['pct_anual']:.0f}% da demanda anual",
+                cols[0].metric("Demanda no período", num(r['demanda_periodo']))
+                cols[1].metric("Produção", num(r['producao']), f"{r['pct_anual']:.0f}% da demanda anual",
                                delta_color="off")
-                cols[2].metric("Custo médio pond.", f"R$ {r['custo_medio_ponderado']:.2f}")
-                cols[3].metric("Investimento", f"R$ {r['investimento']:,.2f}")
+                cols[2].metric("Custo médio pond.", brl(r['custo_medio_ponderado'], 2))
+                cols[3].metric("Investimento", brl(r['investimento'], 2))
 
                 st.markdown(
                     f"**Como se chega na produção:**  \n"
-                    f"Alvo (demanda {r['demanda_periodo']:,.0f} + segurança {r['seguranca']:,.0f}) = **{r['sem_estoque']:,.0f}** "
-                    f"→ (−) estoque existente útil **{r['abate_estoque']:,.0f}** "
-                    f"→ **produção {r['producao']:,.0f} pares**"
+                    f"Alvo (demanda {num(r['demanda_periodo'])} + segurança {num(r['seguranca'])}) = **{num(r['sem_estoque'])}** "
+                    f"→ (−) estoque existente útil **{num(r['abate_estoque'])}** "
+                    f"→ **produção {num(r['producao'])} peças**"
                 )
                 st.caption(
                     "O estoque é abatido SKU a SKU (item×tamanho) — estoque no tamanho errado não abate. "
@@ -463,7 +469,10 @@ with st.container(border=True):
                 detalhe_col = r["detalhe_por_colegio"]
                 if len(detalhe_col) > 0:
                     st.caption("Produção por colégio nesta rodada:")
-                    st.dataframe(detalhe_col, hide_index=True, width="stretch")
+                    exibir(detalhe_col, MEMORIA, {
+                        "Colegio": col_colegio(),
+                        "Producao": col_pecas("Produção (pçs)"),
+                    })
 
         # --- Demanda vs Produção ---
         # Janela real de 12 meses a partir de hoje, datada (Mês/Ano) — as duas
@@ -483,12 +492,12 @@ with st.container(border=True):
         fig_dem.add_trace(go.Bar(
             x=df_est["Rotulo"], y=df_est["Demanda"], name="Demanda",
             marker_color=COR_DEMANDA,
-            text=df_est["Demanda"].apply(lambda x: f"{x:,.0f}"), textposition="outside",
+            text=df_est["Demanda"].apply(num), textposition="outside",
         ))
         fig_dem.add_trace(go.Bar(
             x=df_est["Rotulo"], y=df_est["Entrada"], name="Entrada (produção)",
             marker_color=COR_PRODUCAO,
-            text=df_est["Entrada"].apply(lambda x: f"{x:,.0f}" if x > 0 else ""), textposition="outside",
+            text=df_est["Entrada"].apply(lambda x: num(x) if x > 0 else ""), textposition="outside",
         ))
         fig_dem.update_layout(
             barmode="group", height=380, yaxis_title="Peças",
@@ -510,7 +519,7 @@ with st.container(border=True):
             mode="lines+markers+text", name="Estoque Final",
             line=dict(color=COR_ESTOQUE, width=3),
             marker=dict(size=10, color=cores_est, line=dict(color=COR_ESTOQUE, width=2)),
-            text=[f"{e:,.0f}" for e in df_est["EstoqueFinal"]], textposition="top center",
+            text=[num(e) for e in df_est["EstoqueFinal"]], textposition="top center",
         ))
         fig_est.add_hline(y=0, line_dash="dash", line_color=COR_ALERTA,
                           annotation_text="⚠️ Ruptura", annotation_position="bottom right")
@@ -565,19 +574,40 @@ with st.container(border=True):
                         return "background-color: #FFF9C4"
                 return ""
 
-            styled = df_detalhe.style.map(_cor_estoque, subset=["Estoque Final"])
-            st.dataframe(styled, width="stretch", hide_index=True)
+            # Com Styler o número é formatado AQUI (pt-BR fixo), não no column_config.
+            _pecas = ["Entrada (pçs)", "Saída (pçs)", "Estoque Final"]
+            styled = (df_detalhe.style
+                      .map(_cor_estoque, subset=["Estoque Final"])
+                      .format({c: num for c in _pecas})
+                      .format({"Sazonalidade": lambda v: num(v, 3)}))
+            exibir(styled, MEMORIA, {
+                "Mês": col_texto("Mês", largura="small"),
+                "Sazonalidade": st.column_config.NumberColumn(
+                    "Sazonalidade", help="Peso do mês na demanda do ano (soma = 1)."),
+            })
 
 # =================================================================
 # QUADRO 2: SUGESTÃO POR SKU (tático)
 # =================================================================
 # Colunas: enxuta (decisão) por padrão; memória de cálculo (auditoria) sob toggle.
+# Ordem de leitura: identidade → DECISÃO (sugestão, investimento) → evidência
+# (a conta que leva à sugestão: demanda, alvo, projetado, estoque de hoje).
 COLS_LEAN = [
-    "SKU", "Produto", "Tamanho", "Colegio", "EstoqueRede", "Backlog",
-    "DemandaProjetada", "EstoqueMeta", "EstoqueProjetado",
+    "SKU", "Produto", "Tamanho", "Colegio",
     "SugestaoProducao", "InvestimentoFabril",
+    "DemandaProjetada", "EstoqueMeta", "EstoqueProjetado",
+    "EstoqueRede", "Backlog",
 ]
 COLS_FULL = [
+    "SKU", "Produto", "Tamanho", "Colegio", "Grupo", "Categoria",
+    "SugestaoProducao", "InvestimentoFabril",
+    "VendasHist", "DemandaProjetada", "DemandaPeriodoAlta", "DemandaPeriodoBaixa",
+    "EstoqueSeguranca", "EstoqueMeta", "EstoqueProjetado",
+    "EstoqueRede", "Backlog", "NivelServico", "CustoUnit",
+]
+# O CSV mantém a ordem ANTIGA de propósito: planilha que o consome por posição
+# não pode quebrar porque a tela foi reordenada.
+COLS_EXPORT = [
     "SKU", "Produto", "Tamanho", "Colegio", "Grupo", "Categoria",
     "VendasHist", "EstoqueRede", "Backlog",
     "DemandaProjetada", "DemandaPeriodoAlta", "DemandaPeriodoBaixa",
@@ -658,9 +688,9 @@ with st.container(border=True):
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("SKUs para Produzir", len(skus_produzir))
-    c2.metric("Total de Pares", f"{total_pares:,.0f}")
-    c3.metric("Investimento Fabril", f"R$ {total_investimento:,.2f}")
-    c4.metric("Backlog (Em Carteira)", f"{backlog_total:,.0f} pçs",
+    c2.metric("Total de Peças", num(total_pares))
+    c3.metric("Investimento Fabril", brl(total_investimento, 2))
+    c4.metric("Backlog (Em Carteira)", f"{num(backlog_total)} pçs",
               help="Já embutido no Est. Projetado — consome estoque antes de repor")
 
     # --- Filtros em uma linha ---
@@ -679,13 +709,13 @@ with st.container(border=True):
         cats = cats[cats.ne("") & cats.ne("nan")]
         filtro_cat = st.selectbox("Categoria", ["Todas"] + sorted(cats.unique().tolist()))
     with f4:
-        exibir = st.segmented_control(
+        filtro_exibir = st.segmented_control(
             "Exibir", ["Com produção", "Todos"], default="Com produção",
             help="'Com produção' mostra só SKUs com sugestão > 0",
         )
 
     df_filtrado = df.copy()
-    if exibir != "Todos":
+    if filtro_exibir != "Todos":
         df_filtrado = df_filtrado[df_filtrado["SugestaoProducao"] > 0]
     if filtro_colegio:
         df_filtrado = df_filtrado[df_filtrado["Colegio"].isin(filtro_colegio)]
@@ -711,31 +741,47 @@ with st.container(border=True):
 
     colunas_visiveis = COLS_FULL if ver_memoria else COLS_LEAN
     _column_config = {
-        "Tamanho": st.column_config.TextColumn("Tam."),
-        "VendasHist": st.column_config.NumberColumn("Vendas Alta", help="Vendas da última temporada de alta (histórico cru, sem crescimento) — só os meses de pico"),
-        "EstoqueRede": st.column_config.NumberColumn("Est. Rede", help="Saldo físico em todos os depósitos hoje"),
-        "DemandaProjetada": st.column_config.NumberColumn(f"Demanda do Período ({_cobre})", format="%.1f", help="Demanda projetada da chegada desta rodada até a próxima chegar = 'na alta' + 'na baixa'"),
-        "DemandaPeriodoAlta": st.column_config.NumberColumn("· na alta", format="%.1f", help="Parcela da Demanda do Período nos meses de pico (vendas reais × crescimento)"),
-        "DemandaPeriodoBaixa": st.column_config.NumberColumn("· na baixa", format="%.1f", help="Parcela da Demanda do Período nos meses de baixa (demanda de baixa espalhada)"),
-        "EstoqueSeguranca": st.column_config.NumberColumn("Segurança", format="%.1f", help="Estoque de segurança pelo nível de serviço"),
-        "EstoqueMeta": st.column_config.NumberColumn("Alvo (S)", help="Nível-alvo order-up-to = demanda do período + segurança"),
-        "EstoqueProjetado": st.column_config.NumberColumn("Est. Projetado", format="%.1f", help="Estoque projetado na chegada da rodada (já desconta consumo e chegadas anteriores). O de HOJE está em Est. Rede"),
-        "SugestaoProducao": st.column_config.NumberColumn("Sugestão (pares)", help="Pedido = Alvo − Est. Projetado, arredondado a par"),
-        "NivelServico": st.column_config.NumberColumn("NS %", help="Nível de serviço aplicado (alta vs baixa)"),
-        "CustoUnit": st.column_config.NumberColumn("Custo Unit (R$)", format="R$ %.2f"),
-        "InvestimentoFabril": st.column_config.NumberColumn("Investimento (R$)", format="R$ %.2f"),
+        "SKU": col_sku(),
+        # Na visão enxuta sobra largura para o nome inteiro; com a memória de
+        # cálculo (19 colunas) o nome cede espaço aos números.
+        "Produto": col_produto(largura="medium" if ver_memoria else "large"),
+        "Tamanho": col_tamanho(),
+        "Colegio": col_colegio(),
+        "SugestaoProducao": col_pecas(
+            "Sugestão (pçs)", largura=None,
+            ajuda="Pedido = Alvo − Est. Projetado, arredondado para cima a número par"),
+        "InvestimentoFabril": col_moeda("Investimento", casas=2),
+        "VendasHist": col_pecas(
+            "Vendas Alta",
+            ajuda="Vendas da última temporada de alta (histórico cru, sem crescimento) — só os meses de pico"),
+        "DemandaProjetada": col_pecas(
+            "Demanda do período", casas=1, largura=None,
+            ajuda=f"Demanda projetada da chegada desta rodada até a próxima chegar ({_cobre}) = 'na alta' + 'na baixa'"),
+        "DemandaPeriodoAlta": col_pecas(
+            "· na alta", casas=1,
+            ajuda="Parcela da Demanda do Período nos meses de pico (vendas reais × crescimento)"),
+        "DemandaPeriodoBaixa": col_pecas(
+            "· na baixa", casas=1,
+            ajuda="Parcela da Demanda do Período nos meses de baixa (demanda de baixa espalhada)"),
+        "EstoqueSeguranca": col_pecas(
+            "Segurança", casas=1, ajuda="Estoque de segurança pelo nível de serviço"),
+        "EstoqueMeta": col_pecas(
+            "Alvo", ajuda="Nível-alvo order-up-to (S) = demanda do período + segurança"),
+        "EstoqueProjetado": col_pecas(
+            "Est. Projetado", casas=1, largura=None,
+            ajuda="Estoque projetado na chegada da rodada (já desconta consumo e chegadas anteriores). O de HOJE está em Est. Rede"),
+        "EstoqueRede": col_pecas("Est. Rede", ajuda="Saldo físico em todos os depósitos hoje"),
+        "Backlog": col_pecas(
+            "Backlog", ajuda="Peças vendidas e ainda não entregues — já abatidas no Est. Projetado"),
+        "NivelServico": col_pct("NS", ajuda="Nível de serviço aplicado (alta vs baixa)"),
+        "CustoUnit": col_moeda("Custo Unit", casas=2, largura="small"),
     }
 
-    st.dataframe(
-        df_filtrado[colunas_visiveis],
-        width="stretch", hide_index=True,
-        height=640,
-        column_config=_column_config,
-    )
+    exibir(df_filtrado[colunas_visiveis], FILA, _column_config)
     st.caption(
         f"**{len(df_filtrado)}** SKUs | "
-        f"**{df_filtrado['SugestaoProducao'].sum():,.0f}** pares totais | "
-        f"**R$ {df_filtrado['InvestimentoFabril'].sum():,.2f}** investimento"
+        f"**{num(df_filtrado['SugestaoProducao'].sum())}** peças | "
+        f"**{brl(df_filtrado['InvestimentoFabril'].sum(), 2)}** investimento"
     )
 
     # --- Top 10 por investimento (barra única — o comprimento já é o investimento) ---
@@ -744,7 +790,7 @@ with st.container(border=True):
         top10 = skus_produzir.nlargest(10, "InvestimentoFabril")
         fig_top = px.bar(
             top10, x="SKU", y="InvestimentoFabril",
-            text=top10["InvestimentoFabril"].apply(lambda x: f"R$ {x:,.0f}"),
+            text=top10["InvestimentoFabril"].apply(brl),
             hover_data={"SugestaoProducao": True, "Colegio": True},
         )
         fig_top.update_traces(marker_color=COR_DEMANDA, textposition="outside")
@@ -754,23 +800,20 @@ with st.container(border=True):
 
     # --- Exportar (CSV sempre com a memória de cálculo completa) ---
     st.subheader("Exportar")
-    df_export = df_filtrado[COLS_FULL].copy()
+    df_export = df_filtrado[COLS_EXPORT].copy()
     df_export = df_export.rename(columns={
         "Produto": "Descrição", "Tamanho": "Tam", "Colegio": "Colégio",
         "VendasHist": "Vendas Alta", "EstoqueRede": "Estoque Rede",
         "DemandaProjetada": f"Demanda do Período ({_cobre})",
         "DemandaPeriodoAlta": "Demanda na alta", "DemandaPeriodoBaixa": "Demanda na baixa",
         "EstoqueSeguranca": "Estoque Segurança", "EstoqueMeta": "Alvo (S)",
-        "EstoqueProjetado": "Estoque Projetado", "SugestaoProducao": "Sugestão (pares)",
+        "EstoqueProjetado": "Estoque Projetado", "SugestaoProducao": "Sugestão (pçs)",
         "NivelServico": "Nível Serviço (%)", "CustoUnit": "Custo Unit (R$)",
         "InvestimentoFabril": "Investimento (R$)",
     })
 
-    def _fmt_brl(x):
-        return f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-
-    df_export["Custo Unit (R$)"] = df_export["Custo Unit (R$)"].apply(_fmt_brl)
-    df_export["Investimento (R$)"] = df_export["Investimento (R$)"].apply(_fmt_brl)
+    df_export["Custo Unit (R$)"] = df_export["Custo Unit (R$)"].apply(brl, casas=2)
+    df_export["Investimento (R$)"] = df_export["Investimento (R$)"].apply(brl, casas=2)
 
     linhas_param = [
         "# Sugestão de Produção (order-up-to)",

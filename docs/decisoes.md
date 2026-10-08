@@ -9,6 +9,42 @@ Records). Adicione no topo as mais recentes.
 
 ---
 
+## 2026-10 · Padrão único das tabelas (`ui_tabelas.py`)
+As 27 tabelas do app nasceram tela a tela: quatro alturas soltas (400/500/560/640),
+cinco formatadores de R$ duplicados em quatro páginas, `R$ 125430` sem ponto de
+milhar, KPIs em formato americano e a mesma grandeza com três nomes ("Sugestão Qtd",
+"Sugestão (pares)", "Qtd Sugerida"). A Logística mostrava 10 linhas de uma lista de
+quase 3 mil SKUs porque não definia altura.
+
+- **A página declara o TRABALHO da tabela, não o desenho.** Quatro tipos:
+  `FILA` (percorre e age), `MEMORIA` (confere a conta), `PLACAR` (compara poucos
+  itens), `EDITOR` (digita). Cada um carrega altura de linha e teto de linhas.
+- **Linha de 28 px só em FILA e MEMORIA**; PLACAR e EDITOR ficam em 35 px. Em
+  editor, linha apertada aumenta o clique na célula errada — e ali o erro vira
+  quantidade emitida. Operadores usam desktop Full HD (24 linhas de fila cabem
+  sem rolar a página); em tela de toque o 28 teria de ser revisto.
+- **`format="localized"`, não printf.** O printf do Streamlit não agrupa milhar em
+  idioma nenhum. O `localized` segue o idioma do NAVEGADOR (`125.430` em pt-BR,
+  `125,430` em inglês) — degradação aceita. A alternativa determinística (Styler
+  do pandas) custa caro em tabela de milhares de linhas e não vale para coluna
+  editável; ficou só onde já havia Styler por causa de cor (Mês a mês).
+- **`exibir()` arredonda antes de mostrar.** O Streamlit TRUNCA o número na
+  precisão da coluna (15.482,9 aparecia 15.482). Por isso tabela de leitura passa
+  por `exibir()`, não por `st.dataframe` direto.
+- **Unidade no cabeçalho** ("Investimento (R$)"), não repetida em cada célula.
+- **Cor só para exceção.** Saiu o fundo verde da sugestão na Logística (pintava
+  toda linha com sugestão > 0); ficou o vermelho/amarelo do estoque projetado
+  negativo/zerado no Mês a mês.
+- **"Peças", não "pares"**, em todo o app (decisão da diretoria).
+- **Tabela de rodadas congeladas removida** da 4_Pedidos: o seletor logo abaixo
+  fazia a mesma escolha; quem/quando virou legenda da rodada escolhida. No lote
+  saiu a coluna Título, que dentro de uma rodada só repete Colégio + Super Categoria.
+- **Fora do alcance, de propósito:** os CSVs exportados mantêm cabeçalhos e ordem
+  de colunas antigos (planilha que os consome por posição não pode quebrar); as
+  colunas decimais dos EDITORES de Configurações (PA, taxas) seguem com ponto —
+  trocar o `step` mudaria a precisão aceita num caminho de escrita; números dentro
+  de gráficos Plotly do Daily seguem no formato do Plotly.
+
 ## 2026-10 · Revisão do rascunho enxerga a família inteira (zerados do snapshot)
 O painel "Por que essas quantidades?" da 4_Pedidos só mostrava os SKUs que viraram
 item — e item só nasce de sugestão > 0. Quem revisava o pedido `LMN · Calção` via

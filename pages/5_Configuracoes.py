@@ -34,6 +34,9 @@ from datetime import datetime, date
 import pandas as pd
 
 from etl.loader import carregar_dados, carregar_config
+from ui_tabelas import (
+    EDITOR, MEMORIA, exibir, padrao_tabela, brl, col_texto, col_moeda,
+)
 from etl.config_store import extrair_parametros, obter_repositorio_parametros
 from pedidos.integracoes.repositorio import obter_repositorio_integracoes
 from pedidos.integracoes import oauth, bling as cliente_bling, olist as cliente_olist
@@ -77,7 +80,7 @@ def _brl_cfg(v) -> str:
     """Real no formato pt-BR (milhar '.', decimal ',')."""
     if v is None:
         return "—"
-    return "R$ " + f"{v:,.0f}".replace(",", "\x00").replace(".", ",").replace("\x00", ".")
+    return brl(v)
 
 # =================================================================
 # FUNÇÕES AUXILIARES
@@ -626,20 +629,20 @@ with tab1:
             df_metas_base,
             column_config={
                 "mes": st.column_config.TextColumn("Mês", disabled=True, width="small"),
-                "fat_prata": st.column_config.NumberColumn("🥈 Prata (R$)", min_value=0.0, step=1000.0, format="R$ %.0f"),
-                "fat_ouro": st.column_config.NumberColumn("🥇 Ouro (R$)", min_value=0.0, step=1000.0, format="R$ %.0f"),
-                "fat_diamante": st.column_config.NumberColumn("💎 Diamante (R$)", min_value=0.0, step=1000.0, format="R$ %.0f"),
+                "fat_prata": st.column_config.NumberColumn("🥈 Prata (R$)", min_value=0.0, step=1000.0, format="localized"),
+                "fat_ouro": st.column_config.NumberColumn("🥇 Ouro (R$)", min_value=0.0, step=1000.0, format="localized"),
+                "fat_diamante": st.column_config.NumberColumn("💎 Diamante (R$)", min_value=0.0, step=1000.0, format="localized"),
                 "pa_prata": st.column_config.NumberColumn("🥈 Prata (PA)", min_value=0.0, step=0.1, format="%.2f"),
                 "pa_ouro": st.column_config.NumberColumn("🥇 Ouro (PA)", min_value=0.0, step=0.1, format="%.2f"),
                 "pa_diamante": st.column_config.NumberColumn("💎 Diamante (PA)", min_value=0.0, step=0.1, format="%.2f"),
-                "ref_fat": st.column_config.NumberColumn(
-                    f"Realizado {ano_meta - 1} (R$)", disabled=True, format="R$ %.0f",
-                    help="Faturamento do mesmo mês no ano anterior — a referência para calibrar a meta."),
+                "ref_fat": col_moeda(
+                    f"Realizado {ano_meta - 1}", disabled=True,
+                    ajuda="Faturamento do mesmo mês no ano anterior — a referência para calibrar a meta."),
                 "ref_pa": st.column_config.NumberColumn(
                     f"PA {ano_meta - 1}", disabled=True, format="%.2f",
                     help="PA do mesmo mês no ano anterior."),
             },
-            hide_index=True, width="stretch",
+            **padrao_tabela(EDITOR, len(df_metas_base)),
             key=f"editor_metas_{ano_meta}_{loja_meta}_{_versao}",
         )
 
@@ -752,7 +755,7 @@ with tab1:
                     "ativo": st.column_config.CheckboxColumn(
                         "Ativo", help="Desmarcado = não entra no rateio nem no acompanhamento do mês."),
                 },
-                hide_index=True, width="stretch", key=f"editor_vendedores_{comp_vend}",
+                **padrao_tabela(EDITOR, len(df_vend)), key=f"editor_vendedores_{comp_vend}",
             )
 
             # Rateio da atribuição SALVA/herdada: dentro do form o editor não
@@ -842,7 +845,7 @@ with tab1:
                 "sugestao": st.column_config.TextColumn("Sugestão", disabled=True,
                                                         help="Heurística: valor sem letra parece ruído → sugere 'Outros'"),
             },
-            hide_index=True, width="stretch", height=400, key="editor_colegios_alias",
+            **padrao_tabela(EDITOR, len(df_alias)), key="editor_colegios_alias",
         )
 
         _salvar_alias = st.form_submit_button("💾 Salvar Normalização de Colégios", key="btn_salvar_alias", type="primary")
@@ -918,8 +921,7 @@ with tab1:
                 "proporcao_baixa": st.column_config.NumberColumn("Proporção baixa", min_value=0.0, step=0.05, format="%.3f",
                                                                  help=f"Cauda da baixa vs alta. Global (default) = {prop_global}"),
             },
-            hide_index=True,
-            width="stretch",
+            **padrao_tabela(EDITOR, len(df_colegios)),
             key="editor_colegios",
         )
 
@@ -1000,9 +1002,7 @@ with tab1:
                 "origem": st.column_config.TextColumn("Origem", disabled=True,
                                                       help="manual = você definiu · medido = dos dados · padrão = fallback global"),
             },
-            hide_index=True,
-            width="stretch",
-            height=500,
+            **padrao_tabela(EDITOR, len(df_matriz)),
             key="editor_matriz_grupo",
         )
 
@@ -1067,7 +1067,7 @@ with tab1:
                 "skus": st.column_config.NumberColumn("SKUs", disabled=True),
                 "segmento": st.column_config.TextColumn("Segmento", help="Nome do balde — pode reutilizar ou criar novos"),
             },
-            hide_index=True, width="stretch", height=500, key="editor_grupo_seg",
+            **padrao_tabela(EDITOR, len(df_seg)), key="editor_grupo_seg",
         )
 
         _salvar_seg = st.form_submit_button("💾 Salvar Agrupamento de Segmentos", key="btn_salvar_seg", type="primary")
@@ -1158,7 +1158,7 @@ with tab2:
                 if not all(col in df_novo.columns for col in colunas_obrigatorias):
                     st.error(f"❌ Colunas obrigatórias: {', '.join(colunas_obrigatorias)}")
                 else:
-                    st.dataframe(df_novo, width="stretch")
+                    exibir(df_novo, MEMORIA)
 
                     if st.button("✅ Aplicar Exceções", key="btn_aplicar_sku", type="primary"):
                         # Converter para dict
@@ -1508,12 +1508,20 @@ with tab_int:
                 _cols = [c for c in ["criado_em", "plataforma", "acao", "sucesso",
                                      "detalhe", "criado_por"]
                          if c in _eventos.columns]
-                st.dataframe(
-                    _eventos[_cols], width="stretch", hide_index=True,
-                    column_config={"detalhe": st.column_config.TextColumn(
-                        "Detalhe / erro", width="large",
-                        help="Motivo da falha ou resumo do evento (campo detalhe do log)")},
-                )
+                if "criado_em" in _eventos.columns:
+                    _eventos["criado_em"] = (
+                        pd.to_datetime(_eventos["criado_em"], errors="coerce", utc=True)
+                        .dt.tz_convert("America/Fortaleza").dt.strftime("%d/%m/%Y %H:%M"))
+                exibir(_eventos[_cols], MEMORIA, {
+                    "criado_em": col_texto("Quando"),
+                    "plataforma": col_texto("Plataforma", largura="small"),
+                    "acao": col_texto("Ação"),
+                    "sucesso": st.column_config.CheckboxColumn("Deu certo", width="small"),
+                    "detalhe": col_texto(
+                        "Detalhe / erro", largura="large",
+                        ajuda="Motivo da falha ou resumo do evento (campo detalhe do log)"),
+                    "criado_por": col_texto("Por"),
+                })
             else:
                 st.caption("Nenhum evento ainda.")
 
@@ -1601,7 +1609,7 @@ with tab_usr:
                 },
                 # Usuário novo nasce no formulário acima, nunca aqui: um e-mail
                 # digitado errado no grid viraria linha morta que nunca loga.
-                num_rows="fixed", hide_index=True, width="stretch", key="editor_usuarios",
+                num_rows="fixed", **padrao_tabela(EDITOR, len(_df_usr)), key="editor_usuarios",
             )
             _salvar_usr = st.form_submit_button("💾 Salvar alterações", type="primary")
 
@@ -1676,6 +1684,13 @@ with tab3:
                 st.write("**Parâmetros:** ainda não semeados (rode scripts/seed_parametros.py)")
         except Exception:
             st.write("**Parâmetros:** Supabase indisponível — usando defaults do config.yaml")
+
+    # Veio da Home: os IDs internos servem a quem configura, não a quem vende.
+    with st.expander("🏬 Depósitos cadastrados (IDs do Bling)"):
+        exibir(carregar_dados()["depositos"][["ID", "descricao"]], MEMORIA, {
+            "ID": col_texto("ID"),
+            "descricao": col_texto("Nome"),
+        })
 
     st.markdown("---")
 

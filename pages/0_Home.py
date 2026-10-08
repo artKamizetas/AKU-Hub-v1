@@ -6,6 +6,7 @@ import streamlit as st
 from auth import exigir_login
 exigir_login()
 from ui_carga import carregar_com_feedback, rodape_frescor
+from ui_tabelas import PLACAR, exibir, num, brl, col_texto, col_pecas
 
 
 dados, config = carregar_com_feedback()
@@ -26,27 +27,21 @@ st.success("✅ Dados carregados com sucesso")
 col1, col2, col3, col4, col5 = st.columns(5)
 
 with col1:
-    st.metric("SKUs Ativos", len(dados["produtos"]))
+    st.metric("SKUs Ativos", num(len(dados["produtos"])))
 with col2:
     estoque_total = dados["estoque"]["saldoFisico"].sum()
-    st.metric("Peças em Estoque (Rede)", f"{estoque_total:,.0f}")
+    st.metric("Peças em Estoque (Rede)", num(estoque_total))
 with col3:
     pecas_vendidas = dados["itens"]["Quantidade"].sum()
-    st.metric("Peças Vendidas", f"{pecas_vendidas:,.0f}")
+    st.metric("Peças Vendidas", num(pecas_vendidas))
 with col4:
     vendas_total = dados["pedidos"]["Total Venda"].sum()
-    st.metric("Faturamento Total (R$)", f"R$ {vendas_total:,.2f}")
+    st.metric("Faturamento Total", brl(vendas_total, 2))
 with col5:
     st.metric("Lojas Ativas", len(config["depositos"]["lojas"]))
 
-# Depósitos
-st.subheader("Depósitos Cadastrados")
-st.dataframe(
-    dados["depositos"][["ID", "descricao"]].rename(
-        columns={"ID": "ID", "descricao": "Nome"}
-    ),
-    width="stretch", hide_index=True,
-)
+# A lista de depósitos com os IDs internos saiu daqui: é informação de sistema
+# (Configurações → Sistema), não de quem abre a Home para ver como a rede está.
 
 # Estoque por depósito
 st.subheader("Estoque por Depósito")
@@ -60,7 +55,10 @@ est_dep = (
     .rename(columns={"saldoFisico": "Total Peças"})
     .sort_values("Total Peças", ascending=False)
 )
-st.dataframe(est_dep, width="stretch", hide_index=True)
+exibir(est_dep, PLACAR, {
+    "Deposito": col_texto("Depósito"),
+    "Total Peças": col_pecas("Total (pçs)", largura=None),
+})
 
 st.divider()
 st.caption(f"Fonte: {config['fonte']['nome']}")

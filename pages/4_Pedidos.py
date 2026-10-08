@@ -25,6 +25,10 @@ from pedidos.repositorio import (
 )
 from pedidos.integracoes.repositorio import obter_repositorio_integracoes
 from ui_carga import carregar_com_feedback
+from ui_tabelas import (
+    FILA, MEMORIA, EDITOR, exibir, padrao_tabela, num, brl,
+    col_sku, col_produto, col_colegio, col_tamanho, col_texto, col_pecas, col_moeda,
+)
 
 # Gate de admin (login + role numa chamada). `usuario` é o e-mail: alimenta as
 # colunas de auditoria de toda escrita desta página.
@@ -44,7 +48,7 @@ def _flash(nivel: str, texto: str):
 
 
 def _fmt_brl(x: float) -> str:
-    return f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return brl(x, 2)
 
 
 def _executar_lote(pedidos_alvo, fn_por_pedido):
@@ -100,6 +104,23 @@ _MEMORIA_COLS = {
     "estoque_projetado": "Projetado na chegada",
 }
 
+
+# Mesmo vocabulário da Sugestão por SKU do Simulador — é a mesma conta.
+_MEMORIA_CONFIG = {
+    "SKU": col_sku(),
+    "Situação": col_texto("Situação"),
+    "Vendas hist. (alta)": col_pecas("Vendas Alta", casas=1),
+    "Demanda período": col_pecas("Demanda do período", casas=1, largura=None),
+    "…alta": col_pecas("· na alta", casas=1),
+    "…baixa": col_pecas("· na baixa", casas=1),
+    "Estoque segurança": col_pecas("Segurança", casas=1),
+    "Estoque-alvo": col_pecas("Alvo", casas=1),
+    "Estoque rede": col_pecas("Est. Rede", casas=1),
+    "Backlog": col_pecas("Backlog", casas=1),
+    "Projetado na chegada": col_pecas("Est. Projetado", casas=1, largura=None),
+    "Nível serviço": col_texto("NS", largura="small"),
+    "Qtd sugerida": col_pecas("Sugerida (pçs)", largura=None),
+}
 
 _SITUACAO_NO_PEDIDO = "No pedido"
 
@@ -213,8 +234,7 @@ def _memoria_sugestao(itens: pd.DataFrame, pedido_sel) -> None:
             return
 
         linhas.sort(key=lambda linha: linha["_ordem"])
-        st.dataframe(pd.DataFrame(linhas).drop(columns="_ordem"),
-                     width="stretch", hide_index=True)
+        exibir(pd.DataFrame(linhas).drop(columns="_ordem"), MEMORIA, _MEMORIA_CONFIG)
 
 
 # =================================================================
@@ -340,7 +360,7 @@ def _adicionar_produto(pedido_sel, itens: pd.DataFrame, pendente: bool) -> None:
         linha = pd.DataFrame([{t: None for t in tamanhos}]).astype("Int64")
         editada = st.data_editor(
             linha, key=f"add_grade_{pedido_id}_{fam}_{_rev()}",
-            hide_index=True, num_rows="fixed", width="stretch",
+            **padrao_tabela(EDITOR, 1), num_rows="fixed",
             column_config={t: st.column_config.NumberColumn(t, min_value=0, step=1)
                            for t in tamanhos},
         )
@@ -433,18 +453,6 @@ if len(rodadas) == 0:
 with st.container(border=True):
     st.subheader("Rodadas congeladas")
 
-    view_rodadas = rodadas.copy()
-    view_rodadas["Status"] = view_rodadas["status"].map(BADGES_RODADA)
-    view_rodadas["Congelada em"] = pd.to_datetime(
-        view_rodadas["congelada_em"]).dt.strftime("%d/%m/%Y %H:%M")
-    view_rodadas["Crescimento"] = view_rodadas["ativo_crescimento"].map(
-        {True: "sim", False: "não"})
-    st.dataframe(
-        view_rodadas[["janela_label", "Status", "Congelada em", "congelada_por", "Crescimento"]]
-        .rename(columns={"janela_label": "Janela", "congelada_por": "Por"}),
-        width="stretch", hide_index=True,
-    )
-
     idx_rodada = st.selectbox(
         "Rodada",
         options=list(range(len(rodadas))),
@@ -455,6 +463,12 @@ with st.container(border=True):
     )
     rodada_sel = rodadas.iloc[idx_rodada]
     rodada_id = rodada_sel["id"]
+    # O que a tabela de rodadas mostrava, agora só da rodada escolhida.
+    st.caption(
+        f"Congelada em **{pd.to_datetime(rodada_sel['congelada_em']):%d/%m/%Y %H:%M}** "
+        f"por {rodada_sel['congelada_por']} · crescimento aplicado: "
+        f"**{'sim' if rodada_sel['ativo_crescimento'] else 'não'}**"
+    )
 
     # Congelamento abortado (falha no meio da gravação) → só limpar
     if rodada_sel["status"] == estados.RODADA_CONGELANDO:
@@ -585,7 +599,7 @@ def _secao_pedido():
             editado = st.data_editor(
                 df_grade,
                 key=_chave_editor(VISAO_GRADE, pedido_id),
-                width="stretch", hide_index=True, num_rows="fixed",
+                **padrao_tabela(EDITOR, len(df_grade), max_linhas=18), num_rows="fixed",
                 disabled=(True if not pode_editar
                           else [grade.COL_SKU, grade.COL_PRODUTO]),
                 column_config={
@@ -616,25 +630,28 @@ def _secao_pedido():
                 cols_fixas.append("origem")
             cols_editor = cols_fixas + ["quantidade_sugerida", "quantidade_final"]
             df_editor = itens[cols_editor].copy()
+            # Produto sem detalhe no cadastro chega com o TEXTO "nan" — vazio lê melhor.
+            for _c in ("tamanho", "categoria"):
+                df_editor[_c] = df_editor[_c].fillna("").astype(str).replace("nan", "")
             if tem_manual:
                 df_editor["origem"] = df_editor["origem"].map(_ROTULO_ORIGEM)
             editado = st.data_editor(
                 df_editor,
                 key=_chave_editor(VISAO_LISTA, pedido_id),
-                width="stretch", hide_index=True, num_rows="fixed",
+                **padrao_tabela(EDITOR, len(df_editor), max_linhas=18), num_rows="fixed",
                 disabled=(True if not pode_editar
                           else cols_fixas + ["quantidade_sugerida"]),
                 column_config={
-                    "sku": st.column_config.TextColumn("SKU"),
-                    "produto": st.column_config.TextColumn("Produto"),
-                    "tamanho": st.column_config.TextColumn("Tam."),
-                    "categoria": st.column_config.TextColumn("Categoria"),
+                    "sku": col_sku(),
+                    "produto": col_texto("Produto"),
+                    "tamanho": col_tamanho(),
+                    "categoria": col_texto("Categoria"),
                     "origem": st.column_config.TextColumn(
                         "Origem", help="Manual = incluído pelo gestor, fora da simulação"),
                     "quantidade_sugerida": st.column_config.NumberColumn(
-                        "Qtd Sugerida", help="Congelada no snapshot — imutável (auditoria)"),
+                        "Sugerida (pçs)", help="Congelada no snapshot — imutável (auditoria)"),
                     "quantidade_final": st.column_config.NumberColumn(
-                        "Qtd Final", min_value=0, step=1,
+                        "Final (pçs)", min_value=0, step=1,
                         help="Quantidade que será emitida — editável no rascunho"),
                 },
             )
@@ -762,7 +779,7 @@ def _secao_pedido():
         st.divider()
         _m1, _m2, _m3 = st.columns(3)
         _m1.metric("SKUs", int((_qtd_final > 0).sum()))
-        _m2.metric("Pares finais", f"{int(_qtd_final.sum()):,}".replace(",", "."),
+        _m2.metric("Peças finais", num(int(_qtd_final.sum())),
                    delta=f"{_delta:+d} vs sugerido", delta_color="off")
         _m3.metric("Investimento", _fmt_brl(_invest))
 
@@ -921,26 +938,28 @@ def _secao_lote():
             "de uma vez. Para ver/editar um pedido, troque para **✏️ Editar um pedido** "
             "no seletor de modo (topo). O cabeçalho da coluna de seleção marca/desmarca tudo."
         )
-        evento = st.dataframe(
-            view_ped[["titulo", "colegio", "super_categoria", "Status", "n_itens",
+        # Sem a coluna Título: dentro de uma rodada ela só repete Colégio +
+        # Super Categoria (o título é "COLÉGIO - SUPERCAT - Rmm/aaaa").
+        evento = exibir(
+            view_ped[["colegio", "super_categoria", "Status", "n_itens",
                       "qtd_sugerida", "qtd_final", "Δ", "investimento_final",
-                      "bling_numero", "olist_numero"]]
-            .rename(columns={
-                "titulo": "Título", "colegio": "Colégio", "super_categoria": "Super Categoria",
-                "n_itens": "Itens", "qtd_sugerida": "Qtd Sugerida", "qtd_final": "Qtd Final",
-                "investimento_final": "Investimento (R$)",
-                "bling_numero": "Nº Bling", "olist_numero": "Nº Olist",
-            }),
-            width="stretch", hide_index=True, height=560,
+                      "bling_numero", "olist_numero"]],
+            FILA,
+            {
+                "colegio": col_colegio(),
+                "super_categoria": col_texto("Super Categoria"),
+                "n_itens": col_pecas("Itens"),
+                "qtd_sugerida": col_pecas("Sugerida (pçs)", largura=None),
+                "qtd_final": col_pecas("Final (pçs)", largura=None),
+                "Δ": st.column_config.NumberColumn(
+                    "Δ", format="%+d", width="small",
+                    help="Final − Sugerida: o quanto a revisão mexeu na sugestão."),
+                "investimento_final": col_moeda("Investimento", casas=2),
+                "bling_numero": col_texto("Nº Bling", largura="small"),
+                "olist_numero": col_texto("Nº Olist", largura="small"),
+            },
             on_select="rerun", selection_mode="multi-row",
             key=f"sel_pedidos_{rodada_id}",
-            column_config={
-                "Itens": st.column_config.NumberColumn(format="%d"),
-                "Qtd Sugerida": st.column_config.NumberColumn(format="%d"),
-                "Qtd Final": st.column_config.NumberColumn(format="%d"),
-                "Δ": st.column_config.NumberColumn(format="%+d"),
-                "Investimento (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
-            },
         )
 
         # Posições selecionadas → pedidos (view_ped preserva a ordem/índice de `pedidos`)
@@ -960,7 +979,7 @@ def _secao_lote():
             st.divider()
             _s1, _s2, _s3 = st.columns(3)
             _s1.metric("Selecionados", len(sel))
-            _s2.metric("Pares finais", f"{int(sel['qtd_final'].sum()):,}".replace(",", "."))
+            _s2.metric("Peças finais", num(int(sel['qtd_final'].sum())))
             _s3.metric("Investimento", _fmt_brl(float(sel['investimento_final'].sum())))
 
             b1, b2, b3, b4, b5 = st.columns(5)

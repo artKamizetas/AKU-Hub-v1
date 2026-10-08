@@ -69,6 +69,27 @@ Renomeação de jul/2026 (ver [decisoes.md](decisoes.md)). Os **nomes atuais** v
 | `pico_raw` | **vendas_ultima_alta** | Fábrica / PCP |
 | `sazonalidade_inicio/fim` | **periodo_historico_inicio/fim** (config) | Fábrica / PCP |
 
+## Tabelas — vocabulário único das colunas (ver `ui_tabelas.py`)
+
+A mesma grandeza tem o MESMO nome em todas as telas. Unidade no cabeçalho.
+
+| Cabeçalho | Significado |
+|---|---|
+| **SKU** | Código do produto × tamanho. Sempre a 1ª coluna, fixa na rolagem lateral. |
+| **Tam.** | Tamanho. |
+| **Sugestão (pçs)** | O que o motor recomenda (produzir, no Simulador; transferir, na Logística). |
+| **Sugerida (pçs)** / **Final (pçs)** | Em Pedidos: a sugestão congelada no snapshot × a quantidade que será emitida. |
+| **Demanda do período** / **· na alta** / **· na baixa** | `DemandaPeriodo` e suas duas parcelas. |
+| **Segurança** | `EstoqueSeguranca`. |
+| **Alvo** | `EstoqueAlvo` (nível order-up-to). |
+| **Est. Projetado** | `EstoqueProjetado` na chegada da rodada. |
+| **Est. Rede** / **Est. CD** / **Est. Loja** | Saldo físico hoje: todos os depósitos / central / loja. |
+| **NS** | Nível de serviço aplicado (%). |
+| **Investimento (R$)** | Quantidade × custo unitário. |
+
+Tipos de tabela: **fila** (percorre linha a linha e age), **memória** (confere como
+o número saiu), **placar** (compara poucos itens), **editor** (digita valores).
+
 ## Dados / técnico
 
 | Termo | Significado |

@@ -26,6 +26,7 @@ config.yaml                 # DEFAULTS estruturais (Categoria A: IDs, situaçõe
 auth.py                     # Login Google (OIDC nativo do Streamlit) + autorização por role
 auth_store.py               # Porta de app.usuario (allowlist de acesso); PURO exceto o cache
 ui_carga.py                 # Porta ÚNICA de carregamento das páginas (spinner + rodapé de frescor)
+ui_tabelas.py               # Padrão ÚNICO das tabelas: tipo (fila/memória/placar/editor), altura, colunas prontas, números pt-BR
 data/                       # Saídas locais opcionais (ex: VM_Calculado.xlsx via scripts/exportar_vm.py), não sincronizado com Bling
 etl/
   loader.py                 # Lê Supabase (via PostgREST) e valida → retorna dict de DataFrames
@@ -99,6 +100,11 @@ docs/sql/                   # DDL versionada do schema `app` (aplicar com `pytho
 ## Convenções de código
 - Pandas para toda manipulação de dados
 - `st.cache_data` nos carregamentos pesados (leitura do Supabase via `loader.py`, TTL=3600)
+- **Tabela é desenhada por `ui_tabelas`**, nunca com `st.dataframe`/`column_config`
+  na mão: leitura → `exibir(df, TIPO, colunas)`; editor → `st.data_editor(df,
+  **padrao_tabela(EDITOR, n), ...)`. Colunas pelas prontas (`col_sku`, `col_pecas`,
+  `col_moeda`, …) e texto de KPI/legenda por `num()`/`brl()` — não crie outro
+  formatador de R$ nem escolha altura (`height=`/`row_height=`) na página
 - **Páginas carregam por `ui_carga.carregar_com_feedback()`**, nunca chamando
   `carregar_dados()`+`carregar_config()` na mão (era o `_carregar()` duplicado em 4 telas)
 - **Nunca `st.cache_data.clear()` global** ao salvar: use `carregar_config.clear()`
@@ -312,6 +318,33 @@ Zerado NÃO vira item de pedido (entraria na grade, nos totais e na emissão).
   **Bling** em `montar_payload_venda(prazo_dias=...)` e os dois vencimentos batem
   por construção — um campo editável em dois lugares divergiria.
 
+## Tabelas (ui_tabelas.py)
+
+A página diz qual é o TRABALHO da tabela e recebe o desenho. Decisão e porquês em
+`docs/decisoes.md` (2026-10); vocabulário das colunas em `docs/glossario.md`.
+
+- **Quatro tipos:** `FILA` (percorre e age — Logística, Sugestão por SKU, lote de
+  Pedidos), `MEMORIA` (confere a conta — sempre atrás de expander/toggle),
+  `PLACAR` (compara poucos itens — Daily), `EDITOR` (digita). Linha de **28 px só
+  em FILA e MEMORIA**; EDITOR fica em 35 px de propósito (linha apertada = clique
+  na célula errada, e ali o erro vira quantidade emitida).
+- **Ordem das colunas:** identidade → decisão → evidência. A sugestão/ação vem
+  logo depois de SKU/Produto/Tam./Colégio, não no fim.
+- **Números:** `format="localized"` (segue o idioma do navegador: `125.430` em
+  pt-BR). O printf (`"R$ %.0f"`) NÃO agrupa milhar — não volte a ele. Unidade no
+  cabeçalho (`col_moeda("Investimento")` → "Investimento (R$)").
+- **`exibir()` arredonda antes de mostrar** porque o Streamlit TRUNCA na precisão
+  da coluna. Com Styler (cor de exceção) o número é formatado no próprio Styler
+  com `num` — é o único caso em que o formato não vem do `column_config`.
+- **Célula sem valor fica vazia** (`placeholder=""` no molde); o default do
+  Streamlit escreve "None".
+- **Cor só para exceção** (ruptura, negativo). Não pinte linha "normal".
+- **Armadilha:** não nomeie variável de página como `exibir`, `num` ou `brl` — o
+  import é escondido e o erro só aparece ao renderizar (aconteceu na 3_Fabrica
+  com o filtro "Exibir").
+- **CSVs exportados não seguem o molde:** cabeçalho e ordem antigos são contrato
+  com quem os consome (`COLS_EXPORT` na 3_Fabrica).
+
 ## Carregamento de dados (etl/loader.py + ui_carga.py)
 
 A leitura do Supabase era **117 s** e dominava 99% de toda espera do app (os
@@ -482,7 +515,7 @@ Authlib
 ---
 
 ## Testes (`tests/`)
-Suíte `pytest` focada no **motor de demanda/PCP** (`etl/demanda.py`), nos utilitários e na **paginação paralela** do `loader.py` (`tests/test_loader_paginacao.py` — planejamento de páginas, montagem a partir de lotes fora de ordem, filtro simétrico count/página, retry e cauda, com fake do cliente PostgREST), no **Comercial/metas** (`etl/metas.py` puro + `etl/daily.py` com competência fixa via fixtures `config_daily`/`dados_daily` do conftest — o default é o mês corrente, que não serviria para teste determinístico), no **domínio de pedidos** (`pedidos/` — builder, estados, grade e catálogo puros (`tests/test_pedidos_grade.py`: ordem dos tamanhos, volta da grade por id, célula nova → SKU); repositório testado com fake do gateway `_inserir/_atualizar/_selecionar/_deletar`, sem Supabase) e nas **integrações/emissão** (`pedidos/integracoes/` + `emissor.py` — payloads puros, OAuth e clientes HTTP com fake injetável, emissor com repo+cliente fakes; zero rede). Sem Supabase/secrets. Instalar dev deps com `uv pip install -r requirements-dev.txt` (o venv usa **uv**, não pip) e rodar `pytest` na raiz. `tests/conftest.py` monta `config` e `dados` sintéticos; o determinismo vem de ancorar as altas em `now()` de forma constante e desligar o crescimento (ver docstring do conftest). Os fakes reusam os `RepoFake` de `test_pedidos_repositorio`/`test_integracoes_repositorio` e o `HttpFake` de `test_integracoes_payloads`. Ao mexer no motor, rode a suíte e atualize os testes junto.
+Suíte `pytest` focada no **motor de demanda/PCP** (`etl/demanda.py`), nos utilitários, no **padrão de tabelas** (`tests/test_ui_tabelas.py` — altura por tipo, arredondamento antes de exibir, formatadores pt-BR) e na **paginação paralela** do `loader.py` (`tests/test_loader_paginacao.py` — planejamento de páginas, montagem a partir de lotes fora de ordem, filtro simétrico count/página, retry e cauda, com fake do cliente PostgREST), no **Comercial/metas** (`etl/metas.py` puro + `etl/daily.py` com competência fixa via fixtures `config_daily`/`dados_daily` do conftest — o default é o mês corrente, que não serviria para teste determinístico), no **domínio de pedidos** (`pedidos/` — builder, estados, grade e catálogo puros (`tests/test_pedidos_grade.py`: ordem dos tamanhos, volta da grade por id, célula nova → SKU); repositório testado com fake do gateway `_inserir/_atualizar/_selecionar/_deletar`, sem Supabase) e nas **integrações/emissão** (`pedidos/integracoes/` + `emissor.py` — payloads puros, OAuth e clientes HTTP com fake injetável, emissor com repo+cliente fakes; zero rede). Sem Supabase/secrets. Instalar dev deps com `uv pip install -r requirements-dev.txt` (o venv usa **uv**, não pip) e rodar `pytest` na raiz. `tests/conftest.py` monta `config` e `dados` sintéticos; o determinismo vem de ancorar as altas em `now()` de forma constante e desligar o crescimento (ver docstring do conftest). Os fakes reusam os `RepoFake` de `test_pedidos_repositorio`/`test_integracoes_repositorio` e o `HttpFake` de `test_integracoes_payloads`. Ao mexer no motor, rode a suíte e atualize os testes junto.
 
 ---
 
