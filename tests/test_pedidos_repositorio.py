@@ -13,6 +13,7 @@ import pytest
 from pedidos import estados as e
 from pedidos.repositorio import (
     RepositorioPedidos, RodadaJaCongelada, TransicaoInvalida, PedidoNaoEditavel,
+    ItemJaExiste, ItemNaoRemovivel, MigracaoPendente,
     TAB_RODADA, TAB_PEDIDO, TAB_ITEM,
 )
 
@@ -305,3 +306,106 @@ class TestCancelarEListar:
         repo.congelar_rodada(snapshot_min(), grupos_min())
         df = repo.listar_rodadas()
         assert len(df) == 1 and df.iloc[0]["status"] == e.RODADA_ABERTA
+
+    def test_obter_resultado_skus_devolve_a_rede_inteira(self):
+        repo = RepoFake()
+        snap = snapshot_min()
+        snap["resultado_skus"] = [{"SKU": "A", "SugestaoProducao": 4},
+                                  {"SKU": "B", "SugestaoProducao": 0}]
+        rodada_id = repo.congelar_rodada(snap, grupos_min())["id"]
+        assert [r["SKU"] for r in repo.obter_resultado_skus(rodada_id)] == ["A", "B"]
+
+    def test_obter_resultado_skus_de_rodada_inexistente_e_lista_vazia(self):
+        assert RepoFake().obter_resultado_skus("nao-existe") == []
+
+
+# ---------------------------------------------------------------------------
+# Inclusão / remoção manual de itens (DDL 007)
+# ---------------------------------------------------------------------------
+def item_manual(sku="Z-M", qtd=6):
+    return {"sku": sku, "id_produto_bling": "900", "produto": "Prod Z Tamanho:M",
+            "tamanho": "M", "categoria": "Camisa", "quantidade_final": qtd,
+            "custo_unit": 7.5,
+            # o que quem chama mandar aqui NÃO pode valer — o repositório impõe
+            "quantidade_sugerida": 99, "memoria_sugerida": {"x": 1}, "origem": "SIMULACAO"}
+
+
+class TestItensManuais:
+    def _repo_com_pedido(self):
+        repo = RepoFake()
+        repo.congelar_rodada(snapshot_min(), grupos_min())
+        pedido = next(p for p in repo.tabelas[TAB_PEDIDO] if p["super_categoria"] == "CALÇAS")
+        return repo, pedido["id"]
+
+    def test_inclui_como_manual_com_sugerido_zero_e_auditoria(self):
+        repo, pid = self._repo_com_pedido()
+        assert repo.adicionar_itens(pid, [item_manual()], "gestor@ak") == 1
+
+        novo = next(i for i in repo.tabelas[TAB_ITEM] if i["sku"] == "Z-M")
+        assert novo["pedido_id"] == pid
+        assert novo["origem"] == e.ORIGEM_MANUAL
+        assert novo["quantidade_sugerida"] == 0 and novo["memoria_sugerida"] == {}
+        assert novo["quantidade_final"] == 6
+        assert novo["adicionado_por"] == "gestor@ak" and novo["adicionado_em"]
+        pedido = repo.obter_pedido(pid)
+        assert pedido["atualizado_por"] == "gestor@ak"
+
+    def test_sku_que_ja_esta_no_pedido_e_recusado_sem_inserir(self):
+        repo, pid = self._repo_com_pedido()
+        antes = len(repo.tabelas[TAB_ITEM])
+        with pytest.raises(ItemJaExiste, match="A-PP"):
+            repo.adicionar_itens(pid, [item_manual("Z-M"), item_manual("A-PP")], "u")
+        assert len(repo.tabelas[TAB_ITEM]) == antes     # tudo ou nada
+
+    def test_fora_de_rascunho_nao_inclui(self):
+        repo, pid = self._repo_com_pedido()
+        repo.transicionar_pedido(pid, e.RASCUNHO, e.PRONTO, "u")
+        with pytest.raises(PedidoNaoEditavel):
+            repo.adicionar_itens(pid, [item_manual()], "u")
+
+    def test_quantidade_zero_ou_sem_id_bling_e_erro(self):
+        repo, pid = self._repo_com_pedido()
+        with pytest.raises(ValueError):
+            repo.adicionar_itens(pid, [item_manual(qtd=0)], "u")
+        with pytest.raises(ValueError):
+            repo.adicionar_itens(pid, [{**item_manual(), "id_produto_bling": ""}], "u")
+
+    def test_banco_sem_o_ddl_007_vira_mensagem_de_migracao(self):
+        repo, pid = self._repo_com_pedido()
+        original = repo._inserir
+
+        def sem_coluna(tabela, linhas):
+            if tabela == TAB_ITEM:
+                raise FakeAPIError("PGRST204")
+            return original(tabela, linhas)
+        repo._inserir = sem_coluna
+        with pytest.raises(MigracaoPendente, match="007"):
+            repo.adicionar_itens(pid, [item_manual()], "u")
+
+    def test_listar_itens_trata_item_antigo_como_simulacao(self):
+        repo, pid = self._repo_com_pedido()
+        repo.adicionar_itens(pid, [item_manual()], "u")
+        origem = repo.listar_itens(pid).set_index("sku")["origem"]
+        assert origem["Z-M"] == e.ORIGEM_MANUAL
+        assert origem["A-PP"] == e.ORIGEM_SIMULACAO      # gravado sem a coluna
+
+    def test_remove_so_item_manual(self):
+        repo, pid = self._repo_com_pedido()
+        repo.adicionar_itens(pid, [item_manual()], "u")
+        ids = {i["sku"]: i["id"] for i in repo.tabelas[TAB_ITEM] if i["pedido_id"] == pid}
+
+        with pytest.raises(ItemNaoRemovivel, match="A-PP"):
+            repo.remover_itens_manuais(pid, [ids["Z-M"], ids["A-PP"]], "u")
+        assert {"Z-M", "A-PP"} <= {i["sku"] for i in repo.tabelas[TAB_ITEM]}   # nada saiu
+
+        assert repo.remover_itens_manuais(pid, [ids["Z-M"]], "u") == 1
+        assert "Z-M" not in {i["sku"] for i in repo.tabelas[TAB_ITEM]}
+        assert "A-PP" in {i["sku"] for i in repo.tabelas[TAB_ITEM]}
+
+    def test_remover_item_de_outro_pedido_nao_remove_nada(self):
+        repo, pid = self._repo_com_pedido()
+        outro = next(p["id"] for p in repo.tabelas[TAB_PEDIDO] if p["id"] != pid)
+        repo.adicionar_itens(outro, [item_manual()], "u")
+        alheio = next(i["id"] for i in repo.tabelas[TAB_ITEM] if i["sku"] == "Z-M")
+        assert repo.remover_itens_manuais(pid, [alheio], "u") == 0
+        assert "Z-M" in {i["sku"] for i in repo.tabelas[TAB_ITEM]}

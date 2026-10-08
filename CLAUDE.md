@@ -43,6 +43,8 @@ etl/
 pedidos/                    # Domínio TRANSACIONAL de Pedidos de Compra (etl/ segue analítico read-only)
   estados.py                # Máquina de estados pura (RASCUNHO→PRONTO→COMPRA_EMITINDO→COMPRA_EMITIDA→VENDA_EMITINDO→EMITIDO, badges)
   builder.py                # Puro: DataFrame do processar_fabrica → snapshot + grupos Colégio×SuperCategoria
+  grade.py                  # Puro: itens ↔ grade SKU pai × tamanho (pivot, diff por id, ordem dos tamanhos por regra)
+  catalogo.py               # Puro: catálogo vivo p/ inclusão manual de itens (escopo Colégio×SuperCategoria, células novas → SKU)
   repositorio.py            # ÚNICA porta de escrita/leitura do schema `app` do Supabase (gravável)
   emissor.py                # Casos de uso da emissão (compra Bling → venda Olist), locks CAS + rollback
   integracoes/
@@ -195,8 +197,37 @@ drivers order-up-to que geraram a sugestão (demanda do período alta/baixa,
 estoque de segurança, estoque-alvo, estoque da rede, backlog, projetado na
 chegada, nível de serviço). É o "por que essa quantidade" exibido na revisão do
 rascunho SEM carregar o `resultado_skus` pesado da rede; congelada no INSERT,
-nunca atualizada.
+nunca atualizada. Como item só nasce de sugestão > 0, os SKUs ZERADOS do grupo
+não têm essa memória: o painel "Por que essas quantidades?" os busca no snapshot
+atrás de um toggle (`builder.memoria_do_grupo` + `repositorio.obter_resultado_skus`,
+coluna **Situação**: no pedido / coberto pelo estoque / sem demanda) — é a única
+leitura do schema `app` cacheada na 4_Pedidos, porque o snapshot é imutável.
+Zerado NÃO vira item de pedido (entraria na grade, nos totais e na emissão).
 
+- **Duas visões dos itens** (`st.segmented_control` Lista × Grade por tamanho,
+  dentro do mesmo fragment): a grade (`pedidos/grade.py`) pivota SKU pai ×
+  tamanho com `quantidade_final` e é editável — a volta é por **id do item**
+  (`diff_grade`), nunca por posição. A ordem das colunas vem de
+  `grade.chave_tamanho` (REGRA: P desce, M zero, G sobe, X empurra; números pelo
+  valor; `Único` no fim) — não crie lista fixa de tamanhos. `grade.identificar`
+  é a regra ÚNICA de "em que linha/coluna cai este SKU", usada pela grade e pelo
+  catálogo: se divergirem, o tamanho digitado na grade não acha o SKU. Trocar de
+  visão com edição pendente é desfeito no callback (os editores são widgets
+  diferentes e a edição se perderia calada). Toda `key` de editor leva a
+  revisão `_rev()`: incluir/remover item muda o nº de linhas e a edição
+  guardada por posição reapareceria em outro SKU. O `data_editor` NÃO tem dica
+  por célula (só `help` no cabeçalho); uma tabela-espelho de indicadores foi
+  testada e descartada — não a recrie (ver `docs/decisoes.md`).
+- **Inclusão manual de itens** (só RASCUNHO; DDL 007): "Adicionar produto"
+  (escolhe o produto, digita a grade inteira) ou digitar numa célula vazia da
+  grade. `repositorio.adicionar_itens` IMPÕE `origem=MANUAL`,
+  `quantidade_sugerida=0`, memória vazia e `adicionado_por/em`; o trigger do
+  banco cobre INSERT/UPDATE/DELETE. Item da SIMULAÇÃO nunca é apagado (zera-se);
+  só o manual sai (`remover_itens_manuais`). Seletor filtrado pelo Colégio ×
+  SuperCategoria do pedido (o título vai ao Bling), com checkbox de escape.
+  Catálogo = `dados["produtos"]`+`dados["detalhes"]` VIVOS via
+  `ui_carga.carregar_com_feedback()`, carregado só atrás do toggle. Sem o DDL
+  007 a tela funciona em leitura e a inclusão responde `MigracaoPendente`.
 - **Persistência**: schema **`app`** do Supabase (gravável) — `rodada_congelada`
   (snapshot, jsonb), `pedido_compra`, `pedido_compra_item`, `integracao`
   (credenciais/tokens OAuth), `integracao_evento` (auditoria), `olist_produto_cache`
@@ -451,7 +482,7 @@ Authlib
 ---
 
 ## Testes (`tests/`)
-Suíte `pytest` focada no **motor de demanda/PCP** (`etl/demanda.py`), nos utilitários e na **paginação paralela** do `loader.py` (`tests/test_loader_paginacao.py` — planejamento de páginas, montagem a partir de lotes fora de ordem, filtro simétrico count/página, retry e cauda, com fake do cliente PostgREST), no **Comercial/metas** (`etl/metas.py` puro + `etl/daily.py` com competência fixa via fixtures `config_daily`/`dados_daily` do conftest — o default é o mês corrente, que não serviria para teste determinístico), no **domínio de pedidos** (`pedidos/` — builder e estados puros; repositório testado com fake do gateway `_inserir/_atualizar/_selecionar/_deletar`, sem Supabase) e nas **integrações/emissão** (`pedidos/integracoes/` + `emissor.py` — payloads puros, OAuth e clientes HTTP com fake injetável, emissor com repo+cliente fakes; zero rede). Sem Supabase/secrets. Instalar dev deps com `uv pip install -r requirements-dev.txt` (o venv usa **uv**, não pip) e rodar `pytest` na raiz. `tests/conftest.py` monta `config` e `dados` sintéticos; o determinismo vem de ancorar as altas em `now()` de forma constante e desligar o crescimento (ver docstring do conftest). Os fakes reusam os `RepoFake` de `test_pedidos_repositorio`/`test_integracoes_repositorio` e o `HttpFake` de `test_integracoes_payloads`. Ao mexer no motor, rode a suíte e atualize os testes junto.
+Suíte `pytest` focada no **motor de demanda/PCP** (`etl/demanda.py`), nos utilitários e na **paginação paralela** do `loader.py` (`tests/test_loader_paginacao.py` — planejamento de páginas, montagem a partir de lotes fora de ordem, filtro simétrico count/página, retry e cauda, com fake do cliente PostgREST), no **Comercial/metas** (`etl/metas.py` puro + `etl/daily.py` com competência fixa via fixtures `config_daily`/`dados_daily` do conftest — o default é o mês corrente, que não serviria para teste determinístico), no **domínio de pedidos** (`pedidos/` — builder, estados, grade e catálogo puros (`tests/test_pedidos_grade.py`: ordem dos tamanhos, volta da grade por id, célula nova → SKU); repositório testado com fake do gateway `_inserir/_atualizar/_selecionar/_deletar`, sem Supabase) e nas **integrações/emissão** (`pedidos/integracoes/` + `emissor.py` — payloads puros, OAuth e clientes HTTP com fake injetável, emissor com repo+cliente fakes; zero rede). Sem Supabase/secrets. Instalar dev deps com `uv pip install -r requirements-dev.txt` (o venv usa **uv**, não pip) e rodar `pytest` na raiz. `tests/conftest.py` monta `config` e `dados` sintéticos; o determinismo vem de ancorar as altas em `now()` de forma constante e desligar o crescimento (ver docstring do conftest). Os fakes reusam os `RepoFake` de `test_pedidos_repositorio`/`test_integracoes_repositorio` e o `HttpFake` de `test_integracoes_payloads`. Ao mexer no motor, rode a suíte e atualize os testes junto.
 
 ---
 

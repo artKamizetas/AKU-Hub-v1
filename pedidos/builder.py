@@ -23,6 +23,7 @@ import json
 import pandas as pd
 
 from etl import demanda
+from pedidos import estados
 
 
 # Rótulos para dimensões vazias — mantêm a unique constraint
@@ -200,6 +201,51 @@ def agrupar_pedidos(df_resultado: pd.DataFrame, produtos: pd.DataFrame,
     return grupos
 
 
+# Por que um SKU do grupo saiu com a sugestão que saiu (leitura do snapshot)
+MOTIVO_SUGERIDO = "Com sugestão"
+MOTIVO_COBERTO = "Coberto pelo estoque"
+MOTIVO_SEM_DEMANDA = "Sem demanda no período"
+
+
+def memoria_do_grupo(resultado_skus: list, colegio: str, super_categoria: str) -> list:
+    """
+    Todos os SKUs do snapshot de um Colégio × SuperCategoria, INCLUSIVE os de
+    sugestão 0 — que não viram item de pedido (agrupar_pedidos filtra > 0) e
+    por isso não têm memoria_sugerida gravada. É o que deixa a revisão do
+    rascunho enxergar a família inteira: o G que ficou de fora porque tem
+    estoque, o modelo vizinho sem demanda.
+
+    A chave do grupo passa pelo MESMO _normalizar_dim do agrupar_pedidos; se
+    divergissem, o "(sem colégio)" do pedido não acharia as linhas do snapshot.
+
+    Retorna [{sku, produto, tamanho, quantidade_sugerida, motivo, memoria}],
+    com `memoria` no formato da memoria_sugerida dos itens.
+    """
+    grupo = []
+    for linha in resultado_skus or []:
+        if (_normalizar_dim(linha.get("Colegio"), SEM_COLEGIO) != colegio
+                or _normalizar_dim(linha.get("SuperCategoria"), SEM_SUPERCATEGORIA)
+                != super_categoria):
+            continue
+        sugestao = int(linha.get("SugestaoProducao") or 0)
+        if sugestao > 0:
+            motivo = MOTIVO_SUGERIDO
+        elif float(linha.get("DemandaProjetada") or 0) > 0:
+            # sugestão 0 com demanda = o projetado na chegada já cobre o alvo
+            motivo = MOTIVO_COBERTO
+        else:
+            motivo = MOTIVO_SEM_DEMANDA
+        grupo.append({
+            "sku": str(linha.get("SKU", "")),
+            "produto": str(linha.get("Produto") or ""),
+            "tamanho": str(linha.get("Tamanho") or ""),
+            "quantidade_sugerida": sugestao,
+            "motivo": motivo,
+            "memoria": _memoria_sugerida(linha),
+        })
+    return grupo
+
+
 def validar_pre_congelamento(df_resultado: pd.DataFrame) -> list:
     """
     Checks puros antes de congelar. Lista de erros vazia = pode congelar.
@@ -270,9 +316,22 @@ def montar_descricao_item(item, mes_disparo: int, ano_disparo: int) -> str:
     pedido 433 (alvo 2 → 4 peças). Quando a quantidade foi editada à mão, o
     'ajustado de N' marca a intervenção.
 
+    Item de origem MANUAL (incluído pelo gestor, DDL 007) não tem memória: a
+    linha vira 'Incluído manualmente por <e-mail> → N pç | R07/2026'.
+
     Retorna "" (campo vazio, sem placeholder) quando a memória não existe —
     rodadas congeladas antes do DDL 004 ou item sem os drivers.
     """
+    # Item incluído à mão não tem conta order-up-to para mostrar — o que a
+    # fábrica precisa saber é justamente que ele NÃO veio da simulação.
+    if hasattr(item, "get") and item.get("origem") == estados.ORIGEM_MANUAL:
+        quem = str(item.get("adicionado_por") or "").strip()
+        texto = "Incluído manualmente" + (f" por {quem}" if quem and quem != "nan" else "")
+        final = item.get("quantidade_final")
+        if final is not None:
+            texto += f" → {int(final)} pç"
+        return f"{texto} | R{int(mes_disparo):02d}/{int(ano_disparo)}"
+
     mem = item.get("memoria_sugerida") if hasattr(item, "get") else None
     if not isinstance(mem, dict) or not mem:
         return ""

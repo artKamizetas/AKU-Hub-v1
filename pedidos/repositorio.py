@@ -22,6 +22,7 @@ import pandas as pd
 import streamlit as st
 
 from pedidos import estados
+from pedidos.estados import ORIGEM_MANUAL, ORIGEM_SIMULACAO
 
 
 # Nomes das tabelas no schema `app`
@@ -51,9 +52,32 @@ class PedidoNaoEditavel(Exception):
     """Tentativa de editar itens de pedido que não está em RASCUNHO."""
 
 
+class ItemJaExiste(Exception):
+    """O SKU já é um item deste pedido (unique (pedido_id, sku))."""
+
+
+class ItemNaoRemovivel(Exception):
+    """Só item incluído manualmente pode ser removido — o da simulação zera-se."""
+
+
+class MigracaoPendente(Exception):
+    """A coluna/trava que a operação exige ainda não existe no banco (DDL não aplicado)."""
+
+
 def _e_violacao_unique(exc: Exception) -> bool:
     """23505 = unique_violation do Postgres (via APIError do postgrest)."""
     return getattr(exc, "code", "") == "23505" or "23505" in str(exc)
+
+
+def _e_coluna_ausente(exc: Exception) -> bool:
+    """PGRST204 = coluna fora do schema cache do PostgREST (DDL não aplicado)."""
+    return getattr(exc, "code", "") == "PGRST204" or "PGRST204" in str(exc)
+
+
+# Colunas que a inclusão manual aceita de quem chama — o resto (pedido_id,
+# origem, quantidade_sugerida, memória, auditoria) é imposto aqui
+_COLS_ITEM_MANUAL = ("sku", "id_produto_bling", "produto", "tamanho", "categoria",
+                     "quantidade_final", "custo_unit")
 
 
 def _agora_iso() -> str:
@@ -250,6 +274,15 @@ class RepositorioPedidos:
         linhas = self._selecionar(TAB_RODADA, {"id": rodada_id})
         return linhas[0] if linhas else {}
 
+    def obter_resultado_skus(self, rodada_id: str) -> list:
+        """
+        Só o resultado por SKU do snapshot (sem o config_snapshot) — a rede
+        inteira, inclusive os SKUs de sugestão 0 que não viraram item.
+        """
+        linhas = self._selecionar(TAB_RODADA, {"id": rodada_id},
+                                  colunas="resultado_skus")
+        return (linhas[0].get("resultado_skus") or []) if linhas else []
+
     def listar_pedidos(self, rodada_id: str) -> pd.DataFrame:
         """
         Pedidos da rodada + agregados dos itens (n_itens, qtd_sugerida,
@@ -283,6 +316,10 @@ class RepositorioPedidos:
         df = pd.DataFrame(itens)
         if len(df):
             df["custo_unit"] = pd.to_numeric(df["custo_unit"], errors="coerce").fillna(0)
+            # Antes do DDL 007 a coluna não existe — todo item era da simulação
+            if "origem" not in df.columns:
+                df["origem"] = ORIGEM_SIMULACAO
+            df["origem"] = df["origem"].fillna(ORIGEM_SIMULACAO)
             df = df.sort_values("sku").reset_index(drop=True)
         return df
 
@@ -328,6 +365,101 @@ class RepositorioPedidos:
             self._atualizar(TAB_PEDIDO, {"id": pedido_id},
                             {"atualizado_em": agora, "atualizado_por": usuario})
         return atualizados
+
+    def _exigir_rascunho(self, pedido_id: str) -> None:
+        pedido = self._selecionar(TAB_PEDIDO, {"id": pedido_id}, colunas="id,status")
+        if not pedido:
+            raise PedidoNaoEditavel(f"Pedido {pedido_id} não encontrado.")
+        if not estados.editavel(pedido[0]["status"]):
+            raise PedidoNaoEditavel(
+                f"Pedido está {pedido[0]['status']} — reabra o rascunho para editar.")
+
+    def adicionar_itens(self, pedido_id: str, itens: list, usuario: str) -> int:
+        """
+        Inclui no RASCUNHO itens que a simulação não trouxe (itens = dicts de
+        catalogo.montar_itens_manuais). Sempre origem MANUAL, quantidade_sugerida
+        0 e memória vazia — impostos AQUI, não confiados a quem chama: é o que
+        mantém a auditoria "o motor sugeriu × o gestor incluiu" honesta.
+
+        Guardas app-level (rascunho, SKU repetido) dão a mensagem legível; a
+        trava real é o banco: trigger de RASCUNHO no INSERT (DDL 007) e
+        unique (pedido_id, sku) → 23505 → ItemJaExiste. Um único INSERT em
+        lote: ou entra a grade inteira do produto, ou nada.
+        """
+        self._exigir_rascunho(pedido_id)
+        if not itens:
+            return 0
+
+        skus = [str(i["sku"]) for i in itens]
+        existentes = {i["sku"] for i in self._selecionar(
+            TAB_ITEM, {"pedido_id": pedido_id}, colunas="sku")}
+        repetidos = sorted({s for s in skus if s in existentes or skus.count(s) > 1})
+        if repetidos:
+            raise ItemJaExiste(
+                f"Já no pedido: {', '.join(repetidos[:8])}"
+                + ("…" if len(repetidos) > 8 else "")
+                + " — ajuste a quantidade na tabela em vez de incluir de novo.")
+
+        agora = _agora_iso()
+        payload = []
+        for item in itens:
+            if not str(item.get("id_produto_bling") or "").strip():
+                raise ValueError(f"Item {item['sku']} sem id de produto do Bling.")
+            if int(item["quantidade_final"]) <= 0:
+                raise ValueError(f"Item {item['sku']} com quantidade zero — nada a incluir.")
+            linha = {c: item[c] for c in _COLS_ITEM_MANUAL}
+            linha.update({
+                "pedido_id": pedido_id,
+                "quantidade_final": int(item["quantidade_final"]),
+                "quantidade_sugerida": 0,
+                "memoria_sugerida": {},
+                "origem": ORIGEM_MANUAL,
+                "adicionado_por": usuario, "adicionado_em": agora,
+                "atualizado_por": usuario, "atualizado_em": agora,
+            })
+            payload.append(linha)
+
+        try:
+            inseridos = self._inserir(TAB_ITEM, payload)
+        except Exception as exc:
+            if _e_violacao_unique(exc):
+                raise ItemJaExiste(
+                    "Um dos SKUs já está neste pedido (incluído em outra sessão) "
+                    "— recarregue e ajuste a quantidade.") from exc
+            if _e_coluna_ausente(exc):
+                raise MigracaoPendente(
+                    "A inclusão manual exige a migração docs/sql/007_app_item_manual.sql "
+                    "— rode `python scripts/migrar.py aplicar`.") from exc
+            raise
+
+        self._atualizar(TAB_PEDIDO, {"id": pedido_id},
+                        {"atualizado_em": agora, "atualizado_por": usuario})
+        return len(inseridos)
+
+    def remover_itens_manuais(self, pedido_id: str, item_ids: list, usuario: str) -> int:
+        """
+        Remove do RASCUNHO itens incluídos à mão. Item da simulação NÃO se
+        remove (ItemNaoRemovivel): zera-se a quantidade_final, e a linha fica
+        como prova do que o motor sugeriu. O filtro `origem` no DELETE repete a
+        guarda no próprio comando; o trigger do DDL 007 é a trava real.
+        """
+        self._exigir_rascunho(pedido_id)
+        do_pedido = {i["id"]: i for i in self._selecionar(TAB_ITEM, {"pedido_id": pedido_id})}
+        alvo = [do_pedido[i] for i in item_ids if i in do_pedido]
+        da_simulacao = [i["sku"] for i in alvo
+                        if i.get("origem", ORIGEM_SIMULACAO) != ORIGEM_MANUAL]
+        if da_simulacao:
+            raise ItemNaoRemovivel(
+                f"{', '.join(da_simulacao[:8])}: item da simulação não se remove "
+                "— zere a quantidade final.")
+
+        for item in alvo:
+            self._deletar(TAB_ITEM, {"id": item["id"], "pedido_id": pedido_id,
+                                     "origem": ORIGEM_MANUAL})
+        if alvo:
+            self._atualizar(TAB_PEDIDO, {"id": pedido_id},
+                            {"atualizado_em": _agora_iso(), "atualizado_por": usuario})
+        return len(alvo)
 
     def registrar_ids_emissao(self, pedido_id: str, campos: dict, usuario: str) -> None:
         """
