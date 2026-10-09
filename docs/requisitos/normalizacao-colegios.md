@@ -40,8 +40,8 @@ O padrão pedido **já existe** para outra dimensão — é o molde a copiar:
 - **`config.yaml["grupo_segmento"]`** + `mapa_grupo_segmento(config)` /
   `segmento_do_grupo(grupo, config)` em [`etl/demanda.py`](../../etl/demanda.py):
   dicionário `default no código` (`SEGMENTO_POR_GRUPO`) **sobrescrito** por
-  `config`, **editável na UI** via `st.data_editor` (Configurações → Aba 1,
-  "Agrupamento de Grupos em Segmentos", [`pages/5_Configuracoes.py`](../../pages/5_Configuracoes.py#L563)).
+  `config`, **editável na UI** via `st.data_editor` (Configurações → Colégios e
+  Crescimento → Nomes e segmentos, [`pages/5_Configuracoes.py`](../../pages/5_Configuracoes.py)).
   Grupo sem mapa cai em `"Outros"`. **É exatamente a mecânica que queremos para colégio.**
 - **`config.yaml["colegios"]`**: parâmetros *por colégio* (`taxa_crescimento`,
   `nivel_servico`, `proporcao_baixa`), com **descoberta dinâmica** dos colégios a

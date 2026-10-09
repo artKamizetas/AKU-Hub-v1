@@ -103,7 +103,7 @@ with gc1:
     ativo_cresc = st.toggle(
         "Aplicar crescimento planejado (colégio×grupo)",
         value=cfg_dem.get("aplicar_crescimento_fabrica", True),
-        help="Liga/desliga o fator de crescimento cadastrado em Configurações → Colégios. "
+        help="Liga/desliga o fator de crescimento definido em Configurações → Colégios e Crescimento. "
              "Vale para as DUAS abas — serve para comparar o pedido com e sem crescimento.",
     )
 with gc2:

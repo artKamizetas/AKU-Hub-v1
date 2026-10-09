@@ -58,7 +58,7 @@ Configurações.
 | **Daily** | Comercial / acompanhamento de metas | `etl/daily.py` |
 | **Logística** | Reposição de loja (CD → lojas) | `etl/logistica.py`, `etl/vm_dinamico.py` |
 | **Simulador de Produção** | PCP — planejamento anual de rodadas + emissão de pedido de fábrica por SKU | `etl/demanda.py`, `etl/fabrica.py`, `etl/planejamento.py` |
-| **Configurações** | Edição de parâmetros (admin) | `pages/5_Configuracoes.py` |
+| **Configurações** | Edição de parâmetros (admin), em 7 seções por decisão: Comercial · Reposição de Loja · Produção · Colégios e Crescimento · Integrações · Usuários · Sistema | `pages/5_Configuracoes.py`, `etl/config_store.py`, `etl/config_edicao.py` |
 
 O **Simulador de Produção** é o processo mais complexo — ver
 [metodologia-pcp.md](metodologia-pcp.md).

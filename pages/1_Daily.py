@@ -196,12 +196,12 @@ if "ausente" in origens:
     faltantes = metas_sel[metas_sel["Origem Meta"] == "ausente"]["Loja"].tolist()
     st.warning(
         f"⚠️ Sem meta cadastrada em {rotulo_comp} para: **{', '.join(faltantes)}**. "
-        "Cadastre em *Configurações → Metas Mensais* — o realizado abaixo continua correto."
+        "Cadastre em *Configurações → Comercial* — o realizado abaixo continua correto."
     )
 elif "estimada" in origens:
     st.info(
         "ℹ️ Usando meta **estimada** do formato antigo (valor único como Ouro). "
-        "Cadastre as metas do mês em *Configurações → Metas Mensais* para o número real."
+        "Cadastre as metas do mês em *Configurações → Comercial* para o número real."
     )
 
 if not eh_mes_corrente:
@@ -418,8 +418,8 @@ with st.expander("📅 Histórico de atingimento (12 meses)", expanded=False):
         st.info(
             "Nenhum mês desta janela tem meta **cadastrada** — as linhas viriam do "
             "valor legado (meta única, sem competência), que é a mesma em todos os "
-            "meses e não serve de histórico. Cadastre em *Configurações → Metas "
-            "Mensais* e este painel se preenche sozinho."
+            "meses e não serve de histórico. Cadastre em *Configurações → "
+            "Comercial* e este painel se preenche sozinho."
         )
     else:
         if _n_config < len(_hist):
@@ -487,7 +487,7 @@ sem_atribuicao = df_metas_vendedor[
 if len(vend_sel) == 0:
     st.info(
         "Nenhum vendedor atribuído às lojas selecionadas nesta competência. "
-        "Configure em *Configurações → Metas Mensais → Vendedores por Loja*."
+        "Configure em *Configurações → Comercial → Vendedores por loja*."
     )
 else:
     vend_sel["% da Meta"] = vend_sel.apply(
@@ -526,7 +526,7 @@ if len(sem_atribuicao) > 0:
     st.caption(
         f"⚠️ **{len(sem_atribuicao)}** vendedor(es) venderam em {rotulo_comp} sem atribuição de loja "
         f"({_brl(sem_atribuicao['Vendido'].sum())}) — não entram em nenhuma meta. "
-        "Atribua em *Configurações → Vendedores por Loja*."
+        "Atribua em *Configurações → Comercial → Vendedores por loja*."
     )
 
 # =================================================================

@@ -9,6 +9,58 @@ Records). Adicione no topo as mais recentes.
 
 ---
 
+## 2026-10 · Configurações reorganizadas por decisão (7 seções) e fim da tela de Exceções por SKU
+A página cresceu por acréscimo: cada novidade entrou no fim da aba "Parâmetros
+Gerais", que acabou com ~80% do módulo (1 formulário de 22 campos + 6 editores, 7
+botões Salvar). A organização era **pelo formato do widget** (form × editor), não
+pela pergunta do gestor: crescimento estava em seis lugares (e
+`demanda.crescimento_observado_ativo` não tinha tela), o Comercial ficava partido
+pela Produção, e havia rótulo que não batia com o motor (`dias_analise_giro` sob
+"Fallback — SKU sem giro", quando calcula o giro de TODO SKU; nível de serviço por
+colégio anunciado como "VM e Fábrica", quando só o VM lê).
+
+- **Sete seções, uma pergunta cada**: Comercial · Reposição de Loja · Produção ·
+  Colégios e Crescimento · Integrações · Usuários · Sistema. Cada parâmetro tem um
+  endereço só; tudo de crescimento mora em *Colégios e Crescimento*, na ordem da
+  cascata (geral → específico), e a própria tela explica a precedência.
+- **`segmented_control` + `if/elif`, não `st.tabs`**: só a seção ativa executa. Com
+  abas, as cinco rodavam a cada rerun (crescimento observado, leituras de integração,
+  2 gravações de `state` OAuth). De quebra, some a classe de defeito das abas
+  empilhadas (entrada abaixo). **Custo aceito:** edição não salva se perde ao trocar
+  de seção (nas abas sobrevivia) — avisado na própria barra.
+- **Colégios: só vira override o que foi digitado** (`etl/config_edicao.py`). A
+  tabela antiga gravava `taxa_crescimento` (default 1,0) em TODOS os colégios a cada
+  "Salvar", e na cascata a presença da chave vence o medido — o primeiro clique
+  desligaria o crescimento observado da rede, com a matriz logo abaixo ainda
+  exibindo "medido". **Não havia disparado** (`colegios` estava vazio no banco).
+- **A matriz por série pergunta ao motor** em vez de reimplementar a cascata: a
+  antiga mostrava 1,0 onde o motor aplicava a taxa padrão (1,10) e ignorava a taxa
+  manual do colégio.
+- **Status IDs do Bling foram para Sistema → Mapeamento do Bling** (são código de
+  cadastro, não decisão de gestão), ao lado dos IDs de loja/depósito e das situações
+  de venda/backlog, agora visíveis (leitura).
+- **Exceções por SKU: tela retirada** (decisão da diretoria — não será usada). A
+  coluna `correcao_manual` tinha dois significados (peças somadas no PCP, fator
+  multiplicador no VM) e o upload truncava o fator com `int()`. `excecoes_sku`
+  estava vazio: nada se perdeu. **Os motores não mudaram** — seguem lendo a chave
+  (vazia = sem efeito); retirar o suporte é limpeza separada, se um dia valer.
+- **Fora do alcance, de propósito:** unificar as duas "altas" (`vm.inicio_alta/
+  fim_alta` Out–Mar × `demanda.janela_alta` Dez–Fev) — é metodologia; ficaram com
+  nomes distintos (*Temporada da loja* × *Pico de vendas*) e nota cruzada. Nenhuma
+  chave de `app.parametros` mudou: salvar qualquer seção sem editar grava o mesmo
+  blob (conferido no app com a gravação desviada para arquivo).
+
+## 2026-10 · Piso do Streamlit sobe para 1.59.2 (abas empilhadas na 5_Configuracoes)
+Na 1.59.0, abrir e fechar qualquer `st.selectbox` dentro de uma aba fazia as outras
+abas do `st.tabs` aparecerem todas juntas, uma embaixo da outra, até o F5. **Causa
+(defeito do Streamlit, não do nosso código):** as abas inativas ficam montadas e
+escondidas só por CSS preso ao atributo `inert`; o dropdown do selectbox, ao fechar,
+"restaura" os vizinhos e apaga esse atributo. A 5_Configuracoes é a única página com
+`st.tabs` e tem selectbox em quase todas as abas. **Corrigido na 1.59.2** (testado
+também em 1.60.0, 1.61.1 e 1.65.0), daí `streamlit>=1.59.2` no `requirements.txt` —
+não baixe o piso. É um bug diferente do "fragment dentro de tabs" (#9158/#9313) que
+motivou o `segmented_control` da 4_Pedidos; aquela decisão continua valendo.
+
 ## 2026-10 · Padrão único das tabelas (`ui_tabelas.py`)
 As 27 tabelas do app nasceram tela a tela: quatro alturas soltas (400/500/560/640),
 cinco formatadores de R$ duplicados em quatro páginas, `R$ 125430` sem ponto de

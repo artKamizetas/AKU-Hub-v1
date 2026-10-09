@@ -1,5 +1,5 @@
 # Baseline testada (>= versão instalada). Reveja antes de subir major.
-streamlit>=1.59
+streamlit>=1.59.2
 pandas>=3.0
 openpyxl>=3.1
 pyyaml>=6.0
