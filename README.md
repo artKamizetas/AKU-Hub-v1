@@ -175,7 +175,8 @@ AKU-Hub-v1/
 │   ├── demanda.py                 # Motor único de demanda por SKU (base de fábrica + planejamento)
 │   ├── fabrica.py                 # Lógica de PCP (sugestão tática por SKU)
 │   ├── planejamento.py            # Planejamento anual de rodadas
-│   └── vm_dinamico.py             # Cálculo de Visual Merchandising
+│   ├── reposicao.py               # Regras puras do Estoque-Alvo da loja
+│   └── relatorio_separacao.py     # Lista de separação impressa
 ├── pages/
 │   ├── 0_Home.py                  # Visão geral / status
 │   ├── 1_Daily.py                 # Dashboard comercial
@@ -183,8 +184,8 @@ AKU-Hub-v1/
 │   ├── 3_Fabrica.py               # PCP / Simulador de produção
 │   └── 5_Configuracoes.py         # ⭐ UI de configuração (admin only)
 ├── scripts/                       # Utilitários CLI (rodar da raiz: python scripts/<nome>.py)
-│   ├── exportar_vm.py             # Exporta data/VM_Calculado.xlsx
-│   ├── memoria_calculo.py         # Memória de cálculo do VM Dinâmico (por SKU)
+│   ├── exportar_estoque_alvo.py   # Exporta data/Estoque_Alvo.xlsx
+│   ├── memoria_calculo.py         # Memória de cálculo do Estoque-Alvo (por SKU × loja)
 │   └── memoria_calculo_fabrica.py # Memória de cálculo do PCP (por SKU)
 ├── tests/                         # Suíte pytest (motor de demanda + utilitários)
 │   ├── conftest.py                # Fixtures (config + dados sintéticos)
@@ -193,7 +194,7 @@ AKU-Hub-v1/
 │   ├── test_rodadas.py            # Calendário de rodadas de produção
 │   └── test_loader_utils.py       # limpar_id / converter_data_flexivel
 ├── assets/                        # Estáticos (favicon)
-└── data/                          # Saídas locais (ex: VM_Calculado.xlsx — não versionado)
+└── data/                          # Saídas locais (ex: Estoque_Alvo.xlsx — não versionado)
 ```
 
 ---
@@ -211,8 +212,8 @@ O `loader.py` usa `st.cache_data` com **TTL de 1 hora** (3600 s). Para forçar a
 Scripts de auditoria/exportação em `scripts/`, executados a partir da raiz do projeto (precisam dos secrets do Supabase configurados):
 
 ```bash
-python scripts/exportar_vm.py                          # gera data/VM_Calculado.xlsx (VM + Pulmão de todos os SKUs)
-python scripts/memoria_calculo.py <SKU>                # passo a passo do VM Dinâmico de um SKU
+python scripts/exportar_estoque_alvo.py                # gera data/Estoque_Alvo.xlsx (fila da Reposição de Loja)
+python scripts/memoria_calculo.py <SKU> [data]         # passo a passo do Estoque-Alvo de um SKU, por loja
 python scripts/memoria_calculo_fabrica.py <SKU>        # passo a passo do PCP (order-up-to) de um SKU
 ```
 

@@ -6,7 +6,7 @@ etl/planejamento.py (simulação de rodadas anuais), pra que as duas visões
 derivem sempre dos mesmos números — antes eram dois cálculos desconectados.
 
 Reaproveita o padrão vetorizado (pré-cálculo por groupby + loop só de
-lookup em dict) já usado em etl/vm_dinamico.py.
+lookup em dict) já usado no motor de reposição de loja.
 """
 
 import math

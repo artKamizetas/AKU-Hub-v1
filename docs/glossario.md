@@ -13,8 +13,15 @@ Termos técnicos e de negócio usados no sistema e na documentação.
 | **Rodada** | Uma leva de produção disparada à fábrica em um mês definido. |
 | **Backlog** | Peças já vendidas mas não faturadas (situações 6, 15) — ocupam estoque mas estão comprometidas. |
 | **Pipeline** | Peças já em produção na fábrica (chegando). Hoje sempre 0 — não alimentado. |
-| **VM (Visual Merchandising)** | Quantidade-alvo de exposição de um SKU na prateleira da loja. |
-| **Pulmão** | Estoque de segurança do VM (armário da loja) = Fator de Serviço × Desvio-Padrão × √lead time. |
+| **Estoque-Alvo (da loja)** | Quanto a loja deveria ter de um SKU (tamanho) hoje: demanda da loja na janela + segurança, limitado pelo espaço. Substituiu "VM + Pulmão". |
+| **Exposição mínima** | Peças por tamanho × modelo na arara (hoje 2). Piso do Estoque-Alvo. |
+| **Janela de proteção** | Dias de venda que a loja guarda: cobertura da fase (alta/baixa) + prazo de entrega da loja. |
+| **Participação da loja** | Fatia da loja na venda de um SKU na última alta. A venda institucional não entra em loja nenhuma. |
+| **Sortimento** | Colégios que cada loja atende (cadastro manual; sem ele, o derivado das vendas). |
+| **Gaveta** | Estoque de fundo da loja. Nº de gavetas por loja e peças por gaveta por super categoria; o sistema as distribui entre os modelos. |
+| **Fundo (do modelo)** | Peças do modelo além da arara: Σ tamanhos de `alvo − exposição`. É o que disputa gaveta. |
+| **Separar / Falta / Excesso** | O que o CD manda agora (já rateado) · o que a loja precisa e o CD não tem · o que a loja não vende no horizonte e pode voltar. |
+| **Em trânsito** | Já comprado, ainda não chegou ao CD (pedidos de compra "Em andamento" no Bling). Aguarda o espelho da pipeline. |
 | **CD / Central** | Depósito central (estoque que abastece as lojas). |
 
 ## PCP / metodologia (ver [metodologia-pcp.md](metodologia-pcp.md))
@@ -31,8 +38,8 @@ Termos técnicos e de negócio usados no sistema e na documentação.
 | **Nível de serviço** | Probabilidade-alvo de não faltar (alta ~99%, baixa ~92%). Define o Fator de Serviço. |
 | **Fator de Serviço** (sigla `FS`) | Multiplicador do nível de serviço (99% → 2,33; 95% → 1,65; 92% → 1,41…). |
 | **Variação da Demanda** (sigla `VD`) | Coeficiente de variação da demanda mensal (`config.demanda.variacao_demanda`) — alavanca de margem. |
-| **Desvio-Padrão** (sigla `DP`) | Dispersão da demanda **diária** em torno da média (medido dos dados). Usado no Pulmão da logística. |
-| **lead time** | Tempo entre disparar a reposição/produção e a peça chegar. Na fábrica é a rodada; na logística, o pulmão. |
+| **Desvio-Padrão** (sigla `DP`) | Dispersão da demanda em torno da média. A Reposição de Loja não o mede mais: usa `√(demanda × PA)`. |
+| **lead time** | Tempo entre disparar a reposição/produção e a peça chegar. Na fábrica é a rodada; na logística, o prazo de entrega da loja. |
 | **Demanda de alta** (antes `pico_total`) | Vendas reais do SKU na última alta × crescimento — o "topo" que ancora tudo. Coluna `DemandaAlta`. |
 | **Demanda de baixa** (antes `maint_total`) | Total do ano fora do pico = `DemandaAlta × proporção da baixa`. |
 | **Proporção da baixa** (antes "fator de manutenção") | Quanto a baixa representa da alta (Σbaixa ÷ Σalta). Base **global** (empresa, últimos 2 ciclos ≈ 0,43) + override manual por SKU/colégio (`proporcao_baixa_efetiva`). Ex: 0,43 = baixa vende 43% da alta. |
@@ -60,8 +67,9 @@ Renomeação de jul/2026 (ver [decisoes.md](decisoes.md)). Os **nomes atuais** v
 | `OH` | **EstoqueProjetado** | Fábrica / PCP |
 | `cv` | **Variação da Demanda** | Fábrica / PCP |
 | `z` | **Fator de Serviço** | Fábrica **e** Logística |
-| `σ` (sigma) | **Desvio-Padrão** | Logística / VM |
-| `LT` | **lead time** | Logística / VM |
+| `σ` (sigma) | **Desvio-Padrão** | (motor antigo da Logística) |
+| `LT` | **prazo de entrega** | Logística |
+| VM + Pulmão | **Estoque-Alvo** | Logística |
 | `pico_total` / `PicoTotal` | **demanda_alta** / **DemandaAlta** | Fábrica / PCP |
 | `maint_total` | **demanda_baixa** | Fábrica / PCP |
 | `fator_manutencao` | **proporcao_baixa** (`calcular_proporcao_baixa`) | Fábrica / PCP |

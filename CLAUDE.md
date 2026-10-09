@@ -27,7 +27,7 @@ auth.py                     # Login Google (OIDC nativo do Streamlit) + autoriza
 auth_store.py               # Porta de app.usuario (allowlist de acesso); PURO exceto o cache
 ui_carga.py                 # Porta ÚNICA de carregamento das páginas (spinner + rodapé de frescor)
 ui_tabelas.py               # Padrão ÚNICO das tabelas: tipo (fila/memória/placar/editor), altura, colunas prontas, números pt-BR
-data/                       # Saídas locais opcionais (ex: VM_Calculado.xlsx via scripts/exportar_vm.py), não sincronizado com Bling
+data/                       # Saídas locais opcionais (ex: Estoque_Alvo.xlsx via scripts/exportar_estoque_alvo.py), não sincronizado com Bling
 etl/
   loader.py                 # Lê Supabase (via PostgREST) e valida → retorna dict de DataFrames
                             # Paginação PARALELA em fila plana (117s → 11s); fingerprint_config()
@@ -37,11 +37,12 @@ etl/
   config_edicao.py          # Regras PURAS de escrita dos editores de Colégios (só vira override o que foi digitado)
   daily.py                  # Comercial: monta detalhado + metas por Loja e por Vendedor (aceita `competencia`)
   metas.py                  # Motor PURO das metas escalonadas (níveis, rateio vendedor←loja, agregação)
-  logistica.py              # Lógica de Reposição de Loja
+  logistica.py              # Reposição de Loja: orquestra a fila por loja × SKU (alvo, separar, falta, excesso)
+  reposicao.py              # Regras PURAS do Estoque-Alvo da loja (demanda por loja, gavetas, sortimento, rateio do CD)
+  relatorio_separacao.py    # Puro: fila da Logística → lista de separação impressa (HTML A4)
   demanda.py                 # Motor único de demanda por SKU × Colégio × Mês (sazonalidade, crescimento, janela de cobertura) — usado por fabrica.py e planejamento.py
   fabrica.py                # Sugestão tática de produção por SKU (PCP)
   planejamento.py           # Simulação estratégica de rodadas de produção anuais (bottom-up, a partir de demanda.py)
-  vm_dinamico.py            # Cálculo de VM (Visual Merchandising) dinâmico — reposição de loja
 pedidos/                    # Domínio TRANSACIONAL de Pedidos de Compra (etl/ segue analítico read-only)
   estados.py                # Máquina de estados pura (RASCUNHO→PRONTO→COMPRA_EMITINDO→COMPRA_EMITIDA→VENDA_EMITINDO→EMITIDO; pós-emissão: EM_ALTERACAO, *_ENVIANDO; badges)
   revisoes.py               # Puro: revisões do pedido — linha de base ("o que está nos ERPs"), envio parcial, diff emitido × novo
@@ -58,13 +59,13 @@ pedidos/                    # Domínio TRANSACIONAL de Pedidos de Compra (etl/ s
 pages/
   0_Home.py                 # Tela inicial / status do sistema
   1_Daily.py                # Dashboard Comercial — metas escalonadas (competência) + análise livre (período)
-  2_Logistica.py            # Reposição de Loja (sugestões de transferência)
+  2_Logistica.py            # Reposição de Loja — filas (separar / falta no CD / recolher) + relatório de separação impresso
   3_Fabrica.py              # "Simulador de Produção" — PCP tático (Sugestão por SKU) + planejamento anual (Visão Geral/rodadas), ambos usando etl/demanda.py como base comum; botão admin "Congelar rodada" → pedidos/
   4_Pedidos.py              # (Admin) Pedidos de Compra — rodadas congeladas, rascunhos, edição, PRONTO, emissão Bling+Olist
   5_Configuracoes.py        # (Admin) 7 seções por decisão: Comercial, Reposição, Produção, Colégios e Crescimento, Integrações, Usuários, Sistema
 scripts/                    # Utilitários de linha de comando (rodar da raiz: python scripts/<nome>.py)
-  exportar_vm.py            # Exporta data/VM_Calculado.xlsx (VM + Pulmão de todos os SKUs)
-  memoria_calculo.py        # Memória de cálculo passo a passo do VM Dinâmico p/ um SKU
+  exportar_estoque_alvo.py  # Exporta data/Estoque_Alvo.xlsx (fila integral da Reposição de Loja)
+  memoria_calculo.py        # Memória de cálculo passo a passo do Estoque-Alvo p/ um SKU, por loja (aceita data simulada)
   memoria_calculo_fabrica.py# Memória de cálculo passo a passo do PCP (order-up-to) p/ um SKU
   seed_parametros.py        # Semeia app.parametros com a Categoria B do config.yaml (rodar 1x pós-DDL 002)
   migrar.py                 # Aplica docs/sql/*.sql no Supabase via Management API (PAT em .env/env SUPABASE_ACCESS_TOKEN, NÃO em secrets); subcomandos status/aplicar/marcar; ledger app.schema_migrations
@@ -192,7 +193,7 @@ Fonte única usada tanto pela aba tática ("Sugestão por SKU") quanto pela estr
 - **Demanda ancorada na ALTA** (`calcular_demanda_mensal_por_sku`): a alta define forma e magnitude, a baixa só adiciona volume — o dado esparso da baixa nunca entra no nível do SKU.
   - Meses de alta (`config["demanda"]["janela_alta"]`, ex: [12,1,2]): `vendas reais da última temporada de alta completa × crescimento` (a grade de tamanhos é preservada porque cada SKU é um tamanho).
   - Meses de baixa: `demanda de baixa` = demanda de alta × `proporção da baixa`, espalhada pela `distribuicao_mensal_baixa()` agregada. A proporção é **global** (`calcular_proporcao_baixa()` = Σbaixa/Σalta da empresa, últimos 2 ciclos ≈ 0,43) com **cascata de override manual** (`proporcao_baixa_efetiva(sku, colegio, config, base)`): `excecoes_sku[sku].proporcao_baixa → colegios[COL].proporcao_baixa → global`. Backtest (2023-25): fatiar por categoria/SKU não melhora (teto ~48%); global + override nos poucos gigantes de cauda curta é o que sustenta. Editável na tela só no nível do colégio (Configurações → Colégios e Crescimento → Por colégio); o nível SKU segue no motor, mas sem cadastro na tela (a aba de exceções foi retirada).
-- **Crescimento por (colégio × série)** (`taxa_crescimento_efetiva(colegio, config, grupo, ativo, observado)`): cascata híbrida (manual do planejador SEMPRE vence os dados): `crescimento_grupos[grupo] (manual) → taxa_crescimento colégio (manual) → observado colégio×segmento → observado colégio → 1+fabrica.crescimento_pct/100`. A **camada observada** (`calcular_crescimento_observado`) mede o crescimento realizado nas ALTAS (alta-sobre-alta, sinal limpo — a baixa tem ruptura), por colégio e por segmento, clamp [0.5,2.0], gate de volume ≥30. O mapa grupo→segmento (`mapa_grupo_segmento(config)`) tem default no código (`SEGMENTO_POR_GRUPO`) sobrescrito por `config["grupo_segmento"]` — editável na página de Configurações (baldes atuais: Infantil, Inf+Fund, Fundamental, Médio, Tempo Integral, Diário, Ed. Física, Esporte, Outros). Desligável em `config["demanda"]["crescimento_observado_ativo"]` (→ volta ao +10% cego). `ativo=False` desliga tudo (toggle p/ comparar). Vale p/ fábrica e VM logística. Não muda o total da rede (~+11%), **redistribui** para o mix certo (ex: NEV Médio +51% vs LMN −29%).
+- **Crescimento por (colégio × série)** (`taxa_crescimento_efetiva(colegio, config, grupo, ativo, observado)`): cascata híbrida (manual do planejador SEMPRE vence os dados): `crescimento_grupos[grupo] (manual) → taxa_crescimento colégio (manual) → observado colégio×segmento → observado colégio → 1+fabrica.crescimento_pct/100`. A **camada observada** (`calcular_crescimento_observado`) mede o crescimento realizado nas ALTAS (alta-sobre-alta, sinal limpo — a baixa tem ruptura), por colégio e por segmento, clamp [0.5,2.0], gate de volume ≥30. O mapa grupo→segmento (`mapa_grupo_segmento(config)`) tem default no código (`SEGMENTO_POR_GRUPO`) sobrescrito por `config["grupo_segmento"]` — editável na página de Configurações (baldes atuais: Infantil, Inf+Fund, Fundamental, Médio, Tempo Integral, Diário, Ed. Física, Esporte, Outros). Desligável em `config["demanda"]["crescimento_observado_ativo"]` (→ volta ao +10% cego). `ativo=False` desliga tudo (toggle p/ comparar). Vale p/ fábrica e Reposição de Loja. Não muda o total da rede (~+11%), **redistribui** para o mix certo (ex: NEV Médio +51% vs LMN −29%).
 - **Política order-up-to** (`simular_politica_reabastecimento`): motor comum. Por SKU, caminha as rodadas mantendo estoque projetado (`estoque − backlog`, consumido mês a mês, reabastecido a cada chegada). Em cada rodada r: `DemandaPeriodo` = demanda até a próxima chegar; `EstoqueSeguranca = estoque_seguranca(DemandaPeriodo, contém_alta, config)` (Fator de Serviço × Variação da Demanda × DemandaPeriodo); `EstoqueAlvo = DemandaPeriodo + EstoqueSeguranca`; `Pedido = par_ceil(EstoqueAlvo − EstoqueProjetado_na_chegada)`. As colunas do DataFrame retornado usam esses nomes (`DemandaPeriodo`/`EstoqueSeguranca`/`EstoqueAlvo`/`EstoqueProjetado`; antes eram `DI`/`SS`/`S`/`OH`). Sugestão por SKU = Pedido da rodada selecionada; Visão Geral = soma por rodada. **Cobertura Alvo** (antecipação deliberada, `planejamento.cobertura_override` = {data_disparo ISO → fração 0-1 da demanda anual da rede}): estende o fim de proteção da rodada até a demanda acumulada da rede atingir o alvo (`_data_por_demanda_acumulada`; clamp piso=natural, teto=1.0) — a rodada seguinte encolhe SOZINHA (order-up-to é auto-liquidante; Σ produção do horizonte se conserva). Colunas `FimCobertura`/`CoberturaPct` no retorno. A **Visão Geral é o cockpit único do plano de rodadas**: edita o calendário de disparos (`rodadas_datas`, **multiselect de mês/ano** — pills; disparos são sempre 1º-de-mês) E as coberturas na mesma tela, onde o efeito é visível ao vivo (config de simulação usa as datas do preview antes de salvar). A tabela tem DUAS colunas de cobertura — "Cobertura natural (%)" read-only (piso) + "Cobertura alvo (%)" editável e **vazia quando não há antecipação** (preenchida = intenção deliberada). Preview de sessão para datas e coberturas; um botão "Salvar plano" (admin) persiste `rodadas_datas` + `cobertura_override` juntos. Spec: `docs/requisitos/cobertura-alvo-rodada.md`. **On-order/em-trânsito** (pendência conhecida, EM DISCUSSÃO — não implementar ainda): hoje o motor abre em `estoque − backlog` e recalcula o pedido a cada chegada, então a decisão manual do gestor (congelou 65 no lugar de 70) não retroalimenta a próxima rodada. A spec `docs/requisitos/posicao-estoque-on-order.md` explora somar o termo em-trânsito à posição de partida, com o Tiny/Olist como fonte da verdade da execução (qtd/data reais deslizam na fábrica) e a regra de ouro da reconciliação (baixar o on-order quando vira estoque físico).
 - **Nível de serviço** (`config["demanda"]["nivel_servico_alta"/"nivel_servico_baixa"/"variacao_demanda"]`): alta ~99% ("não pode faltar"), baixa ~92%. Fator de Serviço pela criticidade do intervalo.
 - `planejamento.periodo_historico_inicio`/`fim` = período histórico único (sazonalidade agregada + distribuição mensal da baixa + base dos SKUs só-de-baixa). Define o FORMATO do ano, não o tamanho do pico. Calendário de rodadas: `planejamento.rodadas_datas` (datas ISO explícitas de disparo, este ano + próximo, SEM repetição anual — a última data só fecha o intervalo da penúltima; 2+ datas obrigatórias) é a **fonte única**. O antigo fallback mensal (`planejamento.rodadas`, meses fixos que repetiam todo ano) e o override `rodadas_meses` foram removidos — havia duas metodologias divergindo na UI (Visão Geral por meses × Sugestão por SKU por datas). Sem `rodadas_datas`, a Visão Geral só avisa e a Sugestão por SKU cai na cobertura fixa (`fabrica.cobertura_meses`). A simulação expõe `DemandaPeriodoAlta`/`DemandaPeriodoBaixa`/`MesesIntervalo`/`data_chegada_seguinte` (split pico/baixa usado pela UI da Sugestão por SKU).
@@ -360,6 +361,58 @@ Zerado NÃO vira item de pedido (entraria na grade, nos totais e na emissão).
   **Bling** em `montar_payload_venda(prazo_dias=...)` e os dois vencimentos batem
   por construção — um campo editável em dois lugares divergiria.
 
+## Reposição de Loja (etl/reposicao.py + etl/logistica.py + pages/2_Logistica.py)
+
+Um número por **loja × SKU**: o **Estoque-Alvo** (o antigo "VM + Pulmão" e o
+`etl/vm_dinamico.py` saíram em out/2026). Spec: `docs/requisitos/reposicao-loja-v2.md`.
+
+```
+Demanda da loja    = demanda da rede (demanda.calcular_demanda_mensal_por_sku) × participação da loja no SKU
+Janela de proteção = cobertura da fase (alta|baixa) + prazo de entrega da loja      [dias, para FRENTE]
+Segurança          = Fator de Serviço × √(demanda da janela × PA)
+Alvo ideal         = max(exposição mínima, ⌈demanda da janela + segurança⌉)
+Alvo               = alvo ideal limitado pelo espaço (arara + gavetas do modelo)
+Separar            = max(Alvo − estoque da loja, 0), rateado pelo saldo do CD
+```
+
+- **`etl/reposicao.py` é PURO** (regras pequenas, todas testadas); `processar_logistica(dados,
+  config, em_transito=None, data_hoje=None)` só costura. Colunas em `logistica.COLUNAS`;
+  ações em `logistica.ACAO_*` — a página compara com as constantes, nunca com o texto.
+- **Demanda é a do Simulador.** Não reintroduza cálculo próprio de venda diária na
+  logística: o motor antigo somava TODAS as altas desde 2019 e dividia por 180 dias. A
+  participação da loja tem a rede inteira no denominador — é o que tira a venda
+  institucional (loja "Encomendas") sem filtro explícito.
+- **Fase = `demanda.janela_alta`** (dez–fev). A janela olha para frente
+  (`fracionar_janela_por_mes`): no fim de dezembro já carrega janeiro.
+- **Sortimento**: `reposicao.sortimento = {loja: [colégios]}` (cadastro manual). É a
+  PRESENÇA da chave da loja que significa "cadastro" — sem ela vale o derivado das vendas
+  (colégio com 30+ peças na loja em 12 meses) e a tela avisa. Produto sem colégio fica onde
+  a loja o vende. Só produto com demanda na rede ganha a exposição mínima (o Bling mantém
+  produto morto como ativo).
+- **Espaço**: `reposicao.lojas[loja].gavetas` × `reposicao.capacidade_gaveta[super_categoria]`.
+  Modelo = SKU pai (`pedidos.grade.identificar`); as gavetas vão para os modelos com mais
+  fundo (`alvo ideal − exposição`), um campeão pode levar mais de uma. `gavetas` AUSENTE =
+  sem teto; `0` = só a arara. No pico, Natal fica com ~300 SKUs `LimitadoPorEspaco` com 20
+  gavetas — é o esperado, sinaliza dependência de reposição diária.
+- **Rateio "quem zera primeiro"** (`ratear_cd`): só quando o CD não cobre as lojas; peça a
+  peça pela menor cobertura em dias. Invariante com teste: **Σ Separar ≤ saldo do CD** (o
+  motor antigo prometia o mesmo estoque às duas lojas).
+- **Excesso** só conta o que a loja não vende em `recolher_horizonte_dias` (120). A tela
+  indica; nada é movimentado.
+- **Saldo negativo** (loja ou CD) → `Corrigir estoque`, sem sugestão.
+- **Em trânsito**: o espelho NÃO tem pedidos de compra. `em_transito=` é a porta pronta; a
+  fonte decidida é a pipeline (`docs/requisitos/espelho-pedidos-compra.md`). Não sincronize
+  do Bling por conta própria nem some o termo no Simulador sem fechar
+  `docs/requisitos/posicao-estoque-on-order.md`.
+- **Tela × papel**: a tela decide (KPIs + uma fila por vez em `segmented_control`); o papel
+  separa (`etl/relatorio_separacao.py` → HTML A4 por loja, Colégio → Modelo, tamanhos lado a
+  lado). Imprimir = `st.iframe` de 1 px com o documento que chama `window.print()`; segue a
+  loja e os filtros da tela. O cache da página leva o DIA na chave (o alvo depende do calendário).
+- **Parâmetros legados**: `vm.*` e `logistica.vm_padrao` não têm leitor. `vm` segue em
+  `CHAVES_PARAMETROS` só para trafegar o que já estava gravado; o primeiro "Salvar" da
+  seção Reposição o remove (`_fechar_reposicao`). `reposicao.parametros(config)` é o ponto
+  único de leitura (com fallback para `vm.nivel_servico_default`/`aplicar_crescimento`).
+
 ## Tabelas (ui_tabelas.py)
 
 A página diz qual é o TRABALHO da tabela e recebe o desenho. Decisão e porquês em
@@ -481,9 +534,9 @@ devolve a última escolha em vez de deixar a tela sem dono.
 | Seção (`slug`) | Pergunta do gestor | Parâmetros |
 |---|---|---|
 | **Comercial** (`comercial`) | Qual a meta do mês e quem responde por ela? | `daily.metas_mensais` · `daily.vendedores_loja` |
-| **Reposição de Loja** (`reposicao`) | A loja está abastecida demais/de menos? | `vm.*` (cobertura, piso PA, mínimo, prazo, nível de serviço, temporada) · `logistica.dias_analise_giro` · Avançado: `logistica.vm_padrao` |
+| **Reposição de Loja** (`reposicao`) | A loja está abastecida demais/de menos? | Alvo: `reposicao.exposicao_minima`, `cobertura_dias_alta/baixa`, `nivel_servico_default`, `recolher_horizonte_dias` · `logistica.dias_analise_giro` · Prazo e espaço: `reposicao.lojas`, `reposicao.capacidade_gaveta` · Sortimento: `reposicao.sortimento` |
 | **Produção** (`producao`) | A fábrica vai produzir demais/de menos? | `demanda.nivel_servico_alta/baixa`, `variacao_demanda`, `janela_alta` · `planejamento.lead_time_semanas`, `periodo_historico_*` · Avançado: `fabrica.cobertura_meses`, `fabrica.correcao_manual` · rodadas: só leitura + link p/ o Simulador |
-| **Colégios e Crescimento** (`colegios`) | Quanto cada colégio vai crescer? | Regras gerais: `demanda.crescimento_observado_ativo`, `fabrica.crescimento_pct`, `demanda.aplicar_crescimento_fabrica`, `vm.aplicar_crescimento` · Por colégio / Por série: `colegios` · Nomes e segmentos: `colegios_alias`, `grupo_segmento` |
+| **Colégios e Crescimento** (`colegios`) | Quanto cada colégio vai crescer? | Regras gerais: `demanda.crescimento_observado_ativo`, `fabrica.crescimento_pct`, `demanda.aplicar_crescimento_fabrica`, `reposicao.aplicar_crescimento` · Por colégio / Por série: `colegios` · Nomes e segmentos: `colegios_alias`, `grupo_segmento` |
 | **Integrações** (`integracoes`) | Bling e Olist estão prontos para emitir? | `app.integracao` (fora de `app.parametros`) |
 | **Usuários** (`usuarios`) | Quem entra e o que vê? | `app.usuario` |
 | **Sistema** (`sistema`) | Está no ar? De onde vêm os IDs? | `daily.status_ids` (Mapeamento do Bling) · recarga · backup |
@@ -507,9 +560,8 @@ devolve a última escolha em vez de deixar a tela sem dono.
   `crescimento_grupos` do colégio) em vez de reimplementar a cascata: é o que
   garante que o número na tela é o aplicado. Multiplicadores em 2 casas, as mesmas
   do editor — ele TRUNCA a exibição na precisão do `step`.
-- **Duas "altas", de propósito separadas**: *Temporada da loja* (`vm.inicio_alta/
-  fim_alta`, Reposição) e *Pico de vendas* (`demanda.janela_alta`, Produção). Cada
-  motor tem a sua; unificar é decisão de metodologia, não de tela.
+- **Uma alta só**: a Reposição usa a `demanda.janela_alta` da Produção (*Pico de
+  vendas*). A antiga *Temporada da loja* (`vm.inicio_alta/fim_alta`) saiu com o VM.
 - **Exceções por SKU não têm mais tela** (out/2026 — funcionalidade não usada; a
   coluna `correcao_manual` tinha dois significados: peças no PCP, fator no VM). Os
   motores ainda leem `excecoes_sku` (vazio = sem efeito) e a chave segue em
@@ -612,12 +664,12 @@ postgrest
 Authlib
 ```
 
-`openpyxl` continua porque `scripts/exportar_vm.py` exporta `data/VM_Calculado.xlsx` (não é mais usado para ler parâmetros de entrada — o VM Dinâmico lê tudo de `config.yaml`).
+`openpyxl` continua porque `scripts/exportar_estoque_alvo.py` exporta `data/Estoque_Alvo.xlsx`.
 
 ---
 
 ## Testes (`tests/`)
-Suíte `pytest` focada no **motor de demanda/PCP** (`etl/demanda.py`), nos utilitários, no **padrão de tabelas** (`tests/test_ui_tabelas.py` — altura por tipo, arredondamento antes de exibir, formatadores pt-BR) e na **paginação paralela** do `loader.py` (`tests/test_loader_paginacao.py` — planejamento de páginas, montagem a partir de lotes fora de ordem, filtro simétrico count/página, retry e cauda, com fake do cliente PostgREST), nas **regras de escrita dos Colégios** (`tests/test_config_edicao.py` — salvar sem editar não grava override; limpar a célula remove), no **Comercial/metas** (`etl/metas.py` puro + `etl/daily.py` com competência fixa via fixtures `config_daily`/`dados_daily` do conftest — o default é o mês corrente, que não serviria para teste determinístico), no **domínio de pedidos** (`pedidos/` — builder, estados, grade e catálogo puros (`tests/test_pedidos_grade.py`: ordem dos tamanhos, volta da grade por id, célula nova → SKU); repositório testado com fake do gateway `_inserir/_atualizar/_selecionar/_deletar`, sem Supabase) e nas **integrações/emissão** (`pedidos/integracoes/` + `emissor.py` — payloads puros, OAuth e clientes HTTP com fake injetável, emissor com repo+cliente fakes; zero rede), incluindo o **pós-emissão** (`tests/test_pedidos_revisoes.py` — linha de base e envio parcial; em `tests/test_emissor.py`, o filtro de "em aberto", a divergência com o ERP, envio feliz / falha antes / falha depois / concluir, e o cancelamento). Sem Supabase/secrets. Instalar dev deps com `uv pip install -r requirements-dev.txt` (o venv usa **uv**, não pip) e rodar `pytest` na raiz. `tests/conftest.py` monta `config` e `dados` sintéticos; o determinismo vem de ancorar as altas em `now()` de forma constante e desligar o crescimento (ver docstring do conftest). Os fakes reusam os `RepoFake` de `test_pedidos_repositorio`/`test_integracoes_repositorio` e o `HttpFake` de `test_integracoes_payloads`. Ao mexer no motor, rode a suíte e atualize os testes junto.
+Suíte `pytest` focada no **motor de demanda/PCP** (`etl/demanda.py`), nos utilitários, no **padrão de tabelas** (`tests/test_ui_tabelas.py` — altura por tipo, arredondamento antes de exibir, formatadores pt-BR) e na **paginação paralela** do `loader.py` (`tests/test_loader_paginacao.py` — planejamento de páginas, montagem a partir de lotes fora de ordem, filtro simétrico count/página, retry e cauda, com fake do cliente PostgREST), nas **regras de escrita dos Colégios e da Reposição** (`tests/test_config_edicao.py` — salvar sem editar não grava override; limpar a célula remove; gavetas vazio ≠ zero; toda loja sai com chave no sortimento), na **Reposição de Loja** (`tests/test_reposicao.py` — regras puras e orquestrador com as fixtures `config_reposicao`/`dados_reposicao`, sempre com `data_hoje` fixa: institucional fora da loja, gavetas, rateio com Σ Separar ≤ CD, excesso; `tests/test_relatorio_separacao.py`), no **Comercial/metas** (`etl/metas.py` puro + `etl/daily.py` com competência fixa via fixtures `config_daily`/`dados_daily` do conftest — o default é o mês corrente, que não serviria para teste determinístico), no **domínio de pedidos** (`pedidos/` — builder, estados, grade e catálogo puros (`tests/test_pedidos_grade.py`: ordem dos tamanhos, volta da grade por id, célula nova → SKU); repositório testado com fake do gateway `_inserir/_atualizar/_selecionar/_deletar`, sem Supabase) e nas **integrações/emissão** (`pedidos/integracoes/` + `emissor.py` — payloads puros, OAuth e clientes HTTP com fake injetável, emissor com repo+cliente fakes; zero rede), incluindo o **pós-emissão** (`tests/test_pedidos_revisoes.py` — linha de base e envio parcial; em `tests/test_emissor.py`, o filtro de "em aberto", a divergência com o ERP, envio feliz / falha antes / falha depois / concluir, e o cancelamento). Sem Supabase/secrets. Instalar dev deps com `uv pip install -r requirements-dev.txt` (o venv usa **uv**, não pip) e rodar `pytest` na raiz. `tests/conftest.py` monta `config` e `dados` sintéticos; o determinismo vem de ancorar as altas em `now()` de forma constante e desligar o crescimento (ver docstring do conftest). Os fakes reusam os `RepoFake` de `test_pedidos_repositorio`/`test_integracoes_repositorio` e o `HttpFake` de `test_integracoes_payloads`. Ao mexer no motor, rode a suíte e atualize os testes junto.
 
 ---
 

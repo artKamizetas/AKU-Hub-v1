@@ -2,6 +2,11 @@
 
 **Status:** 🟡 EM DISCUSSÃO — não implementar ainda · **Autor:** diretoria (Diogo) + assistente · **Alvo provável:** `etl/demanda.py`, `etl/loader.py`, `pedidos/`, `pages/3_Fabrica.py` + `pages/4_Pedidos.py`
 
+> **Atualização (out/2026):** a **fonte do em-trânsito foi decidida** pela diretoria — opção
+> **(c) espelho em `public`** (§3.3), sem ponte por sync próprio. O pedido à pipeline está em
+> [espelho-pedidos-compra.md](espelho-pedidos-compra.md). A Reposição de Loja já aceita o dado
+> (`processar_logistica(em_transito=…)`); **somar o termo no Simulador continua em discussão**.
+>
 > Documento de aprofundamento, não spec congelada. Nasce da pergunta da diretoria
 > (jul/2026): *"a rodada sugere 70 mas eu faço 65; a projeção nunca fica sabendo
 > disso — não deveria?"*. Fecha a pendência aberta na

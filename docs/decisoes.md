@@ -9,6 +9,47 @@ Records). Adicione no topo as mais recentes.
 
 ---
 
+## 2026-10 · Reposição de Loja v2: Estoque-Alvo por loja no lugar de VM + Pulmão
+
+**Contexto:** crítica da diretoria ao motor de reposição (VM Dinâmico + Pulmão): alvo
+estático num negócio em que 5 semanas fazem ~70% da alta, demanda da rede aplicada igual às
+duas lojas, o mesmo saldo do CD prometido às duas, e um bug que somava todas as altas desde
+2019. Spec: `docs/requisitos/reposicao-loja-v2.md`.
+
+- **Um número só, o Estoque-Alvo.** VM (prateleira) e Pulmão (armário) eram o mesmo estoque
+  com dois nomes: em loja de uniforme a venda é assistida e a demanda é cativa — exposição é
+  decisão de planograma (2 por tamanho), não de reposição. Virou o piso do alvo.
+- **Demanda vem do motor do Simulador** (`etl/demanda.py`) × participação da loja no SKU.
+  **Por quê:** loja e fábrica passam a usar a mesma previsão, e o bug das temporadas somadas
+  some junto. A venda institucional fica no denominador e em loja nenhuma.
+- **Uma alta só.** A "temporada da loja" (`vm.inicio_alta/fim_alta`, out–mar) acabou; a
+  Reposição usa `demanda.janela_alta` (dez–fev). Fecha a pendência anotada na reorganização
+  das Configurações.
+- **Alvo olha para frente no calendário** (cobertura em dias por fase + prazo de entrega da
+  loja). Descartado o alvo em fases fixas (pré-carga/pico/baixa): a janela para frente já
+  carrega janeiro no fim de dezembro, com um parâmetro a menos.
+- **Segurança por Poisson composto** (`Fator de Serviço × √(demanda × PA)`) no lugar do
+  desvio-padrão diário: o SKU mediano vende 1×/semana no pico, e o desvio medido em anos de
+  histórico media sazonalidade, não ruído.
+- **Espaço é restrição, não sugestão.** Gavetas por loja e capacidade por super categoria; o
+  sistema distribui as gavetas pelos modelos de maior fundo (decisão da diretoria, contra
+  cadastrar à mão quem tem gaveta). O que não cabe aparece como "limitado por espaço".
+- **Sortimento por cadastro manual** loja × colégio (decisão da diretoria). Sem cadastro, vale
+  o derivado das vendas com gate de 30 peças — uma peça avulsa de colégio de outra cidade
+  traria a grade inteira.
+- **CD curto: recebe quem vai zerar primeiro** (decisão da diretoria), peça a peça pela menor
+  cobertura em dias.
+- **Excesso com horizonte de 120 dias.** Com 60, outubro mandava recolher o que janeiro vende.
+- **Em trânsito: esperar o espelho da pipeline** (decisão da diretoria), não sincronizar por
+  conta própria nem ler o Bling ao vivo. A porta fica pronta (`em_transito=`) e o pedido está
+  em `docs/requisitos/espelho-pedidos-compra.md`. O Simulador não muda nesta entrega.
+- **Saíram os gráficos da Logística** (distribuição por ação e o Pareto de eixo duplo): os
+  KPIs e as filas respondem a mesma pergunta, e a tela agora termina num documento impresso.
+- **Relatório de separação em HTML com CSS de impressão**, não PDF: sem dependência nova, e o
+  navegador do operador já imprime.
+
+---
+
 ## 2026-10 · Pedido emitido pode ser alterado e cancelado (sobrepondo Bling e Olist)
 
 **Contexto:** o pedido ficava só-leitura assim que a compra ia ao Bling. Ajuste

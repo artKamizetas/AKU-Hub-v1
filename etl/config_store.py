@@ -33,7 +33,8 @@ ID_LINHA = "default"          # app.parametros tem 1 linha; o app só faz UPDATE
 # lista de chaves (subconjunto; o resto do bloco é Categoria A / yaml).
 CHAVES_PARAMETROS = {
     "logistica": None,
-    "vm": None,
+    "reposicao": None,
+    "vm": None,           # LEGADO: só trafega o que já estava gravado até a Reposição ser salva
     "colegios": None,
     "colegios_alias": None,
     "daily": ["metas", "metas_mensais", "vendedores_loja", "status_ids"],  # situacoes_venda é estrutural
@@ -52,6 +53,7 @@ CAMINHOS_SUBSTITUICAO = {
     "colegios", "colegios_alias", "grupo_segmento", "excecoes_sku",
     "planejamento.cobertura_override",
     "daily.metas_mensais", "daily.vendedores_loja",
+    "reposicao.lojas", "reposicao.capacidade_gaveta", "reposicao.sortimento",
 }
 
 

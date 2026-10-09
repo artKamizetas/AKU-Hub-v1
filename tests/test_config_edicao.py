@@ -136,3 +136,65 @@ def test_matriz_nao_muta_a_entrada():
     atual = {"NEV": {"crescimento_grupos": {"EME": 1.3}}}
     ce.aplicar_edicao_crescimento_grupos(atual, [celula("NEV", "EME", 1.51, 1.51)])
     assert atual == {"NEV": {"crescimento_grupos": {"EME": 1.3}}}
+
+
+# ---------------------------------------------------------------------
+# Reposição de Loja — lojas, capacidade da gaveta, sortimento
+# ---------------------------------------------------------------------
+
+def test_lojas_gavetas_vazio_nao_e_zero():
+    """Vazio = sem teto de espaço; zero = a loja só tem a arara."""
+    novo = ce.aplicar_edicao_lojas([
+        {"loja": "Natal", "prazo_entrega_dias": 1.0, "gavetas": 20.0},
+        {"loja": "Mossoró", "prazo_entrega_dias": 2, "gavetas": None},
+        {"loja": "Nova", "prazo_entrega_dias": None, "gavetas": 0},
+    ])
+    assert novo == {
+        "Natal": {"prazo_entrega_dias": 1, "gavetas": 20},
+        "Mossoró": {"prazo_entrega_dias": 2},
+        "Nova": {"prazo_entrega_dias": 0, "gavetas": 0},
+    }
+
+
+def test_lojas_ignora_linha_sem_nome_e_negativo_vira_zero():
+    novo = ce.aplicar_edicao_lojas([
+        {"loja": " ", "prazo_entrega_dias": 5, "gavetas": 5},
+        {"loja": "Natal", "prazo_entrega_dias": -3, "gavetas": -1},
+    ])
+    assert novo == {"Natal": {"prazo_entrega_dias": 0, "gavetas": 0}}
+
+
+def test_capacidade_so_grava_o_que_difere_do_padrao():
+    novo = ce.aplicar_edicao_capacidade([
+        {"super_categoria": "Camiseta", "pecas": 50},      # igual ao padrão → não grava
+        {"super_categoria": "Calça", "pecas": 30.0},
+        {"super_categoria": "Meia", "pecas": None},        # vazio → segue o padrão
+    ], padrao=50)
+    assert novo == {"_padrao": 50, "Calça": 30}
+
+
+def test_capacidade_padrao_invalido_cai_em_50_e_minimo_e_1():
+    novo = ce.aplicar_edicao_capacidade([{"super_categoria": "Boné", "pecas": 0}], padrao=None)
+    assert novo == {"_padrao": 50, "Boné": 1}
+
+
+def test_sortimento_toda_loja_sai_com_chave():
+    """Loja sem nenhum colégio marcado precisa da chave: é ela que impede o
+    motor de voltar ao derivado das vendas."""
+    novo = ce.aplicar_edicao_sortimento([
+        {"colegio": "SES", "Natal": True, "Mossoró": True},
+        {"colegio": "NEV", "Natal": True, "Mossoró": False},
+        {"colegio": "DRM", "Natal": None, "Mossoró": None},
+    ], ["Natal", "Mossoró", "Caicó"])
+    assert novo == {"Natal": ["NEV", "SES"], "Mossoró": ["SES"], "Caicó": []}
+
+
+def test_sortimento_cadastrado_e_o_que_o_motor_le():
+    from etl import reposicao
+    cadastro = ce.aplicar_edicao_sortimento(
+        [{"colegio": "SES", "Natal": True, "Mossoró": False}], ["Natal", "Mossoró"])
+    params = reposicao.parametros({"reposicao": {"sortimento": cadastro}})
+    sortimento, origem = reposicao.sortimento_efetivo(
+        params, ["Natal", "Mossoró"], {"Mossoró": {"SES", "NEV"}})
+    assert sortimento == {"Natal": {"SES"}, "Mossoró": set()}
+    assert set(origem.values()) == {reposicao.ORIGEM_CADASTRO}

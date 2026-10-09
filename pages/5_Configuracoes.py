@@ -4,7 +4,7 @@ Página: Configurações (Admin Only)
 Organizada pela DECISÃO que o gestor quer tomar, não pelo formato do widget:
 
 - Comercial ............... metas mensais e vendedores por loja
-- Reposição de Loja ....... VM dinâmico, pulmão e giro
+- Reposição de Loja ....... estoque-alvo, espaço (gavetas) e sortimento
 - Produção ................ margem de segurança e calendário do motor
 - Colégios e Crescimento .. a cascata do crescimento, do geral ao específico
 - Integrações ............. Bling (compra) e Olist (venda)
@@ -49,6 +49,7 @@ from ui_tabelas import (
     col_texto, col_moeda, col_colegio, col_pecas,
 )
 from etl import config_edicao
+from etl.reposicao import parametros as parametros_reposicao
 from etl.config_store import extrair_parametros, obter_repositorio_parametros
 from pedidos.integracoes.repositorio import obter_repositorio_integracoes
 from pedidos.integracoes import oauth, bling as cliente_bling, olist as cliente_olist
@@ -134,7 +135,7 @@ def validar_config(config):
     erros = []
 
     # Verificar seções obrigatórias
-    obrigatorias = ["fonte", "depositos", "logistica", "daily", "fabrica", "planejamento", "vm", "demanda"]
+    obrigatorias = ["fonte", "depositos", "logistica", "daily", "fabrica", "planejamento", "reposicao", "demanda"]
     for secao in obrigatorias:
         if secao not in config:
             erros.append(f"Seção '{secao}' ausente")
@@ -157,12 +158,11 @@ def validar_config(config):
 
     # Validar números positivos
     campos_positivos = [
-        ("logistica.vm_padrao", ["logistica", "vm_padrao"]),
         ("logistica.dias_analise_giro", ["logistica", "dias_analise_giro"]),
-        ("vm.dias_cobertura", ["vm", "dias_cobertura"]),
-        ("vm.mult_pa", ["vm", "mult_pa"]),
-        ("vm.vm_minimo", ["vm", "vm_minimo"]),
-        ("vm.lead_time", ["vm", "lead_time"]),
+        ("reposicao.exposicao_minima", ["reposicao", "exposicao_minima"]),
+        ("reposicao.cobertura_dias_alta", ["reposicao", "cobertura_dias_alta"]),
+        ("reposicao.cobertura_dias_baixa", ["reposicao", "cobertura_dias_baixa"]),
+        ("reposicao.recolher_horizonte_dias", ["reposicao", "recolher_horizonte_dias"]),
         ("fabrica.crescimento_pct", ["fabrica", "crescimento_pct"]),
         ("fabrica.cobertura_meses", ["fabrica", "cobertura_meses"]),
         ("planejamento.lead_time_semanas", ["planejamento", "lead_time_semanas"]),
@@ -625,110 +625,258 @@ def _secao_comercial():
 
 
 # =================================================================
-# SEÇÃO — REPOSIÇÃO DE LOJA (VM dinâmico, pulmão, giro)
+# SEÇÃO — REPOSIÇÃO DE LOJA (estoque-alvo, espaço, sortimento)
 # =================================================================
 
-def _secao_reposicao():
-    config = carregar_config()
-    cfg_vm = config.get("vm", {})
-    _meses = list(MESES_NOME_CFG.keys())
+def _fechar_reposicao(config, mensagem: str) -> None:
+    """Salva um bloco da Reposição. Na primeira gravação o legado some: os
+    parâmetros do antigo VM (`vm.*`, `logistica.vm_padrao`) já não têm leitor."""
+    config.pop("vm", None)
+    (config.get("logistica") or {}).pop("vm_padrao", None)
+    _salvar_secao(config, mensagem)
 
-    st.caption(
-        "Quanto cada loja deve ter na prateleira (**VM**) e de reserva (**pulmão**). "
-        "O alvo é calculado por SKU a partir das vendas da temporada; a tela de "
-        "Logística compara esse alvo com o estoque e sugere a transferência."
-    )
 
-    with st.form("form_reposicao", border=False):
+def _bloco_alvo_da_loja(config, params):
+    with st.form("form_reposicao_alvo", border=False):
         with st.container(border=True):
-            st.markdown("**Exposição na loja (VM)**")
-            st.caption("O VM de cada SKU é o **maior** entre os três valores abaixo.")
+            st.markdown("**Quanto a loja guarda**")
+            st.caption(
+                "Alvo de cada tamanho = venda prevista da loja nos dias de cobertura "
+                "(mais o prazo de entrega) + uma margem de segurança. Nunca abaixo da exposição."
+            )
             c1, c2, c3 = st.columns(3)
-            vm_dias_cobertura = c1.number_input(
-                "Cobertura (dias de venda)",
-                value=int(cfg_vm.get("dias_cobertura", 15)), min_value=1,
-                help="Quantos dias de venda da temporada a prateleira deve aguentar. "
-                     "VM de cobertura = venda diária × estes dias × crescimento.",
+            exposicao = c1.number_input(
+                "Exposição mínima (peças por tamanho)",
+                value=int(params["exposicao_minima"]), min_value=0,
+                help="Peças de cada tamanho × modelo na arara. É o piso do alvo de todo "
+                     "produto vivo dos colégios que a loja atende.",
             )
-            vm_mult_pa = c2.number_input(
-                "Piso por atendimento (× PA)",
-                value=float(cfg_vm.get("mult_pa", 2.0)), min_value=0.1, step=0.1,
-                help="Piso do VM: peças por atendimento (PA) do SKU × este multiplicador. "
-                     "Evita que um único cliente esvazie a prateleira.",
+            cobertura_alta = c2.number_input(
+                "Cobertura na alta (dias)",
+                value=int(params["cobertura_dias_alta"]), min_value=1,
+                help="Dias de venda que a loja guarda na alta. Como a reposição sai todo "
+                     "dia, poucos dias bastam — mais dias = mais estoque parado na loja.",
             )
-            vm_minimo = c3.number_input(
-                "Mínimo absoluto (peças)",
-                value=int(cfg_vm.get("vm_minimo", 2)), min_value=0,
-                help="Nenhum SKU fica com VM abaixo disto, mesmo sem venda na temporada.",
+            cobertura_baixa = c3.number_input(
+                "Cobertura na baixa (dias)",
+                value=int(params["cobertura_dias_baixa"]), min_value=1,
+                help="Dias de venda que a loja guarda na baixa, quando a reposição é "
+                     "semanal ou sob solicitação.",
             )
-
-        with st.container(border=True):
-            st.markdown("**Pulmão de reposição**")
-            st.caption("Reserva acima do VM para a loja não zerar enquanto a reposição não chega.")
-            c1, c2, _ = st.columns(3)
-            vm_lead_time = c1.number_input(
-                "Prazo de reposição (dias)",
-                value=int(cfg_vm.get("lead_time", 3)), min_value=1,
-                help="Dias entre pedir e a mercadoria chegar à loja. Mais dias = pulmão maior.",
-            )
-            vm_nivel_servico = c2.selectbox(
+            c1, c2, c3 = st.columns(3)
+            nivel_servico = c1.selectbox(
                 "Nível de serviço padrão (%)",
                 options=NIVEIS_SERVICO,
-                index=_indice_ns(cfg_vm.get("nivel_servico_default"), 95),
-                help="Chance de NÃO faltar durante o prazo de reposição. Vale para o colégio "
-                     "sem nível próprio (Colégios e Crescimento → Por colégio).",
+                index=_indice_ns(params["nivel_servico_default"], 95),
+                help="Chance de NÃO faltar até a próxima reposição chegar. Define o tamanho "
+                     "da margem de segurança. Vale para o colégio sem nível próprio "
+                     "(Colégios e Crescimento → Por colégio).",
             )
-
-        with st.container(border=True):
-            st.markdown("**Temporada da loja e giro**")
-            c1, c2, c3 = st.columns(3)
-            vm_inicio_alta = c1.selectbox(
-                "Temporada da loja — início",
-                options=_meses, index=_indice_mes(cfg_vm.get("inicio_alta"), 10),
-                format_func=lambda m: MESES_NOME_CFG[m],
-                help="As vendas entre o início e o fim medem a venda diária e o PA usados no VM. "
-                     "Não é a mesma janela do *Pico de vendas* da Produção: cada motor tem a sua.",
-            )
-            vm_fim_alta = c2.selectbox(
-                "Temporada da loja — fim",
-                options=_meses, index=_indice_mes(cfg_vm.get("fim_alta"), 3),
-                format_func=lambda m: MESES_NOME_CFG[m],
-                help="Pode virar o ano (ex: Outubro → Março).",
+            horizonte = c2.number_input(
+                "Horizonte do excesso (dias)",
+                value=int(params["recolher_horizonte_dias"]), min_value=1,
+                help="Só é excesso (sugestão de recolher) o que a loja não vende neste "
+                     "prazo. Curto demais, manda recolher antes do pico o que o pico vende.",
             )
             dias_analise = c3.number_input(
                 "Janela do giro (dias)",
-                value=int(config["logistica"]["dias_analise_giro"]), min_value=1,
-                help="Dias de venda recentes usados para medir o giro (peças/dia) de cada "
-                     "SKU na tela de Logística.",
+                value=int((config.get("logistica") or {}).get("dias_analise_giro", 30)), min_value=1,
+                help="Dias de venda recentes usados para medir o giro mostrado na Logística. "
+                     "É só indicador: não entra na conta do alvo.",
+            )
+        salvar = st.form_submit_button("Salvar alvo da loja", icon=":material/save:", type="primary")
+
+    if salvar:
+        rep = config.setdefault("reposicao", {})
+        rep["exposicao_minima"] = int(exposicao)
+        rep["cobertura_dias_alta"] = int(cobertura_alta)
+        rep["cobertura_dias_baixa"] = int(cobertura_baixa)
+        rep["nivel_servico_default"] = int(nivel_servico)
+        rep["recolher_horizonte_dias"] = int(horizonte)
+        rep["aplicar_crescimento"] = bool(params["aplicar_crescimento"])
+        config.setdefault("logistica", {})["dias_analise_giro"] = int(dias_analise)
+        _fechar_reposicao(config, "Alvo da loja salvo. A Logística recalcula na próxima abertura.")
+
+
+def _bloco_espaco_da_loja(config, params, dados):
+    nomes_lojas = [l["nome"] for l in config["depositos"]["lojas"]]
+    capacidade = params["capacidade_gaveta"]
+    padrao = int(capacidade.get(config_edicao.CAPACIDADE_PADRAO) or 50)
+
+    df_lojas = pd.DataFrame([
+        {
+            "loja": nome,
+            "prazo_entrega_dias": (params["lojas"].get(nome) or {}).get("prazo_entrega_dias"),
+            "gavetas": (params["lojas"].get(nome) or {}).get("gavetas"),
+        }
+        for nome in nomes_lojas
+    ])
+    super_categorias = sorted({
+        str(s).strip() for s in dados["detalhes"]["Super_categoria"].dropna()
+        if str(s).strip() and str(s).strip().lower() != "nan"
+    })
+    df_capacidade = pd.DataFrame([
+        {"super_categoria": s, "pecas": capacidade.get(s)} for s in super_categorias
+    ])
+    for df, colunas in ((df_lojas, ("prazo_entrega_dias", "gavetas")), (df_capacidade, ("pecas",))):
+        for coluna in colunas:
+            df[coluna] = pd.to_numeric(df[coluna], errors="coerce").astype("Int64")
+
+    with st.form("form_reposicao_espaco", border=False):
+        with st.container(border=True):
+            st.markdown("**Prazo e espaço de cada loja**")
+            st.caption(
+                "As gavetas guardam o que não cabe na arara. O sistema as distribui entre os "
+                "modelos de maior venda prevista (um campeão pode levar mais de uma); modelo "
+                "sem gaveta fica só com a exposição. **Gavetas vazio** = loja sem limite de espaço."
+            )
+            c1, c2 = st.columns(2)
+            with c1:
+                lojas_editado = st.data_editor(
+                    df_lojas,
+                    column_config={
+                        "loja": col_texto("Loja"),
+                        "prazo_entrega_dias": st.column_config.NumberColumn(
+                            "Prazo de entrega (dias)", min_value=0, step=1,
+                            help="Dias entre separar no CD e a mercadoria estar na loja. "
+                                 "Soma na cobertura."),
+                        "gavetas": st.column_config.NumberColumn(
+                            "Gavetas", min_value=0, step=1,
+                            help="Quantas gavetas de fundo a loja tem. Zero = só a arara."),
+                    },
+                    disabled=["loja"],
+                    **padrao_tabela(EDITOR, len(df_lojas)),
+                    key="editor_reposicao_lojas",
+                )
+                cap_padrao = st.number_input(
+                    "Peças por gaveta — padrão",
+                    value=padrao, min_value=1,
+                    help="Vale para a super categoria que ficar vazia na tabela ao lado.",
+                )
+            with c2:
+                capacidade_editada = st.data_editor(
+                    df_capacidade,
+                    column_config={
+                        "super_categoria": col_texto("Super categoria"),
+                        "pecas": st.column_config.NumberColumn(
+                            "Peças por gaveta", min_value=1, step=1,
+                            help="Quantas peças deste tipo cabem numa gaveta. Vazio = o padrão."),
+                    },
+                    disabled=["super_categoria"],
+                    **padrao_tabela(EDITOR, len(df_capacidade), max_linhas=8),
+                    key="editor_reposicao_capacidade",
+                )
+        salvar = st.form_submit_button("Salvar prazo e espaço", icon=":material/save:", type="primary")
+
+    if salvar:
+        rep = config.setdefault("reposicao", {})
+        rep["lojas"] = config_edicao.aplicar_edicao_lojas(_registros(lojas_editado))
+        rep["capacidade_gaveta"] = config_edicao.aplicar_edicao_capacidade(
+            _registros(capacidade_editada), cap_padrao)
+        _fechar_reposicao(config, "Prazo e espaço salvos. A Logística recalcula na próxima abertura.")
+
+
+def _bloco_sortimento(config, params, dados):
+    from etl import reposicao as motor_reposicao
+
+    nomes_lojas = [l["nome"] for l in config["depositos"]["lojas"]]
+    hoje = pd.Timestamp.now().normalize()
+    vendas = motor_reposicao.vendas_por_colegio_loja(dados, config, hoje)
+    sugerido = motor_reposicao.colegios_vendidos_por_loja(dados, config, hoje)
+    atual, origem = motor_reposicao.sortimento_efetivo(params, nomes_lojas, sugerido)
+
+    # "Sugerir pelas vendas" troca a base do editor e a `key` (a edição pendente
+    # é guardada por posição e reapareceria sobre a base nova).
+    rev = st.session_state.get("rep_sortimento_rev", 0)
+    base = sugerido if st.session_state.get("rep_sortimento_sugerir") else atual
+
+    _, det = _base_colegios(config)
+    colegios = sorted(
+        {c for c in det["Colegio"].unique() if c and c != "nan"}
+        | {c for marcados in atual.values() for c in marcados}
+    )
+
+    with st.container(border=True):
+        st.markdown("**Colégios que cada loja atende**")
+        st.caption(
+            "A loja só recebe alvo para os colégios marcados; o estoque que ela tiver de "
+            "um colégio desmarcado aparece na Logística como excesso a recolher."
+        )
+        sem_cadastro = [n for n in nomes_lojas if origem[n] == motor_reposicao.ORIGEM_VENDAS]
+        if sem_cadastro:
+            st.info(
+                f"**{', '.join(sem_cadastro)}** ainda sem cadastro: a Logística usa os colégios "
+                f"com {motor_reposicao.MIN_PECAS_SORTIMENTO}+ peças vendidas na loja em 12 meses "
+                "(é o que vem marcado abaixo). Confira e salve para fixar.",
+                icon=":material/info:",
             )
 
-        with st.expander("Avançado"):
-            c1, _, _ = st.columns(3)
-            vm_padrao = c1.number_input(
-                "VM fixo de reserva (peças)",
-                value=int(config["logistica"]["vm_padrao"]), min_value=0,
-                help="Só entra se o cálculo dinâmico não cobrir o SKU.",
-            )
+        if not colegios:
+            st.info("Nenhum colégio com produto ativo encontrado.")
+            return
 
-        salvar = st.form_submit_button("Salvar Reposição de Loja", icon=":material/save:", type="primary")
+        df = pd.DataFrame([
+            {
+                "colegio": c,
+                **{n: c in base[n] for n in nomes_lojas},
+                **{f"vendas_{n}": vendas.get(n, {}).get(c, 0.0) for n in nomes_lojas},
+            }
+            for c in colegios
+        ])
+        colunas = {"colegio": col_colegio()}
+        for n in nomes_lojas:
+            colunas[n] = st.column_config.CheckboxColumn(n, help=f"{n} atende este colégio.")
+        for n in nomes_lojas:
+            colunas[f"vendas_{n}"] = col_pecas(
+                f"Vendas 12 m — {n}", largura=None,
+                ajuda=f"Peças do colégio vendidas em {n} nos últimos 12 meses.")
+
+        with st.form("form_reposicao_sortimento", border=False):
+            editado = st.data_editor(
+                df,
+                column_config=colunas,
+                disabled=["colegio"] + [f"vendas_{n}" for n in nomes_lojas],
+                **padrao_tabela(EDITOR, len(df)),
+                key=f"editor_reposicao_sortimento_{rev}",
+            )
+            salvar = st.form_submit_button("Salvar sortimento", icon=":material/save:", type="primary")
+
+        if st.button("Sugerir pelas vendas", icon=":material/auto_awesome:",
+                     help="Remarca a tabela pelos colégios que cada loja vendeu em 12 meses. "
+                          "Só grava quando você salvar."):
+            st.session_state["rep_sortimento_sugerir"] = True
+            st.session_state["rep_sortimento_rev"] = rev + 1
+            st.rerun()
+
+    if salvar:
+        config.setdefault("reposicao", {})["sortimento"] = config_edicao.aplicar_edicao_sortimento(
+            _registros(editado), nomes_lojas)
+        st.session_state.pop("rep_sortimento_sugerir", None)
+        _fechar_reposicao(config, "Sortimento salvo. A Logística recalcula na próxima abertura.")
+
+
+def _secao_reposicao():
+    from etl import reposicao as motor_reposicao
+
+    config = carregar_config()
+    params = motor_reposicao.parametros(config)
+    dados, _ = carregar_com_feedback()
+
+    st.caption(
+        "Quanto cada loja deve ter de cada tamanho (**estoque-alvo**), limitado pelo espaço "
+        "dela. A tela de Logística compara o alvo com o estoque, sugere o que o CD separa e "
+        "o que a loja pode devolver."
+    )
+
+    _bloco_alvo_da_loja(config, params)
+    _bloco_espaco_da_loja(config, params, dados)
+    _bloco_sortimento(config, params, dados)
 
     st.caption(
         "O interruptor que liga o **crescimento** na Reposição fica em "
-        "*Colégios e Crescimento → Regras gerais*."
+        "*Colégios e Crescimento → Regras gerais*. A temporada de alta é a mesma da "
+        "Produção (*Pico de vendas*)."
     )
-
-    if salvar:
-        config.setdefault("vm", {})
-        config["vm"]["dias_cobertura"] = vm_dias_cobertura
-        config["vm"]["mult_pa"] = vm_mult_pa
-        config["vm"]["vm_minimo"] = vm_minimo
-        config["vm"]["lead_time"] = vm_lead_time
-        config["vm"]["nivel_servico_default"] = vm_nivel_servico
-        config["vm"]["inicio_alta"] = vm_inicio_alta
-        config["vm"]["fim_alta"] = vm_fim_alta
-        config["logistica"]["dias_analise_giro"] = dias_analise
-        config["logistica"]["vm_padrao"] = vm_padrao
-        _salvar_secao(config, "Reposição de Loja salva. A Logística recalcula na próxima abertura.")
 
 
 # =================================================================
@@ -890,7 +1038,7 @@ def _base_colegios(config):
 
 def _crescimento_medido(dados_ativos, config):
     """Camada observada do crescimento, ou None quando desligada — exatamente
-    o que os motores recebem (demanda.py e vm_dinamico.py)."""
+    o que os motores recebem (demanda.py, na Produção e na Reposição)."""
     from etl.demanda import calcular_crescimento_observado
     if not (config.get("demanda", {}) or {}).get("crescimento_observado_ativo", True):
         return None
@@ -950,8 +1098,8 @@ def _bloco_regras_crescimento():
             )
             aplicar_reposicao = c2.toggle(
                 "Reposição de Loja",
-                value=bool(config.get("vm", {}).get("aplicar_crescimento", True)),
-                help="Aplica o crescimento ao VM de cobertura das lojas.",
+                value=bool(parametros_reposicao(config)["aplicar_crescimento"]),
+                help="Aplica o crescimento à demanda prevista de cada loja (estoque-alvo).",
             )
 
         salvar = st.form_submit_button("Salvar regras gerais", icon=":material/save:", type="primary")
@@ -961,7 +1109,7 @@ def _bloco_regras_crescimento():
         config["demanda"]["crescimento_observado_ativo"] = bool(usar_medido)
         config["demanda"]["aplicar_crescimento_fabrica"] = bool(aplicar_producao)
         config["fabrica"]["crescimento_pct"] = taxa_padrao
-        config.setdefault("vm", {})["aplicar_crescimento"] = bool(aplicar_reposicao)
+        config.setdefault("reposicao", {})["aplicar_crescimento"] = bool(aplicar_reposicao)
         _salvar_secao(config, "Regras de crescimento salvas.")
 
 
@@ -971,7 +1119,7 @@ def _bloco_por_colegio():
     config = carregar_config()
     dados_ativos, det = _base_colegios(config)
     cfg_colegios = config.get("colegios") or {}
-    ns_padrao = int(config.get("vm", {}).get("nivel_servico_default", 95))
+    ns_padrao = int(parametros_reposicao(config)["nivel_servico_default"])
     taxa_padrao = 1 + float(config.get("fabrica", {}).get("crescimento_pct", 0)) / 100
     prop_global = round(float(calcular_proporcao_baixa(dados_ativos, config)), 3)
     medido = _crescimento_medido(dados_ativos, config) or {}
@@ -1022,7 +1170,7 @@ def _bloco_por_colegio():
                          "Vale para Produção e Reposição."),
                 "nivel_servico": st.column_config.SelectboxColumn(
                     "Nível de serviço — Reposição (%)", options=NIVEIS_SERVICO,
-                    help="Só a Reposição de Loja usa (pulmão). A Produção usa os níveis "
+                    help="Só a Reposição de Loja usa (margem de segurança). A Produção usa os níveis "
                          "de alta/baixa da seção Produção."),
                 "proporcao_baixa": st.column_config.NumberColumn(
                     "Proporção da baixa — Produção", min_value=0.0, step=0.05, format="%.3f",
@@ -1166,7 +1314,7 @@ def _bloco_nomes_segmentos():
     st.markdown(
         "O colégio é extraído automaticamente da SKU e às vezes sai **errado** "
         "(ex: `27`, códigos soltos). Aqui você define **como cada valor cru aparece** "
-        "em todo o sistema (VM, Fábrica, filtros). Deixe **igual** para manter; escreva "
+        "em todo o sistema (Reposição, Fábrica, filtros). Deixe **igual** para manter; escreva "
         "**`Outros`** (ou outro nome) para renomear/agrupar o ruído. Só o que você "
         "mudar vira regra — o resto segue como está. A coluna _Sugestão_ é só uma dica."
     )

@@ -59,8 +59,19 @@ Nunca cruzar Loja ID com Depósito ID. IDs em [dados.md](dados.md).
 - Cada colégio tem parâmetros manuais em `config["colegios"][nome]`:
   - `taxa_crescimento` — crescimento base (matrícula), **input manual**.
   - `crescimento_grupos` — override por grupo/série (ex: crescer só o ensino médio).
-  - `nivel_servico` — nível de serviço do VM de loja.
+  - `nivel_servico` — nível de serviço da Reposição de Loja (margem de segurança do alvo).
 - Crescimento **nunca** é calculado dos dados — é sempre decisão do usuário.
+
+## Reposição de Loja
+
+- A loja expõe **2 peças por tamanho × modelo** na arara e guarda o resto em **gavetas**
+  (nº por loja; capacidade por super categoria). O espaço é restrição do alvo.
+- **Frequência:** na alta sai reposição do CD **todo dia**; na baixa, semanal ou sob solicitação.
+- A alta é a **mesma nas duas lojas** e a mesma do PCP (Dez-Jan-Fev).
+- A venda **institucional** (loja "Encomendas") não é demanda de loja.
+- Cada loja atende um conjunto de **colégios** (sortimento, cadastro manual).
+- Quando o CD não cobre as duas lojas, recebe **quem vai zerar primeiro**.
+- Metodologia em [requisitos/reposicao-loja-v2.md](requisitos/reposicao-loja-v2.md).
 
 ## Produção (PCP)
 
