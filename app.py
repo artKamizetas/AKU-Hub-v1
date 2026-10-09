@@ -25,14 +25,14 @@ nome, usuario, role = auth.verificar_acesso()
 # NAVEGAÇÃO (filtrada por perfil)
 # =================================================================
 pages_all = [
-    st.Page("pages/0_Home.py", title="Página Inicial", icon="📊", default=True),
-    st.Page("pages/1_Daily.py", title="Daily", icon="📈"),
-    st.Page("pages/2_Logistica.py", title="Logística", icon="📦"),
-    st.Page("pages/3_Fabrica.py", title="Simulador de Produção", icon="🏭"),
-    st.Page("pages/4_Pedidos.py", title="Pedidos de Compra", icon="🧾"),
+    st.Page("pages/0_Home.py", title="Página Inicial", icon=":material/home:", default=True),
+    st.Page("pages/1_Daily.py", title="Daily", icon=":material/trending_up:"),
+    st.Page("pages/2_Logistica.py", title="Logística", icon=":material/local_shipping:"),
+    st.Page("pages/3_Fabrica.py", title="Simulador de Produção", icon=":material/factory:"),
+    st.Page("pages/4_Pedidos.py", title="Pedidos de Compra", icon=":material/receipt_long:"),
     # url_path fixo: é o redirect_uri do OAuth das integrações (a plataforma
     # devolve o navegador para .../configuracoes com ?code&state).
-    st.Page("pages/5_Configuracoes.py", title="Configurações", icon="⚙️",
+    st.Page("pages/5_Configuracoes.py", title="Configurações", icon=":material/settings:",
             url_path="configuracoes"),
 ]
 

@@ -251,7 +251,7 @@ def verificar_acesso():
     _registrar_acesso_uma_vez(acesso.email)
 
     with st.sidebar:
-        st.write(f"👤 **{acesso.nome}**")
+        st.write(f":material/account_circle: **{acesso.nome}**")
         st.caption(acesso.email)
         if st.button("Sair", key="_aku_sair"):
             st.logout()
@@ -290,6 +290,7 @@ def exigir_admin():
     """Gate bloqueante de página inteira. Retorna (nome, email, role)."""
     nome, email, role = identidade_atual()
     if role != "admin":
-        st.error("⛔ Acesso negado. Apenas administradores podem acessar esta página.")
+        st.error("Acesso negado. Apenas administradores podem acessar esta página.",
+                 icon=":material/block:")
         st.stop()
     return nome, email, role

@@ -81,6 +81,7 @@ def rodape_frescor(dados: dict) -> None:
             f"{(quando + pd.Timedelta(hours=1)):%H:%M}"
         )
     with col_btn:
-        if st.button("↻ Recarregar", width="content", key="recarregar_dados"):
+        if st.button("Recarregar", icon=":material/refresh:", width="content",
+                     key="recarregar_dados"):
             invalidar_cache_dados()
             st.rerun()

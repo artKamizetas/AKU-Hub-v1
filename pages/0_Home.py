@@ -12,16 +12,16 @@ from ui_tabelas import PLACAR, exibir, num, brl, col_texto, col_pecas
 dados, config = carregar_com_feedback()
 val = dados["validacao"]
 
-st.title("📊 AKU Hub")
+st.title(":material/home: AKU Hub")
 st.caption("Inteligência de Estoque, PCP e Vendas")
 
 if not val["ok"]:
-    st.error("❌ Erro na validação dos dados")
+    st.error("Erro na validação dos dados", icon=":material/error:")
     for erro in val["erros"]:
         st.write(f"• {erro}")
     st.stop()
 
-st.success("✅ Dados carregados com sucesso")
+st.success("Dados carregados com sucesso", icon=":material/check_circle:")
 
 # KPIs
 col1, col2, col3, col4, col5 = st.columns(5)

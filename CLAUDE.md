@@ -106,6 +106,12 @@ docs/sql/                   # DDL versionada do schema `app` (aplicar com `pytho
   **padrao_tabela(EDITOR, n), ...)`. Colunas pelas prontas (`col_sku`, `col_pecas`,
   `col_moeda`, …) e texto de KPI/legenda por `num()`/`brl()` — não crie outro
   formatador de R$ nem escolha altura (`height=`/`row_height=`) na página
+- **Ícone de interface é Material Symbols** (`:material/nome:`, nativo do
+  Streamlit), não emoji: em `icon=` nos botões/alertas/expanders/páginas e inline
+  nos textos markdown. Emoji só onde markdown não renderiza (célula/cabeçalho de
+  tabela, opção de `selectbox`, Plotly) ou onde a cor é a informação (🥈🥇💎,
+  🔴🟡🟢). Reuse o vocabulário de `docs/decisoes.md` (2026-10) e rode
+  `tests/test_icones.py` — nome errado não quebra na importação, aparece cru na tela
 - **Páginas carregam por `ui_carga.carregar_com_feedback()`**, nunca chamando
   `carregar_dados()`+`carregar_config()` na mão (era o `_carregar()` duplicado em 4 telas)
 - **Nunca `st.cache_data.clear()` global** ao salvar: use `carregar_config.clear()`

@@ -60,13 +60,13 @@ from auth_store import (
 # Seções da página: slug → rótulo. O slug vai em ?secao=, o que deixa um link
 # de outra tela (ou um favorito) cair direto na seção certa.
 SECOES = {
-    "comercial": "🎯 Comercial",
-    "reposicao": "📦 Reposição de Loja",
-    "producao": "🏭 Produção",
-    "colegios": "🏫 Colégios e Crescimento",
-    "integracoes": "🔌 Integrações",
-    "usuarios": "👥 Usuários",
-    "sistema": "ℹ️ Sistema",
+    "comercial": ":material/target: Comercial",
+    "reposicao": ":material/local_shipping: Reposição de Loja",
+    "producao": ":material/factory: Produção",
+    "colegios": ":material/school: Colégios e Crescimento",
+    "integracoes": ":material/cable: Integrações",
+    "usuarios": ":material/group: Usuários",
+    "sistema": ":material/info: Sistema",
 }
 CHAVE_SECAO = "cfg_secao"
 
@@ -93,7 +93,7 @@ if _ret:
                                      _tokens["refresh_token"], _tokens["expira_em"],
                                      usuario)
             _repo_int.registrar_evento(_plat, "oauth_conectar", True, usuario=usuario)
-            st.success(f"✅ {_plat.capitalize()} conectado com sucesso!")
+            st.success(f"{_plat.capitalize()} conectado com sucesso!", icon=":material/check_circle:")
     except Exception as _exc:
         st.error(f"Falha ao concluir a conexão OAuth: {_exc}")
 
@@ -125,7 +125,7 @@ def salvar_parametros(config) -> bool:
             extrair_parametros(config), usuario=usuario)
         return True
     except Exception as e:
-        st.error(f"❌ Falha ao salvar parâmetros no Supabase: {e}")
+        st.error(f"Falha ao salvar parâmetros no Supabase: {e}", icon=":material/error:")
         return False
 
 
@@ -232,7 +232,7 @@ def _salvar_secao(config, mensagem: str) -> None:
     """Valida, grava e avisa — o fecho comum dos formulários de parâmetros."""
     erros = validar_config(config)
     if erros:
-        st.error("❌ Corrija antes de salvar:")
+        st.error("Corrija antes de salvar:", icon=":material/error:")
         for erro in erros:
             st.write(f"- {erro}")
         return
@@ -241,7 +241,7 @@ def _salvar_secao(config, mensagem: str) -> None:
     # Só o cache de CONFIG — não o de dados (TTL 1 h). O clear() global levava
     # junto a leitura do Supabase, e cada "Salvar" custava uma carga fria.
     carregar_config.clear()
-    st.success(mensagem)
+    st.success(mensagem, icon=":material/check_circle:")
 
 
 @st.cache_data(ttl=600, show_spinner="Levantando o realizado dos últimos meses…")
@@ -290,7 +290,7 @@ def _bloco_metas():
         _realizado = _realizado_mensal()
     except Exception as _e:
         _realizado = pd.DataFrame(columns=["_ano", "_mes", "LojaConfig", "faturamento", "pecas", "pedidos", "pa"])
-        st.caption(f"⚠️ Histórico de realizado indisponível ({_e}) — as colunas de referência ficam vazias.")
+        st.caption(f":orange[:material/warning:] Histórico de realizado indisponível ({_e}) — as colunas de referência ficam vazias.")
 
     col_ano, col_loja = st.columns([1, 2])
     with col_ano:
@@ -310,7 +310,7 @@ def _bloco_metas():
                               & (_realizado["LojaConfig"] == loja_meta)]) > 0
     if not _tem_ref:
         st.caption(
-            f"ℹ️ Sem vendas de **{_ref_ano}** para {loja_meta} no histórico — a coluna de "
+            f":material/info: Sem vendas de **{_ref_ano}** para {loja_meta} no histórico — a coluna de "
             "referência e o botão *Propor* ficam sem base neste ano. Defina as metas à mão "
             "ou use *Copiar metas*."
         )
@@ -372,12 +372,13 @@ def _bloco_metas():
     with col_a1:
         _pct_cresc = st.number_input(
             "Crescimento (%)", value=10.0, step=1.0,
-            help="Aplicado pelos atalhos ✨ Propor e 📋 Copiar. Use 0 para cópia literal.",
+            help="Aplicado pelos atalhos *Propor* e *Copiar*. Use 0 para cópia literal.",
             key="metas_pct_cresc",
         )
     with col_a2:
         st.write("")
-        if st.button("✨ Propor a partir do realizado", key="btn_metas_propor",
+        if st.button("Propor a partir do realizado", icon=":material/auto_awesome:",
+                     key="btn_metas_propor",
                      disabled=not _tem_ref,
                      help=("Ouro = realizado do ano anterior + crescimento; Prata = 85% do Ouro; "
                            "Diamante = 120%." if _tem_ref
@@ -406,14 +407,16 @@ def _bloco_metas():
             if _n_ano_ant else
             f"Indisponível: nenhuma meta cadastrada em {ano_meta - 1} para {loja_meta}."
         )
-        if st.button(f"📋 Copiar metas de {ano_meta - 1}", key="btn_metas_copiar",
+        if st.button(f"Copiar metas de {ano_meta - 1}", icon=":material/content_copy:",
+                     key="btn_metas_copiar",
                      disabled=not _n_ano_ant, help=_ajuda_copiar):
             _novas, _n = _m.copiar_do_ano_anterior(
                 _linhas_base, _metas_salvas, ano_meta, loja_meta,
                 fator=1 + (_pct_cresc / 100))
             _aplicar_atalho(_novas)
 
-        if st.button("⤵️ Replicar nos meses vazios", key="btn_metas_replicar",
+        if st.button("Replicar nos meses vazios", icon=":material/keyboard_double_arrow_down:",
+                     key="btn_metas_replicar",
                      help="Copia a primeira linha preenchida para todos os meses ainda "
                           "vazios (meta plana); os já preenchidos não são tocados."):
             _novas, _n = _m.replicar_nos_vazios(_linhas_base)
@@ -424,14 +427,15 @@ def _bloco_metas():
 
     with col_a4:
         st.write("")
-        if st.button("🧹 Descartar proposta", key="btn_metas_limpar",
+        if st.button("Descartar proposta", icon=":material/undo:", key="btn_metas_limpar",
                      type="tertiary", disabled=_preview is None):
             st.session_state.get("_metas_preview", {}).pop(_chave_preview, None)
             st.session_state["_metas_versao"] = _versao + 1
             st.rerun()
 
     if _preview is not None:
-        st.warning("⚠️ Proposta **não salva** na tabela. Clique em *Salvar metas* para gravá-la.")
+        st.warning("Proposta **não salva** na tabela. Clique em *Salvar metas* para gravá-la.",
+                   icon=":material/warning:")
 
     # st.form: dentro dele o data_editor NÃO dispara rerun a cada célula —
     # a página só reprocessa no submit. Sem isso, cada tecla re-executava o
@@ -459,7 +463,7 @@ def _bloco_metas():
             key=f"editor_metas_{ano_meta}_{loja_meta}_{_versao}",
         )
 
-        _salvar_metas = st.form_submit_button("💾 Salvar metas", type="primary")
+        _salvar_metas = st.form_submit_button("Salvar metas", icon=":material/save:", type="primary")
 
     if _salvar_metas:
         from etl import metas as _m
@@ -473,7 +477,7 @@ def _bloco_metas():
 
         erros_metas = _m.validar_metas_mensais(novo)
         if erros_metas:
-            st.error("❌ Corrija antes de salvar:")
+            st.error("Corrija antes de salvar:", icon=":material/error:")
             for e in erros_metas:
                 st.write(f"- {e}")
         else:
@@ -489,7 +493,7 @@ def _bloco_metas():
             # global levava junto a leitura do Supabase, e cada "Salvar"
             # custava uma carga fria (~10 s) na tela seguinte.
             carregar_config.clear()
-            st.success(f"✅ Metas de **{loja_meta}** salvas — {n_meses} mês(es) configurado(s) em {ano_meta}.")
+            st.success(f"Metas de **{loja_meta}** salvas — {n_meses} mês(es) configurado(s) em {ano_meta}.", icon=":material/check_circle:")
 
 
 def _bloco_vendedores():
@@ -520,13 +524,13 @@ def _bloco_vendedores():
     _atrib_vigente = _m.atribuicao_vendedores(config, comp_vend)
     _tem_edicao_propria = comp_vend in (config["daily"].get("vendedores_loja") or {})
     if _atrib_vigente and not _tem_edicao_propria:
-        st.caption(f"ℹ️ {comp_vend} ainda não tem edição própria — exibindo a atribuição **herdada** do mês anterior. Salvar cria a vigência deste mês.")
+        st.caption(f":material/info: {comp_vend} ainda não tem edição própria — exibindo a atribuição **herdada** do mês anterior. Salvar cria a vigência deste mês.")
 
     try:
         _dados_vend = carregar_dados()["vendedores"].copy()
     except Exception as _e:
         _dados_vend = pd.DataFrame(columns=["ID", "nome", "situacao", "id_loja_bling"])
-        st.caption(f"⚠️ Lista de vendedores indisponível ({_e}).")
+        st.caption(f":orange[:material/warning:] Lista de vendedores indisponível ({_e}).")
 
     from etl.loader import limpar_id
     if "situacao" in _dados_vend.columns:
@@ -554,7 +558,7 @@ def _bloco_vendedores():
     else:
         _sem = int((df_vend["loja"] == SEM_ATRIB).sum())
         if _sem:
-            st.caption(f"⚠️ {_sem} vendedor(es) sem loja no cadastro do Bling — atribua manualmente ou a meta deles não é rateada.")
+            st.caption(f":orange[:material/warning:] {_sem} vendedor(es) sem loja no cadastro do Bling — atribua manualmente ou a meta deles não é rateada.")
 
         # Mesmo motivo do form das metas: sem ele, cada célula editada
         # re-executava a página inteira.
@@ -594,7 +598,7 @@ def _bloco_vendedores():
             if _resumo_rateio:
                 st.caption("Rateio atual em " + comp_vend + " (atualiza ao salvar) — " + " · ".join(_resumo_rateio))
 
-            _salvar_vend = st.form_submit_button("💾 Salvar atribuição", type="primary")
+            _salvar_vend = st.form_submit_button("Salvar atribuição", icon=":material/save:", type="primary")
 
         if _salvar_vend:
             novo_atrib = _m.aplicar_edicao_vendedores(
@@ -608,7 +612,7 @@ def _bloco_vendedores():
             # global levava junto a leitura do Supabase, e cada "Salvar"
             # custava uma carga fria (~10 s) na tela seguinte.
             carregar_config.clear()
-            st.success(f"✅ Atribuição de {n_atrib} vendedor(es) salva, vigente a partir de {comp_vend}.")
+            st.success(f"Atribuição de {n_atrib} vendedor(es) salva, vigente a partir de {comp_vend}.", icon=":material/check_circle:")
 
 
 def _secao_comercial():
@@ -706,7 +710,7 @@ def _secao_reposicao():
                 help="Só entra se o cálculo dinâmico não cobrir o SKU.",
             )
 
-        salvar = st.form_submit_button("💾 Salvar Reposição de Loja", type="primary")
+        salvar = st.form_submit_button("Salvar Reposição de Loja", icon=":material/save:", type="primary")
 
     st.caption(
         "O interruptor que liga o **crescimento** na Reposição fica em "
@@ -724,7 +728,7 @@ def _secao_reposicao():
         config["vm"]["fim_alta"] = vm_fim_alta
         config["logistica"]["dias_analise_giro"] = dias_analise
         config["logistica"]["vm_padrao"] = vm_padrao
-        _salvar_secao(config, "✅ Reposição de Loja salva. A Logística recalcula na próxima abertura.")
+        _salvar_secao(config, "Reposição de Loja salva. A Logística recalcula na próxima abertura.")
 
 
 # =================================================================
@@ -818,11 +822,12 @@ def _secao_producao():
                      "deliberada: 1 peça aqui vira milhares de peças na rede.",
             )
 
-        salvar = st.form_submit_button("💾 Salvar Produção", type="primary")
+        salvar = st.form_submit_button("Salvar Produção", icon=":material/save:", type="primary")
 
     if salvar:
         if not dem_janela_alta:
-            st.error("❌ Escolha ao menos um mês em *Pico de vendas* — é a âncora da demanda.")
+            st.error("Escolha ao menos um mês em *Pico de vendas* — é a âncora da demanda.",
+                     icon=":material/error:")
         else:
             config.setdefault("demanda", {})
             config["demanda"]["nivel_servico_alta"] = dem_ns_alta
@@ -836,7 +841,7 @@ def _secao_producao():
             config["fabrica"]["correcao_manual"] = correcao_manual
             # rodadas_datas/cobertura_override NÃO são editados aqui (vivem no
             # Simulador → Visão Geral); o valor carregado só trafega de volta.
-            _salvar_secao(config, "✅ Produção salva. O Simulador recalcula na próxima abertura.")
+            _salvar_secao(config, "Produção salva. O Simulador recalcula na próxima abertura.")
 
     with st.container(border=True):
         st.markdown("**Plano de rodadas**")
@@ -850,7 +855,7 @@ def _secao_producao():
             "Datas e coberturas-alvo formam um plano só e são editadas no Simulador, "
             "onde o efeito de cada mudança aparece ao vivo."
         )
-        st.page_link("pages/3_Fabrica.py", label="Editar no Simulador de Produção → Visão Geral", icon="🏭")
+        st.page_link("pages/3_Fabrica.py", label="Editar no Simulador de Produção → Visão Geral", icon=":material/factory:")
 
     st.caption(
         "O interruptor que liga o **crescimento** na Produção fica em "
@@ -949,7 +954,7 @@ def _bloco_regras_crescimento():
                 help="Aplica o crescimento ao VM de cobertura das lojas.",
             )
 
-        salvar = st.form_submit_button("💾 Salvar regras gerais", type="primary")
+        salvar = st.form_submit_button("Salvar regras gerais", icon=":material/save:", type="primary")
 
     if salvar:
         config.setdefault("demanda", {})
@@ -957,7 +962,7 @@ def _bloco_regras_crescimento():
         config["demanda"]["aplicar_crescimento_fabrica"] = bool(aplicar_producao)
         config["fabrica"]["crescimento_pct"] = taxa_padrao
         config.setdefault("vm", {})["aplicar_crescimento"] = bool(aplicar_reposicao)
-        _salvar_secao(config, "✅ Regras de crescimento salvas.")
+        _salvar_secao(config, "Regras de crescimento salvas.")
 
 
 def _bloco_por_colegio():
@@ -1033,7 +1038,7 @@ def _bloco_por_colegio():
             key="editor_colegios",
         )
 
-        _salvar_colegios = st.form_submit_button("💾 Salvar parâmetros por colégio", type="primary")
+        _salvar_colegios = st.form_submit_button("Salvar parâmetros por colégio", icon=":material/save:", type="primary")
 
     if _salvar_colegios:
         novo_colegios, n_overrides = config_edicao.aplicar_edicao_colegios(
@@ -1044,7 +1049,8 @@ def _bloco_por_colegio():
         # Só o cache de CONFIG — não o de dados (TTL 1 h).
         carregar_config.clear()
         st.success(
-            f"✅ {n_overrides} ajuste(s) manual(is) gravado(s) — o resto segue a regra geral."
+            f"{n_overrides} ajuste(s) manual(is) gravado(s) — o resto segue a regra geral.",
+            icon=":material/check_circle:",
         )
 
 
@@ -1139,7 +1145,7 @@ def _bloco_por_serie():
             key="editor_matriz_grupo",
         )
 
-        _salvar_matriz = st.form_submit_button("💾 Salvar crescimento por série", type="primary")
+        _salvar_matriz = st.form_submit_button("Salvar crescimento por série", icon=":material/save:", type="primary")
 
     if _salvar_matriz:
         novo_colegios, n_overrides = config_edicao.aplicar_edicao_crescimento_grupos(
@@ -1150,7 +1156,8 @@ def _bloco_por_serie():
         # Só o cache de CONFIG — não o de dados (TTL 1 h).
         carregar_config.clear()
         st.success(
-            f"✅ {n_overrides} ajuste(s) de série gravado(s) — o resto segue a regra geral (vivo)."
+            f"{n_overrides} ajuste(s) de série gravado(s) — o resto segue a regra geral (vivo).",
+            icon=":material/check_circle:",
         )
 
 
@@ -1187,7 +1194,7 @@ def _bloco_nomes_segmentos():
     ])
     n_ruido = int((df_alias["sugestao"] == "Outros").sum()) if len(df_alias) else 0
     if n_ruido:
-        st.caption(f"⚠️ {n_ruido} valor(es) cru(s) parecem ruído (sem letra) — sugeridos como _Outros_.")
+        st.caption(f":orange[:material/warning:] {n_ruido} valor(es) cru(s) parecem ruído (sem letra) — sugeridos como _Outros_.")
 
     # st.form: o data_editor só reprocessa a página no submit,
     # não a cada célula editada.
@@ -1205,7 +1212,7 @@ def _bloco_nomes_segmentos():
             **padrao_tabela(EDITOR, len(df_alias)), key="editor_colegios_alias",
         )
 
-        _salvar_alias = st.form_submit_button("💾 Salvar Normalização de Colégios", key="btn_salvar_alias", type="primary")
+        _salvar_alias = st.form_submit_button("Salvar Normalização de Colégios", icon=":material/save:", key="btn_salvar_alias", type="primary")
 
     if _salvar_alias:
         novo_alias = {}
@@ -1222,7 +1229,7 @@ def _bloco_nomes_segmentos():
         # custava uma carga fria (~10 s) na tela seguinte.
         carregar_config.clear()
         n_outros = sum(1 for v in novo_alias.values() if v == "Outros")
-        st.success(f"✅ {len(novo_alias)} regra(s) de colégio salva(s) ({n_outros} → Outros). Cache limpo.")
+        st.success(f"{len(novo_alias)} regra(s) de colégio salva(s) ({n_outros} → Outros). Cache limpo.", icon=":material/check_circle:")
 
     st.divider()
     st.markdown("**Segmentos (agrupamento das séries)**")
@@ -1257,7 +1264,7 @@ def _bloco_nomes_segmentos():
             **padrao_tabela(EDITOR, len(df_seg)), key="editor_grupo_seg",
         )
 
-        _salvar_seg = st.form_submit_button("💾 Salvar Agrupamento de Segmentos", key="btn_salvar_seg", type="primary")
+        _salvar_seg = st.form_submit_button("Salvar Agrupamento de Segmentos", icon=":material/save:", key="btn_salvar_seg", type="primary")
 
     if _salvar_seg:
         novo_seg = dict(config.get("grupo_segmento") or {})
@@ -1273,7 +1280,7 @@ def _bloco_nomes_segmentos():
         # global levava junto a leitura do Supabase, e cada "Salvar"
         # custava uma carga fria (~10 s) na tela seguinte.
         carregar_config.clear()
-        st.success(f"✅ Agrupamento salvo — {len(set(novo_seg.values()))} segmento(s).")
+        st.success(f"Agrupamento salvo — {len(set(novo_seg.values()))} segmento(s).", icon=":material/check_circle:")
 
 
 def _secao_colegios():
@@ -1358,7 +1365,7 @@ def _secao_integracoes():
                 key="neg_bling_forma_sel")
         else:
             if erro:
-                st.caption(f"⚠️ Não foi possível listar as formas de pagamento: {erro}")
+                st.caption(f":orange[:material/warning:] Não foi possível listar as formas de pagamento: {erro}")
             forma_id = st.text_input(
                 "ID da forma de pagamento", value=salvo,
                 help="Conecte a integração para escolher pelo nome.",
@@ -1424,7 +1431,7 @@ def _secao_integracoes():
                 key="neg_olist_forma_sel")
         else:
             if erro:
-                st.caption(f"⚠️ Não foi possível listar as formas de recebimento: {erro}")
+                st.caption(f":orange[:material/warning:] Não foi possível listar as formas de recebimento: {erro}")
             forma_id = st.text_input(
                 "ID da forma de recebimento", value=salvo,
                 help="Conecte a integração para escolher pelo nome. Vazio = "
@@ -1454,7 +1461,7 @@ def _secao_integracoes():
         repo_int = obter_repositorio_integracoes()
         integ = repo_int.ler(plataforma) or {}
         conectado = bool(integ.get("refresh_token"))
-        rotulo = f"{titulo}   ·   {'✅ conectado' if conectado else '❌ não conectado'}"
+        rotulo = f"{titulo}   ·   {':green[:material/check_circle: conectado]' if conectado else ':material/link_off: não conectado'}"
         # Card retrátil: aberto durante o setup (sem conexão), recolhido depois — o
         # status vai no cabeçalho, para ler de relance sem precisar expandir.
         with st.expander(rotulo, expanded=not conectado):
@@ -1490,7 +1497,7 @@ def _secao_integracoes():
                             help="Registre esta MESMA URL no portal da plataforma. "
                                  "Deve ser a URL pública do app + /configuracoes.",
                             key=f"redir_{plataforma}")
-                        if st.form_submit_button("💾 Salvar credenciais"):
+                        if st.form_submit_button("Salvar credenciais", icon=":material/save:"):
                             repo_int.salvar_chaves(plataforma, cid, csecret, redir,
                                                    usuario)
                             st.success("Credenciais salvas.")
@@ -1516,14 +1523,15 @@ def _secao_integracoes():
                     quem = integ.get("conectado_por", "?")
                     if exp is not None and not oauth.token_valido(integ):
                         st.warning(
-                            f"⚠️ Autorizado por {quem}, mas o token venceu em "
+                            f"Autorizado por {quem}, mas o token venceu em "
                             f"{validade} (UTC). A renovação é automática — se a "
                             "sessão na plataforma tiver expirado, ela falha e é "
-                            "preciso reconectar. Use **Testar conexão** antes de emitir.")
+                            "preciso reconectar. Use **Testar conexão** antes de emitir.",
+                            icon=":material/warning:")
                     else:
-                        st.success(f"✅ Conectado por {quem} · token expira {validade} (UTC)")
+                        st.success(f"Conectado por {quem} · token expira {validade} (UTC)", icon=":material/check_circle:")
                 else:
-                    st.info("❌ Não conectado.")
+                    st.info("Não conectado.", icon=":material/link_off:")
 
                 cc1, cc2 = st.columns(2)
                 with cc1:
@@ -1533,13 +1541,14 @@ def _secao_integracoes():
                         repo_int.salvar_state_oauth(plataforma, state, usuario)
                         url = oauth.montar_authorize_url(
                             plataforma, integ["client_id"], integ["redirect_uri"], state)
-                        st.link_button("🔗 Conectar / Reconectar", url, width="stretch")
+                        st.link_button("Conectar / Reconectar", url, icon=":material/link:",
+                                       width="stretch")
                     else:
-                        st.button("🔗 Conectar", disabled=True, width="stretch",
+                        st.button("Conectar", icon=":material/link:", disabled=True, width="stretch",
                                   help="Salve Client ID e URL de redirecionamento primeiro.",
                                   key=f"conn_disabled_{plataforma}")
                 with cc2:
-                    if st.button("🧪 Testar conexão", key=f"testar_{plataforma}",
+                    if st.button("Testar conexão", icon=":material/science:", key=f"testar_{plataforma}",
                                  disabled=not conectado, width="stretch"):
                         try:
                             token = oauth.obter_access_token(plataforma, repo_int)
@@ -1563,7 +1572,7 @@ def _secao_integracoes():
                             rotulo, value=str(cfg.get(chave, "") or ""),
                             help=ajuda, key=f"neg_{plataforma}_{chave}")
                     extras = extras_form(cfg, conectado) if extras_form else {}
-                    if st.form_submit_button("💾 Salvar dados do pedido"):
+                    if st.form_submit_button("Salvar dados do pedido", icon=":material/save:"):
                         novo = {k: v.strip() for k, v in valores.items() if v.strip()}
                         # extras já vêm tipados (int/str) — só descarta string vazia
                         novo.update({k: v for k, v in extras.items()
@@ -1576,7 +1585,7 @@ def _secao_integracoes():
 
                 # -- Só Bling: validar contrato do POST via GET (sem escrita) --
                 if plataforma == "bling" and conectado:
-                    if st.button("📋 Validar contrato (GET pedido exemplo)",
+                    if st.button("Validar contrato (GET pedido exemplo)", icon=":material/fact_check:",
                                  key="contrato_bling"):
                         try:
                             token = oauth.obter_access_token("bling", repo_int)
@@ -1594,13 +1603,13 @@ def _secao_integracoes():
 
     if _integracoes_disponivel:
         _card_integracao(
-            "bling", "🛒 Bling — Pedido de Compra (AK Uniformes)",
+            "bling", ":material/shopping_cart: Bling — Pedido de Compra (AK Uniformes)",
             [("fornecedor_id", "ID do fornecedor (Art Kamizetas)",
               "Cadastros → Fornecedores no Bling")],
             extras_form=_extras_bling,
         )
         _card_integracao(
-            "olist", "🏭 Olist — Pedido de Venda (Art Kamizetas)",
+            "olist", ":material/factory: Olist — Pedido de Venda (Art Kamizetas)",
             [("contato_id", "ID do contato/cliente (AK Uniformes)", "Contato no Olist"),
              ("vendedor_id", "ID do vendedor", "Obrigatório na API do Olist"),
              ("deposito_id", "ID do depósito", "Obrigatório na API do Olist"),
@@ -1608,7 +1617,7 @@ def _secao_integracoes():
             extras_form=_extras_olist,
         )
 
-        with st.expander("📜 Últimos eventos de integração"):
+        with st.expander("Últimos eventos de integração", icon=":material/history:"):
             _eventos = obter_repositorio_integracoes().listar_eventos(20)
             if len(_eventos):
                 def _resumo_detalhe(det):
@@ -1668,7 +1677,7 @@ def _secao_usuarios():
 
     # --- Adicionar (única porta de entrada) ---
     with st.form("form_novo_usuario"):
-        st.markdown("#### ➕ Adicionar usuário")
+        st.markdown("#### :material/person_add: Adicionar usuário")
         c1, c2, c3 = st.columns([3, 2, 2])
         _novo_email = c1.text_input("E-mail da conta Google", placeholder="nome@empresa.com")
         _novo_nome = c2.text_input("Nome", placeholder="Como aparece na sidebar")
@@ -1681,8 +1690,9 @@ def _secao_usuarios():
         try:
             _repo_usr.criar(_novo_email, _novo_nome, _novo_role, usuario=usuario)
             invalidar_cache_usuarios()
-            st.success(f"✅ {normalizar_email(_novo_email)} liberado como {_novo_role}. "
-                       "Peça para entrar com essa mesma conta Google.")
+            st.success(f"{normalizar_email(_novo_email)} liberado como {_novo_role}. "
+                       "Peça para entrar com essa mesma conta Google.",
+                       icon=":material/check_circle:")
             st.rerun()
         except (EmailInvalido, UsuarioJaExiste) as e:
             st.error(str(e))
@@ -1723,7 +1733,7 @@ def _secao_usuarios():
                 # digitado errado no grid viraria linha morta que nunca loga.
                 num_rows="fixed", **padrao_tabela(EDITOR, len(_df_usr)), key="editor_usuarios",
             )
-            _salvar_usr = st.form_submit_button("💾 Salvar alterações", type="primary")
+            _salvar_usr = st.form_submit_button("Salvar alterações", icon=":material/save:", type="primary")
 
         if _salvar_usr:
             _novas = _df_usr_edit.to_dict("records")
@@ -1742,13 +1752,13 @@ def _secao_usuarios():
                 else:
                     _repo_usr.salvar_lote(_diff, usuario=usuario)
                     invalidar_cache_usuarios()
-                    st.success(f"✅ {len(_diff)} usuário(s) atualizado(s).")
+                    st.success(f"{len(_diff)} usuário(s) atualizado(s).", icon=":material/check_circle:")
                     st.rerun()
 
         st.divider()
 
         # --- Remoção ---
-        st.markdown("#### 🗑️ Remover acesso")
+        st.markdown("#### :material/person_remove: Remover acesso")
         st.caption("Remover apaga o cadastro. Para bloquear temporariamente, "
                    "prefira desmarcar **Ativo** acima.")
         _rm_col, _rm_btn = st.columns([3, 1])
@@ -1763,7 +1773,7 @@ def _secao_usuarios():
             else:
                 _repo_usr.remover(_rm_email)
                 invalidar_cache_usuarios()
-                st.success(f"✅ {_rm_email} removido.")
+                st.success(f"{_rm_email} removido.", icon=":material/check_circle:")
                 st.rerun()
     elif not _erro_usr:
         st.info("Nenhum usuário cadastrado ainda.")
@@ -1817,13 +1827,13 @@ def _secao_sistema():
             status_pronto = c3.number_input(
                 "Pronto para retirada (ID)",
                 value=int(config["daily"]["status_ids"]["pronto_retirada"]), step=1)
-            salvar_status = st.form_submit_button("💾 Salvar situações")
+            salvar_status = st.form_submit_button("Salvar situações", icon=":material/save:")
 
         if salvar_status:
             config["daily"]["status_ids"]["em_aberto"] = status_aberto
             config["daily"]["status_ids"]["em_andamento"] = status_andamento
             config["daily"]["status_ids"]["pronto_retirada"] = status_pronto
-            _salvar_secao(config, "✅ Situações de pedido salvas.")
+            _salvar_secao(config, "Situações de pedido salvas.")
 
         st.write("Lojas e depósitos em uso (definidos no `config.yaml`)")
         _central = config["depositos"]["central"]
@@ -1857,16 +1867,16 @@ def _secao_sistema():
         st.markdown("**Manutenção**")
         col3, col4 = st.columns(2)
         with col3:
-            if st.button("🔄 Forçar recarga de dados"):
+            if st.button("Forçar recarga de dados", icon=":material/refresh:"):
                 # Clear GLOBAL de propósito: é a intenção explícita do botão
                 # (relê o espelho do Bling, não só os parâmetros).
                 st.cache_data.clear()
-                st.success("✅ Cache limpo. A próxima tela relê o Supabase (~10 s).")
+                st.success("Cache limpo. A próxima tela relê o Supabase (~10 s).", icon=":material/check_circle:")
         with col4:
             # Backup do config EFETIVO (yaml defaults + parâmetros do Supabase
             # mesclados) — o que os motores realmente usam agora.
             st.download_button(
-                label="💾 Baixar backup do config efetivo",
+                label="Baixar backup do config efetivo", icon=":material/download:",
                 data=yaml.safe_dump(config, allow_unicode=True, sort_keys=False),
                 file_name=f"config_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.yaml",
                 mime="text/plain",
@@ -1877,7 +1887,7 @@ def _secao_sistema():
 # INTERFACE PRINCIPAL — só a seção ativa é executada
 # =================================================================
 
-st.title("⚙️ Configurações")
+st.title(":material/settings: Configurações")
 
 # Seção inicial: a da URL (?secao=) quando válida; senão a primeira. Depois
 # disso quem manda é o widget — o session_state é a fonte, a URL é o espelho.
