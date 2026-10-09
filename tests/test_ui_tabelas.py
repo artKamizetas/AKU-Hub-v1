@@ -109,3 +109,26 @@ def test_sku_e_fixo_e_casas_viram_step():
     assert t.col_pecas("Qtd")["type_config"]["step"] == 1
     assert t._casas_da_coluna(t.col_numero("PA", casas=2)) == 2
     assert t._casas_da_coluna(t.col_pecas("Qtd")) == 0
+
+
+class TestDestacar:
+    def test_pinta_so_as_celulas_pedidas(self):
+        from ui_tabelas import ESTILO_ALTERADO, destacar
+        df = pd.DataFrame({"sku": ["A", "B"], "qtd": [1, 2]})
+        styler = destacar(df, [(1, "qtd")])
+        styler._compute()
+        pintadas = {pos: dict(regras) for pos, regras in styler.ctx.items() if regras}
+        assert list(pintadas) == [(1, 1)]
+        assert pintadas[(1, 1)]["background-color"] in ESTILO_ALTERADO
+
+    def test_celula_inexistente_e_ignorada(self):
+        from ui_tabelas import destacar
+        df = pd.DataFrame({"sku": ["A"], "qtd": [1]})
+        styler = destacar(df, [(5, "qtd"), (0, "sumiu")])
+        styler._compute()
+        assert not any(styler.ctx.values())
+
+    def test_nao_altera_o_dado(self):
+        from ui_tabelas import destacar
+        df = pd.DataFrame({"sku": ["A"], "qtd": pd.array([None], dtype="Int64")})
+        pd.testing.assert_frame_equal(destacar(df, [(0, "sku")]).data, df)

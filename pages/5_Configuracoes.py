@@ -1328,6 +1328,12 @@ def _secao_integracoes():
         return cliente_bling.listar_formas_pagamento(token)
 
     @st.cache_data(ttl=3600, show_spinner=False)
+    def _situacoes_compra_bling() -> list:
+        """Situações do módulo de pedidos de compra (id é por conta)."""
+        token = oauth.obter_access_token("bling", obter_repositorio_integracoes())
+        return cliente_bling.listar_situacoes_compra(token)
+
+    @st.cache_data(ttl=3600, show_spinner=False)
     def _formas_recebimento_olist() -> list:
         """Formas de recebimento da conta Olist (id por conta) p/ o selectbox."""
         token = oauth.obter_access_token("olist", obter_repositorio_integracoes())
@@ -1383,9 +1389,50 @@ def _secao_integracoes():
                  "este valor vai em todos os itens do pedido.",
             key="neg_bling_unidade")
 
+        # Cancelamento pós-emissão: o Bling muda a situação do pedido pelo ID
+        # da situação no módulo (por conta), não pelo nome. Mesmo desenho da
+        # forma de pagamento: lista por nome, text_input como degradação.
+        st.markdown("**Cancelamento** (pedido de compra já emitido)")
+        salvo_canc = str(cfg.get("situacao_cancelado_id") or "")
+        situacao_canc = salvo_canc
+
+        situacoes, erro_sit = [], None
+        if conectado:
+            try:
+                situacoes = _situacoes_compra_bling()
+            except Exception as exc:
+                erro_sit = str(exc)
+
+        if situacoes:
+            ids_sit = [s["id"] for s in situacoes]
+            rotulos_sit = {s["id"]: s["nome"] for s in situacoes}
+            if salvo_canc and salvo_canc not in ids_sit:
+                ids_sit.insert(0, salvo_canc)
+                rotulos_sit[salvo_canc] = f"(id {salvo_canc} — não está mais na lista)"
+            # Nada salvo ainda: já aponta para a que se chama "Cancelado"
+            sugerida = next((i for i in ids_sit
+                             if rotulos_sit[i].strip().lower().startswith("cancel")), ids_sit[0])
+            situacao_canc = st.selectbox(
+                "Situação de cancelado", options=ids_sit,
+                index=ids_sit.index(salvo_canc if salvo_canc in ids_sit else sugerida),
+                format_func=lambda i: rotulos_sit.get(i, i),
+                help="Para onde o pedido de compra vai ao ser cancelado pela página "
+                     "Pedidos de Compra. O app confere depois se o pedido ficou "
+                     "de fato Cancelado no Bling.",
+                key="neg_bling_sit_canc_sel")
+        else:
+            if erro_sit:
+                st.caption(":orange[:material/warning:] Não foi possível listar as "
+                           f"situações de compra: {erro_sit}")
+            situacao_canc = st.text_input(
+                "ID da situação de cancelado", value=salvo_canc,
+                help="Conecte a integração para escolher pelo nome.",
+                key="neg_bling_sit_canc_txt")
+
         return {"forma_pagamento_id": str(forma_id or "").strip(),
                 "prazo_pagamento_dias": int(prazo),
-                "unidade_padrao": unidade.strip()}
+                "unidade_padrao": unidade.strip(),
+                "situacao_cancelado_id": str(situacao_canc or "").strip()}
 
     def _extras_olist(cfg: dict, conectado: bool) -> dict:
         """

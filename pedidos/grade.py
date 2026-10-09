@@ -270,3 +270,54 @@ def diff_grade(grade_editada: pd.DataFrame, itens: pd.DataFrame, celulas: dict) 
             if qtd > 0:
                 novas.append({"sku_pai": linha[COL_SKU], "tamanho": tam, "quantidade": qtd})
     return alteracoes, novas
+
+
+# ---------------------------------------------------------------------------
+# O que foi alterado em relação à sugestão (destaque na tela)
+# ---------------------------------------------------------------------------
+def aplicar_edicoes(df: pd.DataFrame, edicoes: dict) -> pd.DataFrame:
+    """
+    Cópia de `df` com as edições pendentes do `st.data_editor` aplicadas —
+    `edicoes` é o `edited_rows` do estado do widget ({posição da linha:
+    {coluna: valor}}; célula apagada vem como None). É o que o editor vai
+    devolver, calculado ANTES de ele ser desenhado: o destaque das quantidades
+    alteradas precisa saber o que foi digitado para pintar a tabela.
+    """
+    out = df.copy()
+    for pos, colunas in (edicoes or {}).items():
+        pos = int(pos)
+        if not 0 <= pos < len(out):
+            continue
+        for coluna, valor in colunas.items():
+            if coluna not in out.columns:
+                continue
+            if valor is None and pd.api.types.is_integer_dtype(out[coluna]):
+                out[coluna] = out[coluna].astype("Int64")   # int64 puro não guarda vazio
+            out.loc[out.index[pos], coluna] = pd.NA if valor is None else valor
+    return out
+
+
+def divergencias(itens: pd.DataFrame, qtd_por_item: dict, base: dict = None) -> list:
+    """
+    Itens cuja quantidade VIGENTE (salva + digitada, por id) difere da de
+    REFERÊNCIA: [{"id", "sku", "tamanho", "sugerida", "final"}], na ordem de
+    `itens`. Item fora de `qtd_por_item` conta como 0.
+
+    Sem `base`, a referência é o que o cálculo sugeriu — item incluído à mão
+    tem sugerida 0 e por isso sempre aparece (o motor não o sugeriu).
+
+    Com `base` ({id do item: quantidade}), a referência passa a ser ela: é a
+    alteração pós-emissão, em que o que importa é "difere do que está nos
+    ERPs". Item fora da base foi incluído durante a alteração (referência 0).
+    A chave do retorno continua `sugerida` — é a quantidade de referência.
+    """
+    out = []
+    for item_id, sku, tamanho, sugerida in zip(
+            itens["id"], itens["sku"], itens["tamanho"], itens["quantidade_sugerida"]):
+        referencia = _qtd(sugerida) if base is None else _qtd(base.get(item_id))
+        final = _qtd(qtd_por_item.get(item_id))
+        if final != referencia:
+            out.append({"id": item_id, "sku": sku,
+                        "tamanho": tamanho_efetivo(tamanho, sku),
+                        "sugerida": referencia, "final": final})
+    return out

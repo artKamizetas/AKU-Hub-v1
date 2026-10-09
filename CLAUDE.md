@@ -43,12 +43,13 @@ etl/
   planejamento.py           # Simulação estratégica de rodadas de produção anuais (bottom-up, a partir de demanda.py)
   vm_dinamico.py            # Cálculo de VM (Visual Merchandising) dinâmico — reposição de loja
 pedidos/                    # Domínio TRANSACIONAL de Pedidos de Compra (etl/ segue analítico read-only)
-  estados.py                # Máquina de estados pura (RASCUNHO→PRONTO→COMPRA_EMITINDO→COMPRA_EMITIDA→VENDA_EMITINDO→EMITIDO, badges)
+  estados.py                # Máquina de estados pura (RASCUNHO→PRONTO→COMPRA_EMITINDO→COMPRA_EMITIDA→VENDA_EMITINDO→EMITIDO; pós-emissão: EM_ALTERACAO, *_ENVIANDO; badges)
+  revisoes.py               # Puro: revisões do pedido — linha de base ("o que está nos ERPs"), envio parcial, diff emitido × novo
   builder.py                # Puro: DataFrame do processar_fabrica → snapshot + grupos Colégio×SuperCategoria
   grade.py                  # Puro: itens ↔ grade SKU pai × tamanho (pivot, diff por id, ordem dos tamanhos por regra)
   catalogo.py               # Puro: catálogo vivo p/ inclusão manual de itens (escopo Colégio×SuperCategoria, células novas → SKU)
   repositorio.py            # ÚNICA porta de escrita/leitura do schema `app` do Supabase (gravável)
-  emissor.py                # Casos de uso da emissão (compra Bling → venda Olist), locks CAS + rollback
+  emissor.py                # Casos de uso: emissão (compra Bling → venda Olist) + pós-emissão (alterar/cancelar sobrepondo os ERPs), locks CAS + rollback
   integracoes/
     repositorio.py          # app.integracao (credenciais/tokens OAuth) + app.integracao_evento (auditoria)
     oauth.py                # Fluxo OAuth2 genérico Bling/Olist (httpx injetável; state no banco)
@@ -231,6 +232,33 @@ Zerado NÃO vira item de pedido (entraria na grade, nos totais e na emissão).
   guardada por posição reapareceria em outro SKU. O `data_editor` NÃO tem dica
   por célula (só `help` no cabeçalho); uma tabela-espelho de indicadores foi
   testada e descartada — não a recrie (ver `docs/decisoes.md`).
+- **Área de trabalho = UMA seção titulada** (`Pedidos da rodada`, molde das
+  outras seções): modo, filtros e pedido dentro da mesma `st.container(border=True)`
+  em `_area_trabalho`; `_secao_pedido`/`_secao_lote` NÃO têm borda nem título
+  próprios (caixa dentro de caixa). Título + seletor de modo e resumo + seletor
+  de visão são linhas flexíveis (`st.container(horizontal=True)`), não colunas —
+  em coluna de fração fixa o `segmented_control` quebrava empilhado em tela estreita.
+- **Tela do pedido: escolher → conferir → agir → apoio.** O seletor é o título
+  do pedido (`Colégio · Super categoria — peças · R$ · Status`: colégio na
+  frente porque a lista é ordenada por ele); os totais ficam numa linha acima da
+  tabela (lugar reservado, preenchido depois do editor) e as ações coladas nela
+  — não volte com h3 de título, métricas grandes no fim nem blocos recolhíveis
+  entre a tabela e o Salvar. Filtros de Colégio/Super Categoria/Status
+  (`_filtrar_pedidos`) valem para os dois modos e entram na `key` da tabela de
+  lote (seleção é por posição). Trocar de pedido com edição pendente é desfeito
+  e avisado (`_ao_trocar_pedido`).
+- **Destaque do que foi alterado** (final ≠ sugerida, salvo OU digitado): âmbar +
+  negrito via `ui_tabelas.destacar` (Styler), calculado por `grade.divergencias`
+  sobre `grade.aplicar_edicoes(df, edited_rows)` ANTES de desenhar o editor. O
+  Streamlit só aplica estilo em coluna NÃO editável: no rascunho pinta a
+  Sugerida (Lista) ou o SKU da linha + legenda (Grade); com o pedido travado
+  pinta a própria célula. **Não troque por coluna "Δ" calculada:** mudar o DADO
+  do `data_editor` muda a identidade do widget e apaga o que está sendo
+  digitado; o Styler não entra na identidade.
+- **`_memo(chave, ler)`**: leitura do Supabase repetida entre reruns do FRAGMENT
+  (itens do pedido aberto, prontidão/mapa do Olist, preview) é feita uma vez por
+  rerun de app. A bolsa é zerada no topo da página — por isso toda ação de
+  escrita PRECISA terminar em `st.rerun()` de app, nunca `scope="fragment"`.
 - **Inclusão manual de itens** (só RASCUNHO; DDL 007): "Adicionar produto"
   (escolhe o produto, digita a grade inteira) ou digitar numa célula vazia da
   grade. `repositorio.adicionar_itens` IMPÕE `origem=MANUAL`,
@@ -252,6 +280,13 @@ Zerado NÃO vira item de pedido (entraria na grade, nos totais e na emissão).
   Consistência sem transação: unique parcial = 1 congelamento vivo por rodada
   (23505 → `RodadaJaCongelada`); `CONGELANDO`→`ABERTA` = commit lógico; transições
   por compare-and-swap (`transicionar_pedido` retorna False = corrida perdida).
+- **Leitura com retry, escrita sem** (`pedidos/repositorio.py`): todo SELECT passa
+  por `_ler_com_retry` (3×, só em 5xx do gateway/queda de rede — SQLSTATE e PGRST
+  sobem na hora). Escrita NUNCA é repetida: um 502 pode chegar depois de o banco
+  gravar. Somar itens de vários pedidos é por `_selecionar_in` (uma leitura em
+  lote, paginada com `.order("id")` por causa do corte de 1.000 linhas) — **não
+  volte ao laço de `listar_itens` por pedido**: eram 70 requests em série por
+  rerun na rodada de out/2026 (20 s, e um único 502 derrubava a tela).
 - **Emissão em DOIS momentos** (`pedidos/emissor.py`): compra no **Bling** (conta AK
   Uniformes, `POST /pedidos/compras`) → depois venda no **Olist/Tiny** (conta Art
   Kamizetas, `POST /pedidos`; `numeroOrdemCompra` = nº do Bling — ordem obrigatória).
@@ -492,6 +527,68 @@ devolve a última escolha em vez de deixar a tela sem dono.
 O `config.yaml` do git NÃO é escrito pela UI — é só a fonte dos defaults (Categoria A).
 Falha no Supabase → erro na tela, nada é salvo.
 
+## Alterar e cancelar pedido já emitido (pedidos/emissor.py + pedidos/revisoes.py)
+
+Depois de emitido o pedido ainda pode ser **alterado** ou **cancelado** pela
+4_Pedidos, e o app **sobrepõe** o Bling e o Olist. Spec e porquês:
+`docs/requisitos/alteracao-pos-emissao.md` e `docs/decisoes.md` (2026-10).
+
+- **O filtro é o status nativo de cada ERP**, e só ele: compra "Em aberto" no
+  Bling (`situacao.valor == 0`) e venda "Aberta" no Olist (`situacao == 0`) —
+  `emissor.avaliar_abertura`. Não crie outra trava por cima (prazo, status nosso).
+- **Estados:** estado emitido → `EM_ALTERACAO` (repouso EDITÁVEL) →
+  `ALTERACAO_ENVIANDO` → estado emitido; estado emitido →
+  `CANCELAMENTO_ENVIANDO` → `CANCELADO`. "Estado emitido" é DERIVADO por
+  `estados.estado_emitido(pedido)` (`EMITIDO` se há `olist_id`, senão
+  `COMPRA_EMITIDA`) — nunca grave o estado de origem. **Não reuse `RASCUNHO`**
+  para o pós-emissão: ele significa "não existe nos ERPs" e libera cancelar
+  pedido e rodada.
+- **`quantidade_final` deixou de ser sempre "o que está nos ERPs".** Em
+  `EM_ALTERACAO` é rascunho não enviado. O emitido é a **linha de base**:
+  última revisão concluída em `app.pedido_compra_revisao` (DDL 008),
+  `revisoes.linha_de_base`. Quem precisar do comprometido (on-order) lê de lá.
+- **`pedidos/revisoes.py` é PURO** e responde três perguntas diferentes — não
+  as confunda: `linha_de_base` (o que está nos ERPs), `confirmada_no_erp` (o
+  que AQUELE ERP recebeu por último) e `envio_parcial` (os dois em versões
+  diferentes). A detecção de edição manual compara com `confirmada_no_erp`,
+  não com a linha de base — senão o nosso próprio envio parcial pareceria
+  edição feita no ERP.
+- **Olist primeiro, Bling depois** (o inverso da emissão): é o lado da fábrica;
+  se ele recusar, nada mudou em lugar nenhum. Tudo o que pode falhar sem tocar
+  ERP (filtro, divergência, tokens, payloads, SKU→id) roda ANTES do 1º PUT.
+- **Falha depois de tocar um ERP → fica no lock e a tela oferece "Concluir"**
+  (reexecuta; PUT/PATCH são idempotentes). É o oposto do "Destravar" da
+  emissão, que avisa de duplicata — por isso `enviando_alteracao()` é separado
+  de `emitindo()`. Falha antes de tocar → rollback e a revisão órfã é removida.
+- **Edição feita direto no ERP não bloqueia:** levanta `DivergenciaNoErp` (uma
+  pergunta, não um erro — sem evento de falha), a tela mostra a diferença e o
+  envio só segue com `sobrepor=True`.
+- **O PUT do Bling substitui o pedido inteiro.** `bling.montar_payload_alteracao_compra`
+  devolve o que precisa sobreviver: `numero` (sem ele o Bling renumera e o
+  `numeroOrdemCompra` do Olist fica órfão), `data`, parcelas (mesmas
+  datas, valores refeitos pelo total novo) e frete/desconto/categoria lançados
+  lá. A **situação não vai no PUT**: o Bling devolve `situacao.id = 0` na
+  maioria das compras (só o `valor` vem preenchido) — decida sempre pelo
+  `situacao.valor`, nunca pelo id. No Olist os itens têm endpoint próprio (`PUT /pedidos/{id}/itens`) e
+  `olist.montar_itens_venda` é a MESMA função do POST da emissão.
+- **Cancelar muda a situação, não exclui**; `bling_id`/`olist_id` ficam como
+  trilha. No Bling o PATCH pede o ID da situação no módulo (por conta —
+  `situacao_cancelado_id`, selectbox em Integrações) e o app confere com um GET
+  que ficou de fato Cancelado. "Já cancelado no ERP" conta como feito.
+- **Revisão 1 nasce na emissão, em melhor esforço** (`_registrar_revisao_emissao`
+  nunca derruba a emissão) e, se faltar, é reconstruída em
+  `repositorio.abrir_alteracao` — fora de RASCUNHO/EM_ALTERACAO os itens estão
+  travados, então são o que foi emitido.
+- **Item já emitido não se remove numa alteração** (nem o manual): zera-se.
+- **Tela:** "Verificar nos ERPs" é sob demanda (chamada de API; o Olist tem 60
+  req/min) e mora na bolsa do `_memo`. Com dois "R$" na mesma linha de markdown
+  os cifrões precisam ser escapados (`\$`) — senão viram um bloco LaTeX.
+- **Validado contra os ERPs reais em 09/10/2026** (DDL 008 aplicado; resultado
+  na spec, §9). Sem o DDL a tela funciona em leitura/emissão e o pós-emissão
+  responde `MigracaoPendente`. O token do Bling NÃO tem o escopo de Situações
+  (`GET /situacoes/modulos` → 403): por isso "Testar conexão" do Bling falha e
+  o seletor "Situação de cancelado" cai no campo de texto (valor da conta: 34).
+
 ---
 
 ## Não faça sem perguntar
@@ -520,7 +617,7 @@ Authlib
 ---
 
 ## Testes (`tests/`)
-Suíte `pytest` focada no **motor de demanda/PCP** (`etl/demanda.py`), nos utilitários, no **padrão de tabelas** (`tests/test_ui_tabelas.py` — altura por tipo, arredondamento antes de exibir, formatadores pt-BR) e na **paginação paralela** do `loader.py` (`tests/test_loader_paginacao.py` — planejamento de páginas, montagem a partir de lotes fora de ordem, filtro simétrico count/página, retry e cauda, com fake do cliente PostgREST), nas **regras de escrita dos Colégios** (`tests/test_config_edicao.py` — salvar sem editar não grava override; limpar a célula remove), no **Comercial/metas** (`etl/metas.py` puro + `etl/daily.py` com competência fixa via fixtures `config_daily`/`dados_daily` do conftest — o default é o mês corrente, que não serviria para teste determinístico), no **domínio de pedidos** (`pedidos/` — builder, estados, grade e catálogo puros (`tests/test_pedidos_grade.py`: ordem dos tamanhos, volta da grade por id, célula nova → SKU); repositório testado com fake do gateway `_inserir/_atualizar/_selecionar/_deletar`, sem Supabase) e nas **integrações/emissão** (`pedidos/integracoes/` + `emissor.py` — payloads puros, OAuth e clientes HTTP com fake injetável, emissor com repo+cliente fakes; zero rede). Sem Supabase/secrets. Instalar dev deps com `uv pip install -r requirements-dev.txt` (o venv usa **uv**, não pip) e rodar `pytest` na raiz. `tests/conftest.py` monta `config` e `dados` sintéticos; o determinismo vem de ancorar as altas em `now()` de forma constante e desligar o crescimento (ver docstring do conftest). Os fakes reusam os `RepoFake` de `test_pedidos_repositorio`/`test_integracoes_repositorio` e o `HttpFake` de `test_integracoes_payloads`. Ao mexer no motor, rode a suíte e atualize os testes junto.
+Suíte `pytest` focada no **motor de demanda/PCP** (`etl/demanda.py`), nos utilitários, no **padrão de tabelas** (`tests/test_ui_tabelas.py` — altura por tipo, arredondamento antes de exibir, formatadores pt-BR) e na **paginação paralela** do `loader.py` (`tests/test_loader_paginacao.py` — planejamento de páginas, montagem a partir de lotes fora de ordem, filtro simétrico count/página, retry e cauda, com fake do cliente PostgREST), nas **regras de escrita dos Colégios** (`tests/test_config_edicao.py` — salvar sem editar não grava override; limpar a célula remove), no **Comercial/metas** (`etl/metas.py` puro + `etl/daily.py` com competência fixa via fixtures `config_daily`/`dados_daily` do conftest — o default é o mês corrente, que não serviria para teste determinístico), no **domínio de pedidos** (`pedidos/` — builder, estados, grade e catálogo puros (`tests/test_pedidos_grade.py`: ordem dos tamanhos, volta da grade por id, célula nova → SKU); repositório testado com fake do gateway `_inserir/_atualizar/_selecionar/_deletar`, sem Supabase) e nas **integrações/emissão** (`pedidos/integracoes/` + `emissor.py` — payloads puros, OAuth e clientes HTTP com fake injetável, emissor com repo+cliente fakes; zero rede), incluindo o **pós-emissão** (`tests/test_pedidos_revisoes.py` — linha de base e envio parcial; em `tests/test_emissor.py`, o filtro de "em aberto", a divergência com o ERP, envio feliz / falha antes / falha depois / concluir, e o cancelamento). Sem Supabase/secrets. Instalar dev deps com `uv pip install -r requirements-dev.txt` (o venv usa **uv**, não pip) e rodar `pytest` na raiz. `tests/conftest.py` monta `config` e `dados` sintéticos; o determinismo vem de ancorar as altas em `now()` de forma constante e desligar o crescimento (ver docstring do conftest). Os fakes reusam os `RepoFake` de `test_pedidos_repositorio`/`test_integracoes_repositorio` e o `HttpFake` de `test_integracoes_payloads`. Ao mexer no motor, rode a suíte e atualize os testes junto.
 
 ---
 

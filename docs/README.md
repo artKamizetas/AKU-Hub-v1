@@ -23,6 +23,7 @@ Art Kamizetas (aparece nos contextos de produção/PCP).
 | [requisitos/normalizacao-colegios.md](requisitos/normalizacao-colegios.md) | **Requisito (proposta)** — tabela configurável para normalizar o colégio (`Marca_sku`), jogando ruído em `Outros` |
 | [requisitos/cobertura-alvo-rodada.md](requisitos/cobertura-alvo-rodada.md) | **Spec (implementada)** — Cobertura Alvo por rodada: antecipação deliberada em % da demanda anual; a rodada seguinte encolhe sozinha |
 | [requisitos/posicao-estoque-on-order.md](requisitos/posicao-estoque-on-order.md) | **Exploração (não implementar ainda)** — on-order/em-trânsito na posição de estoque do motor + reconciliação com o Tiny |
+| [requisitos/alteracao-pos-emissao.md](requisitos/alteracao-pos-emissao.md) | **Spec (implementada e validada nos ERPs)** — alterar e cancelar pedido de compra já emitido, sobrepondo Bling e Olist enquanto está em aberto nos dois |
 | [requisitos/metas-escalonadas.md](requisitos/metas-escalonadas.md) | **Spec (implementada)** — Metas Prata/Ouro/Diamante por loja × mês (Faturamento e PA); meta do vendedor rateada da loja |
 | [requisitos/backfill-situacao-pedidos.md](requisitos/backfill-situacao-pedidos.md) | **Achado de dados (ABERTO, para a pipeline)** — `pedidos.id_situacao_bling` tem duas codificações incompatíveis; histórico ≤ fev/2026 usa códigos órfãos. Requer backfill |
 
