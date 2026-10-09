@@ -72,7 +72,7 @@ if not dados["validacao"]["ok"]:
     st.error("Dados inválidos. Verifique a página principal.")
     st.stop()
 
-st.title("📈 Daily — Acompanhamento Comercial")
+st.title(":material/trending_up: Daily — Acompanhamento Comercial")
 
 # =================================================================
 # FILTROS
@@ -91,7 +91,7 @@ with st.container(border=True):
             d = cursor - pd.DateOffset(months=i)
             opcoes_comp.append(metas.chave_competencia(d.year, d.month))
         competencia = st.selectbox(
-            "🎯 Competência (metas)", opcoes_comp, index=0,
+            ":material/target: Competência (metas)", opcoes_comp, index=0,
             format_func=lambda c: f"{MESES_NOME[int(c[5:7])]}/{c[:4]}",
             help="Mês de referência das metas. Meses fechados podem ser revisados.",
         )
@@ -111,7 +111,7 @@ with st.container(border=True):
 
     with col_l:
         lojas_selecionadas = st.pills(
-            "🏬 Lojas", nomes_lojas, selection_mode="multi",
+            ":material/store: Lojas", nomes_lojas, selection_mode="multi",
             default=nomes_lojas, key="daily_lojas",
         )
 
@@ -127,7 +127,7 @@ with st.container(border=True):
             c for c in _marcas.unique() if c and c.lower() != "nan" and c != "Sem Colégio"
         )
         colegio_selecionado = st.selectbox(
-            "🏫 Colégio", ["Todos"] + colegios_disp, index=0, key="daily_colegio",
+            ":material/school: Colégio", ["Todos"] + colegios_disp, index=0, key="daily_colegio",
             help="Filtra a análise livre e a quebra por colégio. As metas são sempre da loja inteira.",
         )
 
@@ -189,46 +189,48 @@ label_lojas = " + ".join(lojas_selecionadas) if len(lojas_selecionadas) <= 2 els
 # =================================================================
 # BLOCO 1 — METAS (competência)
 # =================================================================
-st.subheader(f"🎯 Metas — {rotulo_comp}")
+st.subheader(f":material/target: Metas — {rotulo_comp}")
 
 origens = set(metas_sel["Origem Meta"])
 if "ausente" in origens:
     faltantes = metas_sel[metas_sel["Origem Meta"] == "ausente"]["Loja"].tolist()
     st.warning(
-        f"⚠️ Sem meta cadastrada em {rotulo_comp} para: **{', '.join(faltantes)}**. "
-        "Cadastre em *Configurações → Comercial* — o realizado abaixo continua correto."
+        f"Sem meta cadastrada em {rotulo_comp} para: **{', '.join(faltantes)}**. "
+        "Cadastre em *Configurações → Comercial* — o realizado abaixo continua correto.",
+        icon=":material/warning:",
     )
 elif "estimada" in origens:
     st.info(
-        "ℹ️ Usando meta **estimada** do formato antigo (valor único como Ouro). "
-        "Cadastre as metas do mês em *Configurações → Comercial* para o número real."
+        "Usando meta **estimada** do formato antigo (valor único como Ouro). "
+        "Cadastre as metas do mês em *Configurações → Comercial* para o número real.",
+        icon=":material/info:",
     )
 
 if not eh_mes_corrente:
-    st.caption(f"📅 Mês fechado — a projeção é igual ao realizado (não há mais dias a percorrer).")
+    st.caption(f":material/calendar_month: Mês fechado — a projeção é igual ao realizado (não há mais dias a percorrer).")
 
 k1, k2, k3, k4 = st.columns(4)
 with k1:
-    st.metric("💰 Vendido no mês", _brl(resumo_fat["vendido"]),
+    st.metric(":material/payments: Vendido no mês", _brl(resumo_fat["vendido"]),
               delta=f"{_num(agg_pa['pedidos'])} pedidos · {_num(agg_pa['pecas'])} peças",
               delta_color="off")
 with k2:
-    st.metric("🏅 Nível conquistado", _badge_nivel(resumo_fat["nivel"]),
+    st.metric(":material/military_tech: Nível conquistado", _badge_nivel(resumo_fat["nivel"]),
               delta=f"PA {_num(resumo_pa['pa'], 2)} · {_badge_nivel(resumo_pa['nivel'])}",
               delta_color="off")
 with k3:
     if resumo_fat["proximo_nivel"]:
         ritmo = resumo_fat["ritmo_necessario"]
-        st.metric(f"🎯 Falta p/ {resumo_fat['proximo_nivel']}", _brl(resumo_fat["falta"]),
+        st.metric(f":material/target: Falta p/ {resumo_fat['proximo_nivel']}", _brl(resumo_fat["falta"]),
                   delta=(f"{_brl(ritmo)}/dia nos {dias_no_mes - dia_atual} dias restantes"
                          if ritmo else "sem dias restantes"),
                   delta_color="off")
     else:
-        st.metric("🎯 Falta", "—",
+        st.metric(":material/target: Falta", "—",
                   delta="Diamante batido" if resumo_fat["nivel"] else "sem meta",
                   delta_color="off")
 with k4:
-    st.metric("📊 Projeção do mês", _brl(resumo_fat["run_rate"]),
+    st.metric(":material/query_stats: Projeção do mês", _brl(resumo_fat["run_rate"]),
               delta=f"fecharia em {_badge_nivel(resumo_fat['nivel_projetado'])}",
               delta_color="off")
 
@@ -311,7 +313,7 @@ with col_b2:
 # -----------------------------------------------------------------
 # Ritmo do mês — acumulado realizado vs metas acumuladas
 # -----------------------------------------------------------------
-st.markdown("**📈 Ritmo do mês**")
+st.markdown("**:material/show_chart: Ritmo do mês**")
 
 vendas_comp = df_loja_base[
     (df_loja_base["Data"].dt.year == ano_c)
@@ -373,7 +375,8 @@ else:
 # -----------------------------------------------------------------
 # Detalhe por loja
 # -----------------------------------------------------------------
-with st.expander(f"📋 Detalhe por loja — {rotulo_comp}", expanded=False):
+with st.expander(f"Detalhe por loja — {rotulo_comp}", expanded=False,
+                 icon=":material/list_alt:"):
     det_loja = metas_sel.copy()
     det_loja["Nível"] = det_loja["Nivel"].map(lambda v: _badge_nivel(v))
     det_loja["PA Nível"] = det_loja["PA Nivel"].map(lambda v: _badge_nivel(v))
@@ -397,7 +400,8 @@ with st.expander(f"📋 Detalhe por loja — {rotulo_comp}", expanded=False):
 # Barato: uma passada de groupby no df_detalhado (que já tem TODOS os
 # pedidos), nunca um processar_daily por mês.
 # -----------------------------------------------------------------
-with st.expander("📅 Histórico de atingimento (12 meses)", expanded=False):
+with st.expander("Histórico de atingimento (12 meses)", expanded=False,
+                 icon=":material/calendar_month:"):
     _vendas_hist = df_loja[df_loja["id_situacao"].isin(situacoes_venda)]
     _realizado_hist = {}
     if len(_vendas_hist) > 0:
@@ -424,7 +428,7 @@ with st.expander("📅 Histórico de atingimento (12 meses)", expanded=False):
     else:
         if _n_config < len(_hist):
             st.caption(
-                f"ℹ️ {_n_config} de {len(_hist)} meses têm meta cadastrada; nos demais "
+                f":material/info: {_n_config} de {len(_hist)} meses têm meta cadastrada; nos demais "
                 "a linha vem do valor legado estimado — compare com ressalva."
             )
         _fig_h = go.Figure()
@@ -477,7 +481,7 @@ with st.expander("📅 Histórico de atingimento (12 meses)", expanded=False):
 # =================================================================
 # BLOCO 2 — VENDEDORES (competência)
 # =================================================================
-st.subheader(f"👤 Vendedores — {rotulo_comp}")
+st.subheader(f":material/person: Vendedores — {rotulo_comp}")
 
 vend_sel = df_metas_vendedor[df_metas_vendedor["Loja"].isin(lojas_selecionadas)].copy()
 sem_atribuicao = df_metas_vendedor[
@@ -524,7 +528,7 @@ else:
 
 if len(sem_atribuicao) > 0:
     st.caption(
-        f"⚠️ **{len(sem_atribuicao)}** vendedor(es) venderam em {rotulo_comp} sem atribuição de loja "
+        f":orange[:material/warning:] **{len(sem_atribuicao)}** vendedor(es) venderam em {rotulo_comp} sem atribuição de loja "
         f"({_brl(sem_atribuicao['Vendido'].sum())}) — não entram em nenhuma meta. "
         "Atribua em *Configurações → Comercial → Vendedores por loja*."
     )
@@ -532,7 +536,7 @@ if len(sem_atribuicao) > 0:
 # =================================================================
 # BLOCO 3 — COLÉGIOS (competência)
 # =================================================================
-st.subheader(f"🏫 Colégios — {rotulo_comp}")
+st.subheader(f":material/school: Colégios — {rotulo_comp}")
 
 if len(vendas_comp) > 0:
     por_colegio = (
@@ -582,7 +586,7 @@ else:
 # BLOCO 4 — ANÁLISE LIVRE (período)
 # =================================================================
 st.divider()
-st.subheader("📊 Análise livre")
+st.subheader(":material/bar_chart: Análise livre")
 st.caption("Este bloco segue o **período** abaixo — independente da competência das metas acima.")
 
 primeiro_dia_mes = hoje.replace(day=1)
@@ -628,13 +632,13 @@ df_vendas_periodo = df_periodo[df_periodo["id_situacao"].isin(situacoes_venda)]
 status_ids = config["daily"]["status_ids"]
 s1, s2, s3, s4 = st.columns(4)
 with s1:
-    st.metric("📋 Em Aberto", len(df_periodo[df_periodo["id_situacao"] == status_ids["em_aberto"]]))
+    st.metric(":material/assignment: Em Aberto", len(df_periodo[df_periodo["id_situacao"] == status_ids["em_aberto"]]))
 with s2:
-    st.metric("⏳ Em Andamento", len(df_periodo[df_periodo["id_situacao"] == status_ids["em_andamento"]]))
+    st.metric(":material/hourglass_top: Em Andamento", len(df_periodo[df_periodo["id_situacao"] == status_ids["em_andamento"]]))
 with s3:
-    st.metric("📦 Pronto p/ Retirada", len(df_periodo[df_periodo["id_situacao"] == status_ids["pronto_retirada"]]))
+    st.metric(":material/inventory_2: Pronto p/ Retirada", len(df_periodo[df_periodo["id_situacao"] == status_ids["pronto_retirada"]]))
 with s4:
-    st.metric("✅ Atendidos", len(df_vendas_periodo))
+    st.metric(":material/check_circle: Atendidos", len(df_vendas_periodo))
 
 # --- Histórico diário ---
 st.markdown(f"**Histórico de vendas — {data_inicio.strftime('%d/%m')} a {data_fim.strftime('%d/%m/%Y')}**")
@@ -680,7 +684,8 @@ else:
     st.info("Sem vendas no período selecionado.")
 
 # --- Rankings livres (detalhe secundário) ---
-with st.expander("🔎 Rankings no período (vendedor e colégio)", expanded=False):
+with st.expander("Rankings no período (vendedor e colégio)", expanded=False,
+                 icon=":material/leaderboard:"):
     if len(df_vendas_periodo) == 0:
         st.info("Sem vendas no período selecionado.")
     else:

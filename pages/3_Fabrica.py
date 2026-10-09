@@ -85,7 +85,7 @@ cfg_dem = config.get("demanda", {})
 # =================================================================
 # TÍTULO
 # =================================================================
-st.title("🏭 Simulador de Produção")
+st.title(":material/factory: Simulador de Produção")
 st.caption(
     "**Visão Geral** planeja o ano (cenário de rodadas + projeção de estoque). "
     "**Sugestão por SKU** monta o pedido de uma rodada específica."
@@ -118,7 +118,7 @@ with gc3:
 
 janela_alta = cfg_dem.get("janela_alta", [12, 1, 2])
 st.caption(
-    "📐 Dimensionamento **order-up-to**: cada rodada repõe até o nível-alvo "
+    ":material/straighten: Dimensionamento **order-up-to**: cada rodada repõe até o nível-alvo "
     "(demanda até a próxima chegada + estoque de segurança). O tamanho **emerge da "
     "projeção de estoque** — sem % manual.  ·  Alta: "
     + ", ".join(MESES_NOME[m][:3] for m in janela_alta)
@@ -130,9 +130,9 @@ st.divider()
 # QUADRO 1: VISÃO GERAL (estratégico) — tudo delimitado num container
 # =================================================================
 with st.container(border=True):
-    st.subheader("📊 Visão Geral — planejamento anual")
+    st.subheader(":material/bar_chart: Visão Geral — planejamento anual")
     # --- Contexto: sazonalidade (formato do ano) ---
-    with st.expander("📈 Sazonalidade mensal (formato histórico do ano)"):
+    with st.expander("Sazonalidade mensal (formato histórico do ano)", icon=":material/show_chart:"):
         fig_saz = go.Figure()
         cores_saz = [COR_ALTA if p >= 1.0 else COR_BAIXA for p in sazonalidade["PesoNormalizado"]]
         fig_saz.add_trace(go.Bar(
@@ -189,7 +189,7 @@ with st.container(border=True):
             _iso_label[_iso] = _lab
 
     with _ph_cal:
-        st.markdown("**⚙️ Calendário de disparos**")
+        st.markdown("**:material/calendar_month: Calendário de disparos**")
         st.caption(
             "Cada mês selecionado dispara uma **rodada** na tabela abaixo. Selecione "
             "os disparos deste ano E do próximo — a **última data só fecha o intervalo "
@@ -207,8 +207,8 @@ with st.container(border=True):
         else:
             _datas_ativas = list(_datas_salvas)
             if _datas_ativas:
-                st.caption("📅 " + " · ".join(_iso_label[i] for i in _datas_ativas))
-            st.caption("🔒 Somente admin edita o calendário e as coberturas alvo.")
+                st.caption(":material/calendar_month: " + " · ".join(_iso_label[i] for i in _datas_ativas))
+            st.caption(":material/lock: Somente admin edita o calendário e as coberturas alvo.")
 
     datas_rodadas = _datas_ativas
     tem_rodadas = len(datas_rodadas) >= 2
@@ -276,21 +276,21 @@ with st.container(border=True):
 
             rodadas_ano = [r for r in rodadas if r["ano_chegada"] == ano_atual]
 
-            st.markdown(f"**📅 Deste ano ({ano_atual})** — rodadas que chegam em {ano_atual}")
+            st.markdown(f"**:material/calendar_month: Deste ano ({ano_atual})** — rodadas que chegam em {ano_atual}")
             if rodadas_ano:
                 _bloco_kpis(rodadas_ano)
             else:
                 st.caption(f"Nenhuma rodada chega em {ano_atual}.")
 
             span = f"{anos_plano[0]}" if len(anos_plano) <= 1 else f"{anos_plano[0]}–{anos_plano[-1]}"
-            st.markdown(f"**📊 Total planejado ({span})** — somatório de todas as {len(rodadas)} rodadas")
+            st.markdown(f"**:material/bar_chart: Total planejado ({span})** — somatório de todas as {len(rodadas)} rodadas")
             _bloco_kpis(rodadas)
 
             st.caption(f"Estoque líquido atual da rede (ponto de partida da projeção): "
                        f"{num(sim['totais'].get('estoque_inicial', 0))} pçs")
 
         # --- Resumo das rodadas (comparação de relance) ANTES do detalhe ---
-        st.subheader("🏭 Rodadas de Produção")
+        st.subheader(":material/factory: Rodadas de Produção")
         rodadas_df = pd.DataFrame(sim["rodadas"])
 
         # Cobertura NATURAL de cada rodada (demanda do intervalo ÷ demanda
@@ -398,10 +398,11 @@ with st.container(border=True):
 
         if _cob_ativo:
             st.info(
-                f"⚖️ **Antecipação ativa em {len(_cob_ativo)} rodada(s)** — a produção "
+                f"**Antecipação ativa em {len(_cob_ativo)} rodada(s)** — a produção "
                 f"total do horizonte se conserva: o que a rodada engordada produz a mais, "
                 f"a(s) seguinte(s) produz(em) a menos."
-                + (" _(preview — ainda não salvo)_" if _tem_preview_cob else "")
+                + (" _(preview — ainda não salvo)_" if _tem_preview_cob else ""),
+                icon=":material/balance:",
             )
 
         # --- Salvar / descartar o PLANO (datas + coberturas) — admin ---
@@ -412,10 +413,11 @@ with st.container(border=True):
                 _mud.append("calendário de disparos")
             if _tem_preview_cob:
                 _mud.append("coberturas alvo")
-            st.warning(f"📝 Alterações não salvas no plano: {' e '.join(_mud)}.")
+            st.warning(f"Alterações não salvas no plano: {' e '.join(_mud)}.",
+                       icon=":material/edit_note:")
             col_s1, col_s2, _ = st.columns([1.4, 1.2, 3])
             with col_s1:
-                if _is_admin and st.button("💾 Salvar plano", type="primary"):
+                if _is_admin and st.button("Salvar plano", icon=":material/save:", type="primary"):
                     from etl.config_store import extrair_parametros, obter_repositorio_parametros
                     try:
                         _cfg_novo = dict(config)
@@ -436,11 +438,11 @@ with st.container(border=True):
                         carregar_config.clear()
                         st.rerun()
                     except Exception as exc:
-                        st.error(f"❌ Falha ao salvar plano: {exc}")
+                        st.error(f"Falha ao salvar plano: {exc}", icon=":material/error:")
                 elif not _is_admin:
                     st.caption("Somente admin pode salvar o plano.")
             with col_s2:
-                if st.button("↩️ Descartar alterações"):
+                if st.button("Descartar alterações", icon=":material/undo:"):
                     st.session_state.pop("cobertura_alvo_preview", None)
                     st.session_state.pop(_CAL_KEY, None)
                     st.rerun()
@@ -478,7 +480,7 @@ with st.container(border=True):
         # Janela real de 12 meses a partir de hoje, datada (Mês/Ano) — as duas
         # séries vêm do MESMO df_est, então nada mistura anos. Rodadas com chegada
         # além dos 12 meses ficam na tabela de rodadas acima.
-        st.subheader("📦 Demanda vs Produção — próximos 12 meses")
+        st.subheader(":material/inventory_2: Demanda vs Produção — próximos 12 meses")
         df_dem = sim["demanda_mensal"]
         df_est = sim["estoque_projetado"]
 
@@ -507,11 +509,11 @@ with st.container(border=True):
         if rodadas_fora:
             nomes_fora = ", ".join(f"R{r['rodada']} ({r['nome_chegada'][:3]}/{r['ano_chegada']})"
                                    for r in rodadas_fora)
-            st.caption(f"⏭️ Janela de 12 meses a partir de hoje. Rodada(s) além do horizonte "
-                       f"— **{nomes_fora}** — não aparecem aqui; veja a tabela **🏭 Rodadas de Produção** acima.")
+            st.caption(f":material/skip_next: Janela de 12 meses a partir de hoje. Rodada(s) além do horizonte "
+                       f"— **{nomes_fora}** — não aparecem aqui; veja a tabela **Rodadas de Produção** acima.")
 
         # --- Curva de estoque projetado ---
-        st.subheader("📉 Projeção de Estoque — próximos 12 meses")
+        st.subheader(":material/trending_down: Projeção de Estoque — próximos 12 meses")
         fig_est = go.Figure()
         cores_est = [COR_ALERTA if e < 0 else COR_PRODUCAO for e in df_est["EstoqueFinal"]]
         fig_est.add_trace(go.Scatter(
@@ -552,12 +554,13 @@ with st.container(border=True):
         meses_ruptura = df_est[df_est["EstoqueFinal"] < 0]
         if len(meses_ruptura) > 0:
             nomes = ", ".join(meses_ruptura["Rotulo"].tolist())
-            st.error(f"⚠️ **Ruptura projetada** em: {nomes}. "
-                     f"Considere antecipar/adicionar uma rodada ou elevar o nível de serviço.")
+            st.error(f"**Ruptura projetada** em: {nomes}. "
+                     f"Considere antecipar/adicionar uma rodada ou elevar o nível de serviço.",
+                     icon=":material/warning:")
         else:
-            st.success("✅ Sem ruptura projetada com esta configuração.")
+            st.success("Sem ruptura projetada com esta configuração.", icon=":material/check_circle:")
 
-        with st.expander("📋 Tabela Detalhada — Mês a Mês"):
+        with st.expander("Tabela Detalhada — Mês a Mês", icon=":material/table_chart:"):
             df_detalhe = df_est.merge(df_dem[["Mes", "Peso"]], on="Mes")
             df_detalhe = df_detalhe[["Rotulo", "Peso", "Entrada", "Demanda", "EstoqueFinal"]]
             df_detalhe = df_detalhe.rename(columns={
@@ -616,7 +619,7 @@ COLS_EXPORT = [
 ]
 
 with st.container(border=True):
-    st.subheader("📋 Sugestão por SKU — pedido de uma rodada")
+    st.subheader(":material/list_alt: Sugestão por SKU — pedido de uma rodada")
 
     # Esta aba lê o plano SALVO (processar_fabrica → config). Se houver
     # antecipação/calendário em PREVIEW não salvo na Visão Geral, avisa — senão o
@@ -626,9 +629,10 @@ with st.container(border=True):
         _mud_sku = ((["cobertura alvo"] if _tem_preview_cob else [])
                     + (["calendário de disparos"] if _tem_preview_datas else []))
         st.warning(
-            f"⚠️ Há **alterações não salvas** na Visão Geral ({' e '.join(_mud_sku)}). "
+            f"Há **alterações não salvas** na Visão Geral ({' e '.join(_mud_sku)}). "
             "Esta aba usa o **plano salvo** — a sugestão abaixo (e o congelamento) só "
-            "refletem a antecipação depois de **💾 Salvar plano** na Visão Geral."
+            "refletem a antecipação depois de **Salvar plano** na Visão Geral.",
+            icon=":material/warning:",
         )
 
     # Seletor de rodada — qual pedido de abastecimento você está montando
@@ -659,14 +663,14 @@ with st.container(border=True):
     with st.container(border=True):
         cc1, cc2 = st.columns([5, 1])
         with cc1:
-            st.markdown(f"**📦 {janela_label}**")
+            st.markdown(f"**:material/inventory_2: {janela_label}**")
             st.caption(
                 f"A sugestão é o **pedido desta rodada** (descontando estoque atual e backlog). "
                 f"A coluna *Demanda do Período* soma o intervalo inteiro (pico **e** baixa: {_cobre}) — "
                 f"por isso pode superar *Vendas Alta*, que são só os 3 meses de pico."
             )
         with cc2:
-            with st.popover("ⓘ Metodologia", width="stretch"):
+            with st.popover("Metodologia", icon=":material/info:", width="stretch"):
                 cfg_c = config["fabrica"]
                 janela_alta_m = cfg_dem.get("janela_alta", [12, 1, 2])
                 st.markdown(
@@ -696,7 +700,7 @@ with st.container(border=True):
     # --- Filtros em uma linha ---
     f1, f2, f3, f4 = st.columns([2, 1, 1, 1.3])
     with f1:
-        filtro_texto = st.text_input("🔍 Buscar SKU ou Produto", placeholder="Digite para filtrar...")
+        filtro_texto = st.text_input(":material/search: Buscar SKU ou Produto", placeholder="Digite para filtrar...")
     with f2:
         colegios = df["Colegio"].dropna().astype(str)
         colegios = colegios[colegios.ne("") & colegios.ne("nan")]
@@ -734,7 +738,7 @@ with st.container(border=True):
         st.subheader("Sugestão de Produção")
     with th2:
         ver_memoria = st.toggle(
-            "🧮 Mostrar memória de cálculo",
+            ":material/calculate: Mostrar memória de cálculo",
             help="Revela as colunas de auditoria (Vendas Alta, alta/baixa, Segurança, NS, Custo) — "
                  "como cada número foi obtido.",
         )
@@ -827,7 +831,7 @@ with st.container(border=True):
     csv_completo = ("\n".join(linhas_param) + df_export.to_csv(index=False, sep=";", decimal=",")).encode("utf-8")
 
     st.download_button(
-        label="⬇️ Baixar CSV (para importar no Excel/Sheets)",
+        label="Baixar CSV (para importar no Excel/Sheets)", icon=":material/download:",
         data=csv_completo, file_name="simulador_producao.csv", mime="text/csv",
     )
 
@@ -836,7 +840,7 @@ with st.container(border=True):
     # profundidade além do filtro de páginas por role no app.py.
     if e_admin() and rodadas_opts:
         st.divider()
-        st.subheader("🧊 Congelar rodada → Pedidos de Compra")
+        st.subheader(":material/ac_unit: Congelar rodada → Pedidos de Compra")
         st.caption(
             "Tira um snapshot imutável do cálculo desta rodada e gera pedidos de "
             "compra em **rascunho**, agrupados por Colégio × Super Categoria. "
@@ -848,7 +852,7 @@ with st.container(border=True):
                 "O cálculo será refeito agora com os dados vivos e congelado "
                 "como está — edições posteriores acontecem nos rascunhos."
             )
-            if st.button("✅ Confirmar congelamento", type="primary"):
+            if st.button("Confirmar congelamento", icon=":material/check_circle:", type="primary"):
                 with st.spinner("Congelando rodada e gerando pedidos..."):
                     # Recalcula FRESCO (não usa o _processar cacheado: o cache
                     # pode ter ancorado now() horas atrás) e sobre o df
@@ -890,7 +894,7 @@ with st.container(border=True):
             nivel, texto = _msg
             getattr(st, nivel)(texto)
             if nivel in ("success", "warning"):
-                st.page_link("pages/4_Pedidos.py", label="Abrir Pedidos de Compra", icon="🧾")
+                st.page_link("pages/4_Pedidos.py", label="Abrir Pedidos de Compra", icon=":material/receipt_long:")
 
 st.divider()
 rodape_frescor(dados)

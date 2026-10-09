@@ -164,7 +164,8 @@ def _memoria_sugestao(itens: pd.DataFrame, pedido_sel) -> None:
     SKUs do mesmo Colégio × SuperCategoria com sugestão 0 só existem no
     snapshot da rodada (não viram item), e é ele que é lido nesse caso.
     """
-    with st.expander("🧮 Por que essas quantidades? (memória de cálculo)"):
+    with st.expander("Por que essas quantidades? (memória de cálculo)",
+                     icon=":material/calculate:"):
         if "memoria_sugerida" not in itens.columns:
             st.info("Rodada congelada antes desta versão — memória indisponível.")
             return
@@ -305,7 +306,7 @@ def _adicionar_produto(pedido_sel, itens: pd.DataFrame, pendente: bool) -> None:
     toggle para o catálogo só ser carregado quando alguém vai mesmo incluir.
     """
     pedido_id = pedido_sel["id"]
-    if not st.toggle("➕ Adicionar produto que não veio da simulação",
+    if not st.toggle(":material/add: Adicionar produto que não veio da simulação",
                      key=f"add_on_{pedido_id}"):
         return
 
@@ -373,7 +374,7 @@ def _adicionar_produto(pedido_sel, itens: pd.DataFrame, pendente: bool) -> None:
         c_txt, c_btn = st.columns([3, 1], vertical_alignment="center")
         with c_txt:
             if pendente:
-                st.caption("⚠️ Salve as quantidades editadas na tabela antes de "
+                st.caption(":orange[:material/warning:] Salve as quantidades editadas na tabela antes de "
                            "incluir — a inclusão recarrega o pedido.")
             elif novos:
                 st.caption(f"{len(novos)} tamanho(s) · {pecas} peça(s) · {_fmt_brl(valor)} "
@@ -399,7 +400,8 @@ def _remover_manuais(pedido_id: str, itens: pd.DataFrame, pendente: bool) -> Non
     manuais = itens[itens["origem"] == estados.ORIGEM_MANUAL]
     if len(manuais) == 0:
         return
-    with st.popover(f"🗑️ Remover item manual ({len(manuais)})", width="stretch"):
+    with st.popover(f"Remover item manual ({len(manuais)})", icon=":material/delete:",
+                    width="stretch"):
         st.caption("Só itens incluídos à mão saem do pedido. Os da simulação ficam "
                    "como registro — para não comprar, zere a quantidade final.")
         rotulo = {r["id"]: f"{r['sku']} · {int(r['quantidade_final'])} pç"
@@ -407,7 +409,7 @@ def _remover_manuais(pedido_id: str, itens: pd.DataFrame, pendente: bool) -> Non
         alvo = st.multiselect("Itens incluídos à mão", options=list(rotulo),
                               format_func=rotulo.get, key=f"rem_sel_{pedido_id}_{_rev()}")
         if pendente:
-            st.caption("⚠️ Salve as quantidades editadas antes de remover.")
+            st.caption(":orange[:material/warning:] Salve as quantidades editadas antes de remover.")
         if st.button("Remover do pedido", disabled=pendente or not alvo,
                      key=f"rem_btn_{pedido_id}"):
             try:
@@ -419,7 +421,7 @@ def _remover_manuais(pedido_id: str, itens: pd.DataFrame, pendente: bool) -> Non
             st.rerun()
 
 
-st.title("🧾 Pedidos de Compra")
+st.title(":material/receipt_long: Pedidos de Compra")
 st.caption(
     "Rodadas congeladas do Simulador de Produção, divididas em pedidos por "
     "**Colégio × Super Categoria**. Edite as quantidades no rascunho, marque "
@@ -447,7 +449,7 @@ except Exception as exc:
 
 if len(rodadas) == 0:
     st.info("Nenhuma rodada congelada ainda. Congele uma rodada no Simulador de Produção.")
-    st.page_link("pages/3_Fabrica.py", label="Abrir Simulador de Produção", icon="🏭")
+    st.page_link("pages/3_Fabrica.py", label="Abrir Simulador de Produção", icon=":material/factory:")
     st.stop()
 
 with st.container(border=True):
@@ -476,7 +478,7 @@ with st.container(border=True):
             "Este congelamento ficou **incompleto** (falha no meio da gravação). "
             "Limpe-o e congele a rodada de novo no Simulador."
         )
-        if st.button("🧹 Limpar congelamento incompleto"):
+        if st.button("Limpar congelamento incompleto", icon=":material/cleaning_services:"):
             try:
                 repo.limpar_congelamento_abortado(rodada_id)
                 _flash("success", "Congelamento incompleto removido.")
@@ -486,7 +488,7 @@ with st.container(border=True):
         st.stop()
 
     # Snapshot p/ conferência (jsonb pesado — só carrega sob demanda)
-    with st.expander("🔍 Snapshot da rodada (conferência)"):
+    with st.expander("Snapshot da rodada (conferência)", icon=":material/search:"):
         if st.toggle("Carregar snapshot", key=f"snap_{rodada_id}"):
             rodada_full = repo.obter_rodada(rodada_id)
             st.caption(
@@ -496,7 +498,7 @@ with st.container(border=True):
             )
             df_snap = pd.DataFrame(rodada_full["resultado_skus"])
             st.download_button(
-                "⬇️ Baixar resultado por SKU (CSV)",
+                "Baixar resultado por SKU (CSV)", icon=":material/download:",
                 data=df_snap.to_csv(index=False, sep=";", decimal=",").encode("utf-8"),
                 file_name=f"snapshot_rodada_{rodada_full['mes_disparo']:02d}"
                           f"{rodada_full['ano_disparo']}.csv",
@@ -505,7 +507,7 @@ with st.container(border=True):
             st.json(rodada_full["config_snapshot"], expanded=False)
 
     if rodada_sel["status"] == estados.RODADA_ABERTA:
-        with st.popover("🚫 Cancelar rodada congelada"):
+        with st.popover("Cancelar rodada congelada", icon=":material/block:"):
             st.caption(
                 "Cancela a rodada e todos os pedidos em rascunho — a rodada "
                 "cancelada fica registrada e libera um novo congelamento. Só é "
@@ -547,7 +549,7 @@ with st.container(border=True):
 def _secao_pedido():
     with st.container(border=True):
         # --- Escolha do pedido: "Ver pedido" (h3) + selectbox ---
-        st.subheader("🔍 Ver pedido")
+        st.subheader(":material/search: Ver pedido")
         idx_pedido = st.selectbox(
             "Ver pedido",
             options=list(range(len(pedidos))),
@@ -681,18 +683,20 @@ def _secao_pedido():
 
         # --- Banners de estado (informativos) ---
         if pedido_sel["status"] == estados.COMPRA_EMITIDA:
-            st.success(f"🛒 Compra emitida no Bling · nº **{pedido_sel.get('bling_numero','?')}** "
-                       "— falta emitir a venda no Olist.")
+            st.success(f"Compra emitida no Bling · nº **{pedido_sel.get('bling_numero','?')}** "
+                       "— falta emitir a venda no Olist.", icon=":material/shopping_cart:")
         elif estados.emitindo(pedido_sel["status"]):
             st.warning(
-                "⏳ **Emissão interrompida.** Este pedido ficou travado durante uma "
+                "**Emissão interrompida.** Este pedido ficou travado durante uma "
                 "emissão (falha entre criar no ERP e confirmar aqui). **Confira no ERP "
-                "se o pedido foi criado** antes de destravar e tentar de novo."
+                "se o pedido foi criado** antes de destravar e tentar de novo.",
+                icon=":material/hourglass_top:",
             )
         elif pedido_sel["status"] == estados.EMITIDO:
             st.success(
-                f"📨 Emitido nos dois ERPs · compra Bling **{pedido_sel.get('bling_numero','?')}** "
-                f"· venda Olist **{pedido_sel.get('olist_numero','?')}**."
+                f"Emitido nos dois ERPs · compra Bling **{pedido_sel.get('bling_numero','?')}** "
+                f"· venda Olist **{pedido_sel.get('olist_numero','?')}**.",
+                icon=":material/mark_email_read:",
             )
 
         # --- Pré-validação do mapeamento SKU→id Olist (só COMPRA_EMITIDA) —
@@ -718,11 +722,11 @@ def _secao_pedido():
         # --- Olist pronto? Avisa ANTES da compra (que é irreversível daqui) ---
         if pedido_sel["status"] == estados.PRONTO:
             for _a in emissor.checar_prontidao_olist(obter_repositorio_integracoes()):
-                st.warning(f"⚠️ {_a}")
+                st.warning(_a, icon=":material/warning:")
 
         # --- Preview dos payloads de emissão (verificação humana, sem escrita) ---
         if pedido_sel["status"] in (estados.PRONTO, estados.COMPRA_EMITIDA):
-            with st.expander("🔍 Preview dos payloads de emissão"):
+            with st.expander("Preview dos payloads de emissão", icon=":material/search:"):
                 st.caption("O JSON exato que será enviado aos ERPs — confira antes de emitir.")
                 try:
                     _prev = emissor.preview_payloads(
@@ -740,7 +744,7 @@ def _secao_pedido():
         # --- Observações padronizadas p/ o Bling (sempre recompostas) ---
         obs_bling = builder.montar_observacoes_bling(
             rodada_sel.to_dict(), pedido_sel.to_dict(), itens)
-        with st.expander("📄 Observações para o Bling (padronizadas)"):
+        with st.expander("Observações para o Bling (padronizadas)", icon=":material/description:"):
             st.caption(
                 "Bloco que a emissão automática envia no campo **Observações** do "
                 "pedido de compra. Nas **Observações internas** vai só o título "
@@ -766,7 +770,7 @@ def _secao_pedido():
 
         def _botao_csv():
             st.download_button(
-                "⬇️ Baixar CSV do pedido",
+                "Baixar CSV do pedido", icon=":material/download:",
                 data=csv_pedido,
                 file_name=f"pedido_{pedido_sel['colegio']}_{pedido_sel['super_categoria']}"
                           f"_{rodada_sel['mes_disparo']:02d}{rodada_sel['ano_disparo']}.csv",
@@ -787,7 +791,8 @@ def _secao_pedido():
         if status == estados.RASCUNHO:
             c1, c2, c3, c4 = st.columns(4)
             with c1:
-                if st.button("💾 Salvar alterações", type="primary", width="stretch"):
+                if st.button("Salvar alterações", icon=":material/save:", type="primary",
+                             width="stretch"):
                     # Células novas da grade só viram item se o tamanho existe
                     # no cadastro ativo — o que não existe volta como aviso.
                     _incluir, _faltantes = [], []
@@ -815,14 +820,14 @@ def _secao_pedido():
                             _flash("error", str(exc))
                     st.rerun()
             with c2:
-                if st.button("✅ Marcar como Pronto", width="stretch"):
+                if st.button("Marcar como Pronto", icon=":material/check_circle:", width="stretch"):
                     ok = repo.transicionar_pedido(
                         pedido_id, estados.RASCUNHO, estados.PRONTO, usuario)
                     _flash("success", "Pedido marcado como **Pronto**.") if ok else _flash(
                         "warning", "O pedido mudou de estado em outra sessão — recarregado.")
                     st.rerun()
             with c3:
-                with st.popover("🚫 Cancelar pedido", width="stretch"):
+                with st.popover("Cancelar pedido", icon=":material/block:", width="stretch"):
                     st.caption("O pedido cancelado sai do fluxo (fica registrado p/ auditoria).")
                     if st.button("Confirmar cancelamento", key=f"cancel_{pedido_id}"):
                         ok = repo.transicionar_pedido(
@@ -836,9 +841,10 @@ def _secao_pedido():
         elif status == estados.PRONTO:
             c1, c2, c3, c4 = st.columns(4)
             with c1:
-                if st.button("📤 Emitir compra (Bling)", type="primary", width="stretch",
+                if st.button("Emitir compra (Bling)", icon=":material/send:", type="primary",
+                             width="stretch",
                              key=f"emit_compra_{pedido_id}"):
-                    with st.status("📤 Emitindo compra no Bling…", expanded=True) as _s:
+                    with st.status("Emitindo compra no Bling…", expanded=True) as _s:
                         try:
                             res = emissor.emitir_compra_bling(
                                 pedido_id, usuario, repo, obter_repositorio_integracoes())
@@ -851,14 +857,15 @@ def _secao_pedido():
                             _flash("error", f"Emissão da compra falhou: {exc}")
                     st.rerun()
             with c2:
-                if st.button("↩️ Reabrir rascunho", width="stretch", key=f"reabrir_{pedido_id}"):
+                if st.button("Reabrir rascunho", icon=":material/undo:", width="stretch",
+                             key=f"reabrir_{pedido_id}"):
                     ok = repo.transicionar_pedido(
                         pedido_id, estados.PRONTO, estados.RASCUNHO, usuario)
                     _flash("success", "Pedido reaberto para edição.") if ok else _flash(
                         "warning", "O pedido mudou de estado em outra sessão — recarregado.")
                     st.rerun()
             with c3:
-                with st.popover("🚫 Cancelar pedido", width="stretch"):
+                with st.popover("Cancelar pedido", icon=":material/block:", width="stretch"):
                     if st.button("Confirmar cancelamento", key=f"cancelp_{pedido_id}"):
                         ok = repo.transicionar_pedido(
                             pedido_id, estados.PRONTO, estados.CANCELADO, usuario)
@@ -871,10 +878,11 @@ def _secao_pedido():
         elif status == estados.COMPRA_EMITIDA:
             c1, c2 = st.columns(2)
             with c1:
-                if st.button("📤 Emitir venda (Olist)", type="primary", width="stretch",
+                if st.button("Emitir venda (Olist)", icon=":material/send:", type="primary",
+                             width="stretch",
                              disabled=bool(_erro_map or _erros_pre),
                              key=f"emit_venda_{pedido_id}"):
-                    with st.status("📤 Emitindo venda no Olist…", expanded=True) as _s:
+                    with st.status("Emitindo venda no Olist…", expanded=True) as _s:
                         try:
                             res = emissor.emitir_venda_olist(
                                 pedido_id, usuario, repo, obter_repositorio_integracoes(),
@@ -893,7 +901,7 @@ def _secao_pedido():
         elif estados.emitindo(status):
             c1, c2 = st.columns(2)
             with c1:
-                with st.popover("🔓 Destravar", width="stretch"):
+                with st.popover("Destravar", icon=":material/lock_open:", width="stretch"):
                     st.caption("Volta o pedido ao estado anterior. Confirme antes que o "
                                "pedido NÃO foi criado no ERP (senão vira duplicata).")
                     if st.button("Confirmar destravamento", key=f"destr_{pedido_id}"):
@@ -935,7 +943,7 @@ def _secao_lote():
                 view_ped[_col] = ""
         st.caption(
             "Marque as linhas (☑) e use os botões abaixo para agir em vários pedidos "
-            "de uma vez. Para ver/editar um pedido, troque para **✏️ Editar um pedido** "
+            "de uma vez. Para ver/editar um pedido, troque para **Editar um pedido** "
             "no seletor de modo (topo). O cabeçalho da coluna de seleção marca/desmarca tudo."
         )
         # Sem a coluna Título: dentro de uma rodada ela só repete Colégio +
@@ -986,7 +994,7 @@ def _secao_lote():
 
             # Aprovar: RASCUNHO → PRONTO
             with b1:
-                if st.button(f"✅ Aprovar ({len(_rasc)})", type="primary",
+                if st.button(f"Aprovar ({len(_rasc)})", icon=":material/check_circle:", type="primary",
                              disabled=_rasc.empty, width="stretch",
                              help="Marca os selecionados em Rascunho como Pronto"):
                     suc, fal = _executar_lote(
@@ -999,7 +1007,7 @@ def _secao_lote():
 
             # Reabrir: PRONTO → RASCUNHO
             with b2:
-                if st.button(f"↩️ Reabrir ({len(_pronto)})",
+                if st.button(f"Reabrir ({len(_pronto)})", icon=":material/undo:",
                              disabled=_pronto.empty, width="stretch",
                              help="Volta os selecionados em Pronto para Rascunho (edição)"):
                     suc, fal = _executar_lote(
@@ -1012,7 +1020,7 @@ def _secao_lote():
 
             # Cancelar: RASCUNHO/PRONTO → CANCELADO (com confirmação)
             with b3:
-                with st.popover(f"🚫 Cancelar ({len(_cancelaveis)})", width="stretch",
+                with st.popover(f"Cancelar ({len(_cancelaveis)})", icon=":material/block:", width="stretch",
                                 disabled=_cancelaveis.empty):
                     st.caption("Cancela os selecionados em Rascunho/Pronto (fica registrado "
                                "p/ auditoria). Pedidos já emitidos são ignorados.")
@@ -1028,7 +1036,7 @@ def _secao_lote():
 
             # Emitir compra (Bling): PRONTO → Bling (com confirmação + total)
             with b4:
-                with st.popover(f"📤 Compra Bling ({len(_pronto)})", width="stretch",
+                with st.popover(f"Compra Bling ({len(_pronto)})", icon=":material/send:", width="stretch",
                                 disabled=_pronto.empty):
                     st.caption(
                         f"Emite **{len(_pronto)}** pedido(s) de compra REAIS no Bling · "
@@ -1039,10 +1047,10 @@ def _secao_lote():
                     # pedidos órfãos em COMPRA_EMITIDA — avisa antes.
                     for _a in emissor.checar_prontidao_olist(
                             obter_repositorio_integracoes()):
-                        st.warning(f"⚠️ {_a}")
+                        st.warning(_a, icon=":material/warning:")
                     if st.button("Confirmar emissão das compras", type="primary",
                                  key="emit_compra_lote"):
-                        with st.status(f"📤 Emitindo {len(_pronto)} compra(s) no Bling…",
+                        with st.status(f"Emitindo {len(_pronto)} compra(s) no Bling…",
                                        expanded=True) as _s:
                             suc, fal = _executar_lote(
                                 _pronto, lambda r: (
@@ -1057,7 +1065,7 @@ def _secao_lote():
 
             # Emitir venda (Olist): COMPRA_EMITIDA → Olist (com confirmação + total)
             with b5:
-                with st.popover(f"📤 Venda Olist ({len(_compra)})", width="stretch",
+                with st.popover(f"Venda Olist ({len(_compra)})", icon=":material/send:", width="stretch",
                                 disabled=_compra.empty):
                     st.caption(
                         f"Emite **{len(_compra)}** pedido(s) de venda no Olist (só os que "
@@ -1066,7 +1074,7 @@ def _secao_lote():
                     )
                     if st.button("Confirmar emissão das vendas", type="primary",
                                  key="emit_venda_lote"):
-                        with st.status(f"📤 Emitindo {len(_compra)} venda(s) no Olist…",
+                        with st.status(f"Emitindo {len(_compra)} venda(s) no Olist…",
                                        expanded=True) as _s:
                             # Mapeia SKU→Olist UMA vez p/ todo o lote (cache +
                             # família + fallback) — passar mapa_sku=None por
@@ -1084,7 +1092,7 @@ def _secao_lote():
                                 _mapa_lote, _ = emissor.resolver_ids_olist(_skus, _ri)
                             except Exception as _exc:
                                 _mapa_lote = None
-                                _s.write(f"⚠️ Pré-mapeamento falhou ({_exc}); "
+                                _s.write(f":orange[:material/warning:] Pré-mapeamento falhou ({_exc}); "
                                          "cada pedido mapeia sozinho.")
                             suc, fal = _executar_lote(
                                 _compra, lambda r: (
@@ -1097,6 +1105,11 @@ def _secao_lote():
                                 state="error" if fal else "complete")
                         _flash_resumo_lote("Emissão de venda (Olist)", suc, fal)
                         st.rerun()
+
+
+# Rótulos do seletor de modo: o mesmo texto é opção e é comparado abaixo.
+MODO_EDITAR = ":material/edit: Editar um pedido"
+MODO_LOTE = ":material/checklist: Ação em lote"
 
 
 # Dois modos de trabalho (editar UM pedido × agir em VÁRIOS) num seletor de modo,
@@ -1114,12 +1127,12 @@ def _secao_lote():
 def _area_trabalho():
     _modo = st.segmented_control(
         "Modo de trabalho",
-        ["✏️ Editar um pedido", "⚙️ Ação em lote"],
-        default="✏️ Editar um pedido",
+        [MODO_EDITAR, MODO_LOTE],
+        default=MODO_EDITAR,
         label_visibility="collapsed",
         key="pc_modo",
     )
-    if _modo == "⚙️ Ação em lote":
+    if _modo == MODO_LOTE:
         _secao_lote()
     else:
         _secao_pedido()

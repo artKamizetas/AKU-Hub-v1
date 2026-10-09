@@ -193,9 +193,10 @@ def carregar_config() -> dict:
     except Exception as e:  # sem Supabase (dev offline, DDL não aplicado…)
         try:
             st.warning(
-                f"⚠️ Parâmetros do Supabase indisponíveis — usando defaults "
+                f"Parâmetros do Supabase indisponíveis — usando defaults "
                 f"do config.yaml (alterações da página de Configurações podem "
-                f"não estar refletidas). Detalhe: {e}"
+                f"não estar refletidas). Detalhe: {e}",
+                icon=":material/warning:",
             )
         except Exception:
             pass  # fora do Streamlit (scripts CLI): segue com o yaml puro
@@ -508,7 +509,7 @@ def carregar_dados(_progresso=None) -> dict:
     try:
         todas_abas = _ler_supabase(_progresso=_progresso)
     except Exception as e:
-        st.error(f"❌ Erro ao conectar ao Supabase: {e}")
+        st.error(f"Erro ao conectar ao Supabase: {e}", icon=":material/error:")
         return {"validacao": {"ok": False, "erros": [f"Erro ao ler Supabase: {e}"], "avisos": []}}
 
     # ----------------------------------------------------------------

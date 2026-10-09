@@ -9,6 +9,38 @@ Records). Adicione no topo as mais recentes.
 
 ---
 
+## 2026-10 · Ícones da interface: Material Symbols no lugar de emoji
+Os ícones da interface (menu, títulos, botões, alertas, seletores) eram emoji. Emoji
+é desenhado pelo sistema operacional — o 📦 do Windows do operador não é o do
+celular da diretoria — e cada um tem traço, tamanho e cor próprios, então o menu
+parecia colagem. Passaram a ser **Material Symbols**, que já vêm embutidos no
+Streamlit (`:material/nome:`, sem dependência nova): mesmo traço em qualquer
+máquina e a cor herda do texto/tema.
+
+- **Onde entra:** em `icon=` (páginas, botões, alertas, expanders, popovers) e
+  dentro de qualquer texto markdown (títulos, rótulos de widget e de métrica,
+  opções de `segmented_control`/`pills`, legendas). Em alerta e botão o ícone vai
+  no `icon=`, não no texto.
+- **Onde o emoji fica, de propósito:**
+  - células e cabeçalhos de tabela, opções de `selectbox` e textos do Plotly — não
+    interpretam markdown, o Material apareceria como texto cru (por isso as ações
+    da Logística, os estados de pedido/rodada e a legenda dos gráficos seguem em
+    emoji, e os KPIs da Logística também, para casar com a coluna Ação);
+  - 🥈🥇💎 e as bolinhas 🔴🟡🟢/🔵⚪ — ali a cor **é** a informação e o Material é
+    monocromático.
+- **Vocabulário (mesmo conceito, mesmo ícone):** página = o ícone do menu
+  (`home`, `trending_up`, `local_shipping`, `factory`, `receipt_long`,
+  `settings`); salvar `save`; baixar `download`; recarregar `refresh`; buscar
+  `search`; memória de cálculo `calculate`; emitir `send`; aprovar/confirmar e
+  sucesso `check_circle`; reabrir/descartar `undo`; cancelar `block`; remover
+  `delete`; aviso `warning`; erro `error`; metas `target`; loja `store`; colégio
+  `school`; calendário `calendar_month`.
+- **Nome errado não quebra na importação** — em `icon=` só estoura ao renderizar e
+  em markdown aparece cru, sem erro. `tests/test_icones.py` varre a UI e valida
+  cada nome contra a lista do próprio Streamlit.
+- **Status com spinner próprio (`st.status`) ficou sem ícone no rótulo** — dois
+  ícones lado a lado era ruído.
+
 ## 2026-10 · Configurações reorganizadas por decisão (7 seções) e fim da tela de Exceções por SKU
 A página cresceu por acréscimo: cada novidade entrou no fim da aba "Parâmetros
 Gerais", que acabou com ~80% do módulo (1 formulário de 22 campos + 6 editores, 7

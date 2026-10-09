@@ -38,7 +38,7 @@ def _processar(_dados, _config, fp_config):
 # Sem spinner: leva ~0,5 s e o flash gera mais ruído do que confiança.
 df = _processar(dados, config, fingerprint_config(config))
 
-st.title("📦 Logística — Reposição de Loja")
+st.title(":material/local_shipping: Logística — Reposição de Loja")
 
 # Info sobre VM
 g = config.get("vm", {})
@@ -80,7 +80,7 @@ with col_f4:
     filtro_colegio = st.selectbox("Colégio", colegios_disp)
 
 with col_f5:
-    filtro_texto = st.text_input("🔍 Buscar SKU ou Produto", placeholder="Digite para filtrar...")
+    filtro_texto = st.text_input(":material/search: Buscar SKU ou Produto", placeholder="Digite para filtrar...")
 
 df_filtrado = df.copy()
 if filtro_loja != "Todas":
@@ -151,7 +151,7 @@ st.caption(f"**{num(len(df_filtrado))}** SKUs exibidos")
 # =================================================================
 # DIAGNÓSTICO VM (expander)
 # =================================================================
-with st.expander("🔍 Diagnóstico VM Dinâmico — Detalhes do Cálculo"):
+with st.expander("Diagnóstico VM Dinâmico — Detalhes do Cálculo", icon=":material/calculate:"):
     st.caption(
         "Mostra como o VM e Pulmão foram calculados para cada SKU. "
         "**Pulmão** = Fator de Serviço × Desvio-Padrão × √lead time (absorve picos de demanda)."
