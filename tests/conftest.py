@@ -222,3 +222,100 @@ def dados_daily():
         "lojas": lojas,
         "situacoes": situacoes,
     }
+
+
+# =====================================================================
+# Fixtures da REPOSIÇÃO DE LOJA (etl/reposicao.py + etl/logistica.py):
+# precisam de loja por pedido, estoque por depósito e nome/tamanho do
+# produto — colunas que o motor de PCP não usa.
+# =====================================================================
+
+REP_NATAL, REP_MOSSORO, REP_INSTITUCIONAL = "L1", "L2", "L9"
+REP_DEP_NATAL, REP_DEP_MOSSORO, REP_DEP_CD = "D1", "D2", "DC"
+
+REP_CAM_P, REP_CAM_M, REP_CAL_P, REP_OUT_P = "201", "202", "203", "204"
+
+
+@pytest.fixture
+def config_reposicao(config):
+    """Config do PCP + lojas/depósitos + bloco `reposicao` (sem gavetas = sem teto)."""
+    config = dict(config)
+    config["depositos"] = {
+        "central": {"deposito_id": REP_DEP_CD},
+        "lojas": [
+            {"nome": "Natal", "loja_id": REP_NATAL, "deposito_id": REP_DEP_NATAL},
+            {"nome": "Mossoró", "loja_id": REP_MOSSORO, "deposito_id": REP_DEP_MOSSORO},
+        ],
+    }
+    config["logistica"] = {"dias_analise_giro": 30}
+    config["reposicao"] = {
+        "exposicao_minima": 2,
+        "cobertura_dias_alta": 3,
+        "cobertura_dias_baixa": 15,
+        "nivel_servico_default": 95,
+        "aplicar_crescimento": False,
+        "recolher_horizonte_dias": 120,
+        "lojas": {"Natal": {"prazo_entrega_dias": 1}, "Mossoró": {"prazo_entrega_dias": 2}},
+        "sortimento": {"Natal": ["COL", "OUT"], "Mossoró": ["COL"]},
+    }
+    return config
+
+
+@pytest.fixture
+def dados_reposicao(hoje):
+    """
+    Vendas por MÊS de alta (Dez/Jan/Fev de todos os anos — âncora constante),
+    sempre em pedidos de 2 peças (PA = 2):
+
+      CAM-P  (COL · Camiseta): Natal 62 · Mossoró 31 · institucional 31 → rede 124
+      CAM-M  (COL · Camiseta): Natal 62
+      CAL-P  (COL · Calça):    Natal 31 · Mossoró 31
+      OUT-P  (OUT · Camiseta): Natal 31                (colégio que Mossoró não atende)
+
+    Janeiro tem 31 dias: CAM-P em Natal = 2 peças/dia no pico.
+    Estoque: tudo zerado nas lojas; CD com 100 de cada.
+    """
+    vendas_mes = [
+        (REP_CAM_P, REP_NATAL, 62), (REP_CAM_P, REP_MOSSORO, 31), (REP_CAM_P, REP_INSTITUCIONAL, 31),
+        (REP_CAM_M, REP_NATAL, 62),
+        (REP_CAL_P, REP_NATAL, 31), (REP_CAL_P, REP_MOSSORO, 31),
+        (REP_OUT_P, REP_NATAL, 31),
+    ]
+    itens, pedidos = [], []
+    n = 0
+    for ano in range(hoje.year - 6, hoje.year + 1):
+        for mes in (12, 1, 2):
+            data = pd.Timestamp(year=ano, month=mes, day=15)
+            for id_prod, loja, qtd in vendas_mes:
+                restante = qtd
+                while restante > 0:
+                    n += 1
+                    pecas = min(2, restante)
+                    itens.append((id_prod, data, pecas, f"R{n}"))
+                    pedidos.append((f"R{n}", 9, loja, data))
+                    restante -= pecas
+
+    ids = [REP_CAM_P, REP_CAM_M, REP_CAL_P, REP_OUT_P]
+    return {
+        "itens": pd.DataFrame(itens, columns=["ID_produto", "Data", "Quantidade", "ID_pedido"]),
+        "pedidos": pd.DataFrame(pedidos, columns=["ID", "id_situacao", "Loja ID", "Data"]),
+        "produtos": pd.DataFrame({
+            "ID": ids,
+            "codigo": ["CAM-P", "CAM-M", "CAL-P", "OUT-P"],
+            "Descricao": ["Camiseta Tamanho:P", "Camiseta Tamanho:M", "Calça Tamanho:P", "Outra Tamanho:P"],
+            "preco_custo": [10.0, 10.0, 20.0, 10.0],
+        }),
+        "detalhes": pd.DataFrame({
+            "ID_produto": ids,
+            "Marca_sku": ["COL", "COL", "COL", "OUT"],
+            "Grupo": ["EME", "EME", "EME", "EME"],
+            "categoria": ["Camiseta", "Camiseta", "Calça", "Camiseta"],
+            "Super_categoria": ["Camiseta", "Camiseta", "Calça", "Camiseta"],
+            "Tamanho": ["P", "M", "P", "P"],
+        }),
+        "estoque": pd.DataFrame({
+            "ID_produto": ids,
+            "ID_deposito": [REP_DEP_CD] * 4,
+            "saldoFisico": [100, 100, 100, 100],
+        }),
+    }

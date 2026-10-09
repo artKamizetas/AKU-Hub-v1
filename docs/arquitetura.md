@@ -22,7 +22,7 @@ Configurações.
 ┌───────────────┴──────────────┐   ┌─────────┴──────────────────┐
 │  LÓGICA — etl/*.py            │   │  CONFIG — config.yaml       │
 │  demanda, fabrica,            │   │  metas, IDs, parâmetros PCP │
-│  planejamento, vm_dinamico,   │   │  (editável via UI, admin)   │
+│  planejamento, reposicao,     │   │  (editável via UI, admin)   │
 │  logistica, daily             │   └─────────────────────────────┘
 └───────────────▲──────────────┘
                 │ dict de DataFrames
@@ -56,7 +56,7 @@ Configurações.
 | Página | Processo | Módulos |
 |---|---|---|
 | **Daily** | Comercial / acompanhamento de metas | `etl/daily.py` |
-| **Logística** | Reposição de loja (CD → lojas) | `etl/logistica.py`, `etl/vm_dinamico.py` |
+| **Logística** | Reposição de loja (CD → lojas) | `etl/logistica.py`, `etl/reposicao.py`, `etl/relatorio_separacao.py` |
 | **Simulador de Produção** | PCP — planejamento anual de rodadas + emissão de pedido de fábrica por SKU | `etl/demanda.py`, `etl/fabrica.py`, `etl/planejamento.py` |
 | **Configurações** | Edição de parâmetros (admin), em 7 seções por decisão: Comercial · Reposição de Loja · Produção · Colégios e Crescimento · Integrações · Usuários · Sistema | `pages/5_Configuracoes.py`, `etl/config_store.py`, `etl/config_edicao.py` |
 
@@ -104,4 +104,4 @@ Requer `.streamlit/secrets.toml` com as credenciais do Supabase e do login Googl
 
 `streamlit`, `pandas`, `plotly`, `postgrest`, `pyyaml`
 (preserva comentários ao salvar `config.yaml`), `Authlib` (exigido pelo `st.login()`),
-`openpyxl` (só para exportar `data/VM_Calculado.xlsx`).
+`openpyxl` (só para exportar `data/Estoque_Alvo.xlsx`).

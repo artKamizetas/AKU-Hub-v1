@@ -1,5 +1,6 @@
 """
-etl/config_edicao.py — Regras PURAS de escrita dos editores de Colégios.
+etl/config_edicao.py — Regras PURAS de escrita dos editores de Colégios e da
+Reposição de Loja (lojas, capacidade das gavetas, sortimento).
 
 Transformam o que sai do `data_editor` da página de Configurações no dict
 `config["colegios"]` gravado em app.parametros. Vivem aqui, e não na página,
@@ -115,3 +116,72 @@ def aplicar_edicao_crescimento_grupos(colegios: dict, linhas: list) -> tuple:
         else:
             novo.pop(colegio, None)
     return novo, n_overrides
+
+
+# =====================================================================
+# Reposição de Loja — `config["reposicao"]`
+# =====================================================================
+
+CAPACIDADE_PADRAO = "_padrao"
+
+
+def _inteiro_ou_none(valor, minimo: int = 0):
+    return None if _vazio(valor) else max(int(round(float(valor))), minimo)
+
+
+def aplicar_edicao_lojas(linhas: list) -> dict:
+    """
+    Tabela "Lojas" → `reposicao.lojas` = {loja: {prazo_entrega_dias, gavetas}}.
+
+    `gavetas` VAZIO não é zero: a chave fica de fora e a loja segue SEM teto de
+    espaço (zero gavetas é uma decisão — a loja só tem a arara). Prazo vazio
+    vira 0. O bloco é substituído inteiro no merge, então toda loja da tabela
+    sai daqui.
+    """
+    novo = {}
+    for linha in linhas:
+        loja = str(linha.get("loja") or "").strip()
+        if not loja:
+            continue
+        entrada = {"prazo_entrega_dias": _inteiro_ou_none(linha.get("prazo_entrega_dias")) or 0}
+        gavetas = _inteiro_ou_none(linha.get("gavetas"))
+        if gavetas is not None:
+            entrada["gavetas"] = gavetas
+        novo[loja] = entrada
+    return novo
+
+
+def aplicar_edicao_capacidade(linhas: list, padrao) -> dict:
+    """
+    Tabela "Capacidade da gaveta" → `reposicao.capacidade_gaveta`.
+
+    Só a super categoria PREENCHIDA e diferente do padrão vira entrada; a vazia
+    segue o `_padrao`, que assim pode mudar sem ter de reeditar linha a linha.
+    """
+    base = _inteiro_ou_none(padrao, minimo=1) or 50
+    novo = {CAPACIDADE_PADRAO: base}
+    for linha in linhas:
+        super_categoria = str(linha.get("super_categoria") or "").strip()
+        pecas = _inteiro_ou_none(linha.get("pecas"), minimo=1)
+        if super_categoria and super_categoria != CAPACIDADE_PADRAO and pecas is not None and pecas != base:
+            novo[super_categoria] = pecas
+    return novo
+
+
+def aplicar_edicao_sortimento(linhas: list, lojas: list) -> dict:
+    """
+    Matriz "Colégio × loja" → `reposicao.sortimento` = {loja: [colégios]}.
+
+    TODA loja de `lojas` sai com chave, mesmo sem nenhum colégio marcado: é a
+    presença da chave que diz ao motor "isto é cadastro" — sem ela a loja
+    voltaria ao derivado das vendas e o desmarcado ressuscitaria.
+    """
+    novo = {str(loja): [] for loja in lojas}
+    for linha in linhas:
+        colegio = str(linha.get("colegio") or "").strip()
+        if not colegio:
+            continue
+        for loja in novo:
+            if linha.get(loja) is True:
+                novo[loja].append(colegio)
+    return {loja: sorted(set(colegios)) for loja, colegios in novo.items()}

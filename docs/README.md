@@ -23,6 +23,8 @@ Art Kamizetas (aparece nos contextos de produção/PCP).
 | [requisitos/normalizacao-colegios.md](requisitos/normalizacao-colegios.md) | **Requisito (proposta)** — tabela configurável para normalizar o colégio (`Marca_sku`), jogando ruído em `Outros` |
 | [requisitos/cobertura-alvo-rodada.md](requisitos/cobertura-alvo-rodada.md) | **Spec (implementada)** — Cobertura Alvo por rodada: antecipação deliberada em % da demanda anual; a rodada seguinte encolhe sozinha |
 | [requisitos/posicao-estoque-on-order.md](requisitos/posicao-estoque-on-order.md) | **Exploração (não implementar ainda)** — on-order/em-trânsito na posição de estoque do motor + reconciliação com o Tiny |
+| [requisitos/reposicao-loja-v2.md](requisitos/reposicao-loja-v2.md) | **Spec (implementada)** — Reposição de Loja v2: Estoque-Alvo por loja × SKU, gavetas, sortimento, rateio do CD, relatório de separação |
+| [requisitos/espelho-pedidos-compra.md](requisitos/espelho-pedidos-compra.md) | **Pedido à pipeline (ABERTO)** — espelhar os pedidos de compra do Bling para o "em trânsito" |
 | [requisitos/alteracao-pos-emissao.md](requisitos/alteracao-pos-emissao.md) | **Spec (implementada e validada nos ERPs)** — alterar e cancelar pedido de compra já emitido, sobrepondo Bling e Olist enquanto está em aberto nos dois |
 | [requisitos/metas-escalonadas.md](requisitos/metas-escalonadas.md) | **Spec (implementada)** — Metas Prata/Ouro/Diamante por loja × mês (Faturamento e PA); meta do vendedor rateada da loja |
 | [requisitos/backfill-situacao-pedidos.md](requisitos/backfill-situacao-pedidos.md) | **Achado de dados (ABERTO, para a pipeline)** — `pedidos.id_situacao_bling` tem duas codificações incompatíveis; histórico ≤ fev/2026 usa códigos órfãos. Requer backfill |
@@ -36,8 +38,9 @@ etl/loader.py          Lê Supabase → dict de DataFrames
 etl/demanda.py         Motor único de demanda + política order-up-to (PCP)
 etl/fabrica.py         Sugestão tática de produção por SKU
 etl/planejamento.py    Visão anual de rodadas (agrega o motor)
-etl/vm_dinamico.py     VM (Visual Merchandising) — reposição de loja
-etl/logistica.py       Reposição de loja (transferências)
+etl/reposicao.py       Regras puras do Estoque-Alvo da loja (demanda, gavetas, rateio)
+etl/logistica.py       Reposição de loja — fila por loja × SKU (separar, falta, excesso)
+etl/relatorio_separacao.py  Lista de separação impressa
 etl/daily.py           Comercial / metas (monta os DataFrames por competência)
 etl/metas.py           Regra pura das metas escalonadas (níveis, rateio, agregação)
 pages/                 Telas Streamlit (Home, Daily, Logística, Simulador, Config)

@@ -29,21 +29,38 @@ depositos:
 
 # --- LOGÍSTICA (Reposição de Loja) ---
 logistica:
-  vm_padrao: 2              # Visual Merchandising — exposição mínima padrão (fallback se VM dinâmico não cobrir o SKU)
-  dias_analise_giro: 30     # Janela de dias para calcular giro
+  dias_analise_giro: 30     # Janela de dias para calcular giro (indicador informativo)
 
-# --- VM DINÂMICO (Reposição de Loja — cálculo por SKU a partir de vendas reais) ---
-vm:
-  dias_cobertura: 15          # Dias de demanda que o VM de prateleira deve cobrir
-  inicio_alta: 10              # Mês de início da alta temporada (1-12)
-  fim_alta: 3                  # Mês de fim da alta temporada (1-12)
-  mult_pa: 2.0                 # Multiplicador sobre peças/atendimento (piso do VM)
-  vm_minimo: 2                 # VM mínimo absoluto por SKU
-  lead_time: 3                 # Dias de lead time de reposição (usado no pulmão)
-  nivel_servico_default: 95    # Nível de serviço padrão (%) quando o colégio não tem override
-  aplicar_crescimento: true    # Liga/desliga o fator de crescimento (colégio×grupo) no VM, p/ comparar
+# --- REPOSIÇÃO DE LOJA (Estoque-Alvo por loja × SKU) ---
+# Alvo = demanda da loja na janela de proteção + segurança, limitado pelo espaço
+# (arara + gavetas). Metodologia em docs/requisitos/reposicao-loja-v2.md.
+# `nivel_servico_default` (95) e `aplicar_crescimento` (true) têm default no
+# código (etl/reposicao.py) e são gravados pela tela de Configurações.
+reposicao:
+  exposicao_minima: 2          # Peças por tamanho × modelo na arara (piso do alvo)
+  cobertura_dias_alta: 3       # Dias de venda que a loja guarda na alta (sai reposição todo dia)
+  cobertura_dias_baixa: 15     # Dias de venda que a loja guarda na baixa (reposição semanal)
+  recolher_horizonte_dias: 120 # Só é excesso o que a loja não vende neste horizonte
 
-# --- COLÉGIOS (parâmetros do VM Dinâmico por colégio/marca) ---
+  # Por loja (nome = depositos.lojas[].nome): prazo entre separar no CD e chegar
+  # à loja, e nº de gavetas de fundo. Sem `gavetas` = sem teto de espaço.
+  lojas:
+    Natal:
+      prazo_entrega_dias: 1
+      gavetas: 20
+    "Mossoró":
+      prazo_entrega_dias: 2
+      gavetas: 20
+
+  # Peças que cabem numa gaveta, por super categoria (`_padrao` = as demais)
+  capacidade_gaveta:
+    _padrao: 50
+
+  # Colégios que cada loja atende: {loja: [colégios]}. Loja sem cadastro usa o
+  # derivado das vendas (colégio com 30+ peças na loja em 12 meses).
+  sortimento: {}
+
+# --- COLÉGIOS (crescimento, nível de serviço e proporção da baixa por colégio/marca) ---
 # Nome do colégio (igual ao valor de Marca_sku) → parâmetros específicos.
 # Colégio não cadastrado aqui usa taxa_crescimento 1.0 e vm.nivel_servico_default.
 colegios:
