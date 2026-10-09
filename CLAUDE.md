@@ -34,6 +34,7 @@ etl/
                             # Mapas TABELAS_SUPABASE / COLUNAS_SUPABASE convertem nomes para o SCHEMA
                             # carregar_config() = ponto ÚNICO de leitura de config (yaml ← app.parametros)
   config_store.py           # Persistência dos parâmetros no Supabase (app.parametros + historico); deep_merge/extrair_parametros
+  config_edicao.py          # Regras PURAS de escrita dos editores de Colégios (só vira override o que foi digitado)
   daily.py                  # Comercial: monta detalhado + metas por Loja e por Vendedor (aceita `competencia`)
   metas.py                  # Motor PURO das metas escalonadas (níveis, rateio vendedor←loja, agregação)
   logistica.py              # Lógica de Reposição de Loja
@@ -59,7 +60,7 @@ pages/
   2_Logistica.py            # Reposição de Loja (sugestões de transferência)
   3_Fabrica.py              # "Simulador de Produção" — PCP tático (Sugestão por SKU) + planejamento anual (Visão Geral/rodadas), ambos usando etl/demanda.py como base comum; botão admin "Congelar rodada" → pedidos/
   4_Pedidos.py              # (Admin) Pedidos de Compra — rodadas congeladas, rascunhos, edição, PRONTO, emissão Bling+Olist
-  5_Configuracoes.py        # (Admin) Parâmetros, exceções SKU, Integrações (chaves OAuth), sistema
+  5_Configuracoes.py        # (Admin) 7 seções por decisão: Comercial, Reposição, Produção, Colégios e Crescimento, Integrações, Usuários, Sistema
 scripts/                    # Utilitários de linha de comando (rodar da raiz: python scripts/<nome>.py)
   exportar_vm.py            # Exporta data/VM_Calculado.xlsx (VM + Pulmão de todos os SKUs)
   memoria_calculo.py        # Memória de cálculo passo a passo do VM Dinâmico p/ um SKU
@@ -183,7 +184,7 @@ Fonte única usada tanto pela aba tática ("Sugestão por SKU") quanto pela estr
 
 - **Demanda ancorada na ALTA** (`calcular_demanda_mensal_por_sku`): a alta define forma e magnitude, a baixa só adiciona volume — o dado esparso da baixa nunca entra no nível do SKU.
   - Meses de alta (`config["demanda"]["janela_alta"]`, ex: [12,1,2]): `vendas reais da última temporada de alta completa × crescimento` (a grade de tamanhos é preservada porque cada SKU é um tamanho).
-  - Meses de baixa: `demanda de baixa` = demanda de alta × `proporção da baixa`, espalhada pela `distribuicao_mensal_baixa()` agregada. A proporção é **global** (`calcular_proporcao_baixa()` = Σbaixa/Σalta da empresa, últimos 2 ciclos ≈ 0,43) com **cascata de override manual** (`proporcao_baixa_efetiva(sku, colegio, config, base)`): `excecoes_sku[sku].proporcao_baixa → colegios[COL].proporcao_baixa → global`. Backtest (2023-25): fatiar por categoria/SKU não melhora (teto ~48%); global + override nos poucos gigantes de cauda curta é o que sustenta. Editável na tela (coluna no editor de Colégios + coluna no CSV de exceções).
+  - Meses de baixa: `demanda de baixa` = demanda de alta × `proporção da baixa`, espalhada pela `distribuicao_mensal_baixa()` agregada. A proporção é **global** (`calcular_proporcao_baixa()` = Σbaixa/Σalta da empresa, últimos 2 ciclos ≈ 0,43) com **cascata de override manual** (`proporcao_baixa_efetiva(sku, colegio, config, base)`): `excecoes_sku[sku].proporcao_baixa → colegios[COL].proporcao_baixa → global`. Backtest (2023-25): fatiar por categoria/SKU não melhora (teto ~48%); global + override nos poucos gigantes de cauda curta é o que sustenta. Editável na tela só no nível do colégio (Configurações → Colégios e Crescimento → Por colégio); o nível SKU segue no motor, mas sem cadastro na tela (a aba de exceções foi retirada).
 - **Crescimento por (colégio × série)** (`taxa_crescimento_efetiva(colegio, config, grupo, ativo, observado)`): cascata híbrida (manual do planejador SEMPRE vence os dados): `crescimento_grupos[grupo] (manual) → taxa_crescimento colégio (manual) → observado colégio×segmento → observado colégio → 1+fabrica.crescimento_pct/100`. A **camada observada** (`calcular_crescimento_observado`) mede o crescimento realizado nas ALTAS (alta-sobre-alta, sinal limpo — a baixa tem ruptura), por colégio e por segmento, clamp [0.5,2.0], gate de volume ≥30. O mapa grupo→segmento (`mapa_grupo_segmento(config)`) tem default no código (`SEGMENTO_POR_GRUPO`) sobrescrito por `config["grupo_segmento"]` — editável na página de Configurações (baldes atuais: Infantil, Inf+Fund, Fundamental, Médio, Tempo Integral, Diário, Ed. Física, Esporte, Outros). Desligável em `config["demanda"]["crescimento_observado_ativo"]` (→ volta ao +10% cego). `ativo=False` desliga tudo (toggle p/ comparar). Vale p/ fábrica e VM logística. Não muda o total da rede (~+11%), **redistribui** para o mix certo (ex: NEV Médio +51% vs LMN −29%).
 - **Política order-up-to** (`simular_politica_reabastecimento`): motor comum. Por SKU, caminha as rodadas mantendo estoque projetado (`estoque − backlog`, consumido mês a mês, reabastecido a cada chegada). Em cada rodada r: `DemandaPeriodo` = demanda até a próxima chegar; `EstoqueSeguranca = estoque_seguranca(DemandaPeriodo, contém_alta, config)` (Fator de Serviço × Variação da Demanda × DemandaPeriodo); `EstoqueAlvo = DemandaPeriodo + EstoqueSeguranca`; `Pedido = par_ceil(EstoqueAlvo − EstoqueProjetado_na_chegada)`. As colunas do DataFrame retornado usam esses nomes (`DemandaPeriodo`/`EstoqueSeguranca`/`EstoqueAlvo`/`EstoqueProjetado`; antes eram `DI`/`SS`/`S`/`OH`). Sugestão por SKU = Pedido da rodada selecionada; Visão Geral = soma por rodada. **Cobertura Alvo** (antecipação deliberada, `planejamento.cobertura_override` = {data_disparo ISO → fração 0-1 da demanda anual da rede}): estende o fim de proteção da rodada até a demanda acumulada da rede atingir o alvo (`_data_por_demanda_acumulada`; clamp piso=natural, teto=1.0) — a rodada seguinte encolhe SOZINHA (order-up-to é auto-liquidante; Σ produção do horizonte se conserva). Colunas `FimCobertura`/`CoberturaPct` no retorno. A **Visão Geral é o cockpit único do plano de rodadas**: edita o calendário de disparos (`rodadas_datas`, **multiselect de mês/ano** — pills; disparos são sempre 1º-de-mês) E as coberturas na mesma tela, onde o efeito é visível ao vivo (config de simulação usa as datas do preview antes de salvar). A tabela tem DUAS colunas de cobertura — "Cobertura natural (%)" read-only (piso) + "Cobertura alvo (%)" editável e **vazia quando não há antecipação** (preenchida = intenção deliberada). Preview de sessão para datas e coberturas; um botão "Salvar plano" (admin) persiste `rodadas_datas` + `cobertura_override` juntos. Spec: `docs/requisitos/cobertura-alvo-rodada.md`. **On-order/em-trânsito** (pendência conhecida, EM DISCUSSÃO — não implementar ainda): hoje o motor abre em `estoque − backlog` e recalcula o pedido a cada chegada, então a decisão manual do gestor (congelou 65 no lugar de 70) não retroalimenta a próxima rodada. A spec `docs/requisitos/posicao-estoque-on-order.md` explora somar o termo em-trânsito à posição de partida, com o Tiny/Olist como fonte da verdade da execução (qtd/data reais deslizam na fábrica) e a regra de ouro da reconciliação (baixar o on-order quando vira estoque físico).
 - **Nível de serviço** (`config["demanda"]["nivel_servico_alta"/"nivel_servico_baixa"/"variacao_demanda"]`): alta ~99% ("não pode faltar"), baixa ~92%. Fator de Serviço pela criticidade do intervalo.
@@ -277,7 +278,7 @@ Zerado NÃO vira item de pedido (entraria na grade, nos totais e na emissão).
   bug #9158/#9313 do Streamlit). Emissões usam `st.status` com progresso.
 - **Integrações** (`pedidos/integracoes/`): OAuth2 authorization_code; chaves e tokens
   vivem em `app.integracao` (NÃO em secrets.toml — filesystem do Cloud é efêmero),
-  geridas na aba Integrações de 5_Configuracoes. `state` anti-CSRF no banco (a sessão
+  geridas na seção Integrações de 5_Configuracoes. `state` anti-CSRF no banco (a sessão
   Streamlit morre no redirect); callback no topo da 5_Configuracoes lê `?code&state`.
   Redirect URI = URL do app + `/configuracoes` (`url_path` fixo em app.py). Clientes
   HTTP com `http` injetável (testes sem rede). App no portal Bling e no Olist a
@@ -306,7 +307,7 @@ Zerado NÃO vira item de pedido (entraria na grade, nos totais e na emissão).
   do Bling, mas o SHAPE é OUTRO: objeto aninhado `pagamento.{formaRecebimento,
   meioPagamento, parcelas[]}` — no Olist é forma de **recebimento**, não
   `formaPagamento` no topo. `forma_recebimento_id` (obrigatório p/ gerar o bloco),
-  `meio_pagamento_id` (opcional) moram na aba Integrações. A forma de recebimento
+  `meio_pagamento_id` (opcional) moram na seção Integrações. A forma de recebimento
   é um **selectbox por nome** (`olist.listar_formas_recebimento` = `GET
   /formas-recebimento`, só ativas, id por conta — igual ao selectbox de forma de
   pagamento do Bling), com degradação para text_input se desconectado/GET falhar;
@@ -398,7 +399,7 @@ intacto). Quem autoriza é a allowlist **`app.usuario`** (DDL 006), não o secre
   botão Sair — o caso comum é ter entrado com a conta Google errada e ficar preso
   ao cookie).
 - **Sem auto-cadastro.** E-mail fora da tabela vê "peça acesso ao administrador"
-  e **nada é escrito no banco**. O formulário da aba Usuários é a única entrada.
+  e **nada é escrito no banco**. O formulário da seção Usuários é a única entrada.
 - **Fail-closed com break-glass.** Se a allowlist não puder ser lida
   (`fonte_ok=False`), ninguém entra — exceto os e-mails de
   `st.secrets["acesso"]["admins"]`, que passam antes de qualquer consulta. Essa
@@ -427,65 +428,63 @@ intacto). Quem autoriza é a allowlist **`app.usuario`** (DDL 006), não o secre
 
 **Admin only** — `auth.exigir_admin()` no topo da página.
 
-### Aba 1: Parâmetros Gerais
-Formulário organizado pelos **3 subsistemas** da metodologia atual:
-- **Comercial (Daily):** status IDs de pedido (em_aberto, em_andamento, pronto_retirada). As **metas saíram do form** — viraram a seção *Metas Mensais* (abaixo)
-- **Reposição de Loja:** VM Dinâmico (`config.yaml["vm"]` — cobertura, alta temporada, multiplicador PA, VM mínimo, lead time, nível de serviço, toggle de crescimento) + *fallback* fixo (`logistica.vm_padrao`, `logistica.dias_analise_giro`) usado só quando o SKU não tem giro
-- **Produção (Simulador):** Demanda/order-up-to (`config.yaml["demanda"]` — níveis de serviço alta/baixa, variação, janela da alta, toggle de crescimento), Planejamento (lead time, período histórico único — o **calendário de rodadas migrou para o Simulador → Visão Geral**, ao lado das coberturas) e *fallback* da Fábrica (crescimento, cobertura, correção manual global)
+Organizada pela **decisão do gestor**, não pelo formato do widget. Sete seções num
+`st.segmented_control`; **só a seção ativa é executada** (`if/elif`, como na
+4_Pedidos — com `st.tabs` todas as abas rodavam a cada rerun, incluindo o
+crescimento observado e a gravação de `state` OAuth). A seção fica espelhada em
+`?secao=<slug>` (deep-link); o retorno do OAuth abre em Integrações. Sub-abas por
+`st.pills` só em Comercial e em Colégios e Crescimento — máximo 2 níveis.
+Navegação sempre por `_seletor()`: os dois widgets permitem desmarcar, e ele
+devolve a última escolha em vez de deixar a tela sem dono.
 
-Logo abaixo do formulário, seção **🎯 Metas Mensais** (fora do `st.form`, padrão
-`data_editor` + botão próprio): pills de Ano + `segmented_control` de Loja (alimentado
-por `config["depositos"]["lojas"]` — acabou o hardcode dos nomes), grade 12 meses × 6
-colunas (Prata/Ouro/Diamante × Faturamento/PA) com "Realizado ano anterior" read-only
-como âncora, atalho *Propor a partir do realizado* e preview de sessão antes de salvar.
-Sub-seção **👥 Vendedores por Loja**: atribuição com vigência mensal (`Vendedor · Loja ·
-Peso · Ativo`), pré-carregada de `dados["vendedores"]` filtrado a `situacao='A'` e pelo
-`id_loja_bling`, com prévia do rateio antes de gravar.
+| Seção (`slug`) | Pergunta do gestor | Parâmetros |
+|---|---|---|
+| **Comercial** (`comercial`) | Qual a meta do mês e quem responde por ela? | `daily.metas_mensais` · `daily.vendedores_loja` |
+| **Reposição de Loja** (`reposicao`) | A loja está abastecida demais/de menos? | `vm.*` (cobertura, piso PA, mínimo, prazo, nível de serviço, temporada) · `logistica.dias_analise_giro` · Avançado: `logistica.vm_padrao` |
+| **Produção** (`producao`) | A fábrica vai produzir demais/de menos? | `demanda.nivel_servico_alta/baixa`, `variacao_demanda`, `janela_alta` · `planejamento.lead_time_semanas`, `periodo_historico_*` · Avançado: `fabrica.cobertura_meses`, `fabrica.correcao_manual` · rodadas: só leitura + link p/ o Simulador |
+| **Colégios e Crescimento** (`colegios`) | Quanto cada colégio vai crescer? | Regras gerais: `demanda.crescimento_observado_ativo`, `fabrica.crescimento_pct`, `demanda.aplicar_crescimento_fabrica`, `vm.aplicar_crescimento` · Por colégio / Por série: `colegios` · Nomes e segmentos: `colegios_alias`, `grupo_segmento` |
+| **Integrações** (`integracoes`) | Bling e Olist estão prontos para emitir? | `app.integracao` (fora de `app.parametros`) |
+| **Usuários** (`usuarios`) | Quem entra e o que vê? | `app.usuario` |
+| **Sistema** (`sistema`) | Está no ar? De onde vêm os IDs? | `daily.status_ids` (Mapeamento do Bling) · recarga · backup |
 
-Em seguida, editor independente de **Colégios** (`config.yaml["colegios"]`): tabela com taxa de crescimento e nível de serviço por colégio, descobertos dinamicamente a partir de `detalhes["Marca_sku"]` — valores são sempre input manual do usuário, nunca calculados a partir das vendas.
+- **Cada parâmetro tem UM endereço.** Tudo de crescimento mora em *Colégios e
+  Crescimento*, na ordem da cascata de `taxa_crescimento_efetiva` (do geral ao
+  específico) — antes estava em seis lugares e `crescimento_observado_ativo` não
+  tinha tela. Reposição e Produção só apontam para lá.
+- **Cada bloco tem o seu Salvar** (formulários de parâmetros fecham em
+  `_salvar_secao()` = `validar_config` + `salvar_parametros` + `carregar_config.clear()`).
+  Todos gravam o MESMO blob (`app.parametros`): o que a seção não edita trafega de
+  volta intacto. Edição não salva se perde ao trocar de seção — é o preço de não
+  executar as seções ocultas.
+- **Colégios: só vira override o que foi DIGITADO** (`etl/config_edicao.py`, puro e
+  testado). *Por colégio*: célula vazia = segue a regra geral; preenchida = decisão
+  fixa. *Por série*: a célula já vem com o que o motor aplica; só o que DIFERE do
+  "Sem ajuste" vira ajuste. Na cascata, a simples presença de `taxa_crescimento`
+  vence o medido — a tela antiga gravava o default (1,0) em TODOS os colégios e
+  teria desligado o crescimento observado no primeiro "Salvar".
+- **A matriz por série pergunta ao motor** (`taxa_crescimento_efetiva` sem o
+  `crescimento_grupos` do colégio) em vez de reimplementar a cascata: é o que
+  garante que o número na tela é o aplicado. Multiplicadores em 2 casas, as mesmas
+  do editor — ele TRUNCA a exibição na precisão do `step`.
+- **Duas "altas", de propósito separadas**: *Temporada da loja* (`vm.inicio_alta/
+  fim_alta`, Reposição) e *Pico de vendas* (`demanda.janela_alta`, Produção). Cada
+  motor tem a sua; unificar é decisão de metodologia, não de tela.
+- **Exceções por SKU não têm mais tela** (out/2026 — funcionalidade não usada; a
+  coluna `correcao_manual` tinha dois significados: peças no PCP, fator no VM). Os
+  motores ainda leem `excecoes_sku` (vazio = sem efeito) e a chave segue em
+  `CHAVES_PARAMETROS`.
+- **Metas Mensais / Vendedores por Loja** (Comercial): pills de Ano +
+  `segmented_control` de Loja, grade 12 meses × 6 colunas com "Realizado ano
+  anterior" read-only, atalhos *Propor* / *Copiar* / *Replicar* e preview de sessão;
+  atribuição de vendedores com vigência mensal e prévia do rateio.
+- **Integrações**: um card por plataforma. Sem conexão, as credenciais OAuth vêm
+  primeiro (setup); conectado, sobem Conexão e *Dados do pedido* e as credenciais
+  ficam atrás de um interruptor. Tudo via `pedidos/integracoes/repositorio.py`.
+- **Usuários**: formulário **➕ Adicionar usuário** (única porta de entrada) +
+  `data_editor` `num_rows="fixed"`; `auth.validar_edicao_usuarios` barra o lockout.
 
-Ao salvar:
-1. Valida estrutura mínima e valores numéricos
-2. Grava a Categoria B no **Supabase** via `etl/config_store.py` (`app.parametros` UPDATE + `app.parametros_historico` INSERT — auditoria de quem/quando)
-3. Invalida só o cache de config (`carregar_config.clear()`) — **não** o `clear()` global,
-   que derrubaria junto a leitura de 1h do Supabase
-
-O `config.yaml` do git NÃO é mais escrito pela UI — é só a fonte dos defaults (Categoria A). Falha no Supabase → erro na tela, nada é salvo.
-
-### Aba 2: Exceções de SKU
-CSV template para sobrescrever parâmetros globais por SKU:
-- Columns: `sku`, `vm_override`, `correcao_manual` (as antigas `dias_analise`/`sazonalidade` foram removidas — nenhum motor as lia)
-- Download: template atual (ou exemplo padrão se nenhuma exceção existe)
-- Upload: aplicar novas exceções via CSV
-- Salva em `app.parametros` (chave `excecoes_sku`) via config_store
-- O campo `correcao_manual` (salvo como chave `correcao`) também é lido por `vm_dinamico.calcular_vm_por_sku()` como fator de correção do VM dinâmico
-
-### Aba Integrações
-Um card por plataforma (**Bling** = compra AK · **Olist** = venda Art Kamizetas):
-credenciais OAuth (client_id/secret `type="password"` — vazio mantém o salvo,
-redirect_uri), botão Conectar (link OAuth via `montar_authorize_url`), status do token,
-Testar conexão (GET leve), IDs de negócio (fornecedor / contato+vendedor+depósito+situação)
-salvos no jsonb `config` da `app.integracao`, e (só Bling) "Validar contrato" via GET num
-pedido existente. O callback OAuth (`?code&state`) é tratado no topo da página, antes das
-abas. Tudo via `pedidos/integracoes/repositorio.py` — nada em secrets.toml.
-
-### Aba Usuários
-Allowlist de acesso (`app.usuario` via `auth_store.py`). Formulário **➕ Adicionar
-usuário** (e-mail Google + nome + perfil) — a única porta de entrada, já que não há
-auto-cadastro. Abaixo, `data_editor` em `st.form` com `num_rows="fixed"` (usuário
-novo nasce no formulário, nunca no grid: e-mail com typo viraria linha morta que
-nunca loga), coluna read-only "Vê hoje" traduzindo o role em páginas, e
-`ultimo_acesso` para identificar conta morta. Salvar grava só o **diff**;
-`auth.validar_edicao_usuarios` barra antes de gravar as duas formas de lockout
-(zero admins ativos; o admin logado se auto-rebaixar/desativar/remover).
-
-### Aba 3: Sistema
-Informações do sistema:
-- Versões (Python, Streamlit, Pandas)
-- Fonte de dados: Supabase (Bling ERP via pipeline externa)
-- Última gravação de parâmetros no Supabase (quando/por quem)
-- Botão: Forçar recarga de cache
-- Botão: Backup do config EFETIVO (yaml + Supabase mesclados, download)
+O `config.yaml` do git NÃO é escrito pela UI — é só a fonte dos defaults (Categoria A).
+Falha no Supabase → erro na tela, nada é salvo.
 
 ---
 
@@ -515,7 +514,7 @@ Authlib
 ---
 
 ## Testes (`tests/`)
-Suíte `pytest` focada no **motor de demanda/PCP** (`etl/demanda.py`), nos utilitários, no **padrão de tabelas** (`tests/test_ui_tabelas.py` — altura por tipo, arredondamento antes de exibir, formatadores pt-BR) e na **paginação paralela** do `loader.py` (`tests/test_loader_paginacao.py` — planejamento de páginas, montagem a partir de lotes fora de ordem, filtro simétrico count/página, retry e cauda, com fake do cliente PostgREST), no **Comercial/metas** (`etl/metas.py` puro + `etl/daily.py` com competência fixa via fixtures `config_daily`/`dados_daily` do conftest — o default é o mês corrente, que não serviria para teste determinístico), no **domínio de pedidos** (`pedidos/` — builder, estados, grade e catálogo puros (`tests/test_pedidos_grade.py`: ordem dos tamanhos, volta da grade por id, célula nova → SKU); repositório testado com fake do gateway `_inserir/_atualizar/_selecionar/_deletar`, sem Supabase) e nas **integrações/emissão** (`pedidos/integracoes/` + `emissor.py` — payloads puros, OAuth e clientes HTTP com fake injetável, emissor com repo+cliente fakes; zero rede). Sem Supabase/secrets. Instalar dev deps com `uv pip install -r requirements-dev.txt` (o venv usa **uv**, não pip) e rodar `pytest` na raiz. `tests/conftest.py` monta `config` e `dados` sintéticos; o determinismo vem de ancorar as altas em `now()` de forma constante e desligar o crescimento (ver docstring do conftest). Os fakes reusam os `RepoFake` de `test_pedidos_repositorio`/`test_integracoes_repositorio` e o `HttpFake` de `test_integracoes_payloads`. Ao mexer no motor, rode a suíte e atualize os testes junto.
+Suíte `pytest` focada no **motor de demanda/PCP** (`etl/demanda.py`), nos utilitários, no **padrão de tabelas** (`tests/test_ui_tabelas.py` — altura por tipo, arredondamento antes de exibir, formatadores pt-BR) e na **paginação paralela** do `loader.py` (`tests/test_loader_paginacao.py` — planejamento de páginas, montagem a partir de lotes fora de ordem, filtro simétrico count/página, retry e cauda, com fake do cliente PostgREST), nas **regras de escrita dos Colégios** (`tests/test_config_edicao.py` — salvar sem editar não grava override; limpar a célula remove), no **Comercial/metas** (`etl/metas.py` puro + `etl/daily.py` com competência fixa via fixtures `config_daily`/`dados_daily` do conftest — o default é o mês corrente, que não serviria para teste determinístico), no **domínio de pedidos** (`pedidos/` — builder, estados, grade e catálogo puros (`tests/test_pedidos_grade.py`: ordem dos tamanhos, volta da grade por id, célula nova → SKU); repositório testado com fake do gateway `_inserir/_atualizar/_selecionar/_deletar`, sem Supabase) e nas **integrações/emissão** (`pedidos/integracoes/` + `emissor.py` — payloads puros, OAuth e clientes HTTP com fake injetável, emissor com repo+cliente fakes; zero rede). Sem Supabase/secrets. Instalar dev deps com `uv pip install -r requirements-dev.txt` (o venv usa **uv**, não pip) e rodar `pytest` na raiz. `tests/conftest.py` monta `config` e `dados` sintéticos; o determinismo vem de ancorar as altas em `now()` de forma constante e desligar o crescimento (ver docstring do conftest). Os fakes reusam os `RepoFake` de `test_pedidos_repositorio`/`test_integracoes_repositorio` e o `HttpFake` de `test_integracoes_payloads`. Ao mexer no motor, rode a suíte e atualize os testes junto.
 
 ---
 

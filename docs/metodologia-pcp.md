@@ -61,7 +61,9 @@ As **três demandas** (colunas do DataFrame: `DemandaAlta`, `DemandaMensalProjet
 - **`proporcao_baixa`** = quanto a baixa representa da alta (Σbaixa ÷ Σalta), medida
   **global** (empresa inteira, últimos 2 ciclos ≈ 0,43) por `calcular_proporcao_baixa`.
   Cascata de override manual (`proporcao_baixa_efetiva`): `excecoes_sku[SKU] →
-  colegios[COL] → global`. **Por que global e não por categoria/SKU:** backtest
+  colegios[COL] → global` (o nível SKU segue no motor, mas **sem cadastro na tela**
+  desde out/2026 — a aba de exceções foi retirada; o do colégio fica em
+  Configurações → Colégios e Crescimento → Por colégio). **Por que global e não por categoria/SKU:** backtest
   (2023-25) — a baixa tem teto de erro ~48% em qualquer eixo; fatiar mais só
   redistribui o erro (ver §10). O override pega os poucos gigantes de cauda curta
   (tamanho central concentrado no pico, ex: NEV009 real ~0,15 vs global 0,43).

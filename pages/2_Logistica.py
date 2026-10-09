@@ -48,8 +48,7 @@ st.caption(
     f"Alta: {int(g.get('inicio_alta', 10))}-{int(g.get('fim_alta', 3))} | "
     f"Mult. PA: {g.get('mult_pa', 2.0)}x | "
     f"LT: {int(g.get('lead_time', 3))}d | "
-    f"Colégios: {len(config.get('colegios') or {})} | "
-    f"SKUs c/ correção: {len(config.get('excecoes_sku') or {})}"
+    f"Colégios c/ ajuste manual: {len(config.get('colegios') or {})}"
 )
 
 # =================================================================

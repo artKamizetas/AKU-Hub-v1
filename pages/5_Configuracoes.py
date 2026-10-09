@@ -1,10 +1,19 @@
 """
-Página: Configurações do Sistema (Admin Only)
-Gerencia todos os parâmetros de produção via UI:
-- Parâmetros gerais (metas, IDs, períodos)
-- Exceções de SKU (upload/download CSV)
-- Upload de dados (Excel)
-- Sistema (cache, backup config)
+Página: Configurações (Admin Only)
+
+Organizada pela DECISÃO que o gestor quer tomar, não pelo formato do widget:
+
+- Comercial ............... metas mensais e vendedores por loja
+- Reposição de Loja ....... VM dinâmico, pulmão e giro
+- Produção ................ margem de segurança e calendário do motor
+- Colégios e Crescimento .. a cascata do crescimento, do geral ao específico
+- Integrações ............. Bling (compra) e Olist (venda)
+- Usuários ................ allowlist de acesso
+- Sistema ................. versões, mapeamento do Bling, cache e backup
+
+Só a seção ATIVA é executada (segmented_control + if/elif, como na 4_Pedidos).
+Com st.tabs todas as abas rodavam a cada rerun — crescimento observado,
+leituras das integrações e gravação de `state` OAuth incluídos.
 """
 
 import streamlit as st
@@ -34,9 +43,12 @@ from datetime import datetime, date
 import pandas as pd
 
 from etl.loader import carregar_dados, carregar_config
+from ui_carga import carregar_com_feedback
 from ui_tabelas import (
-    EDITOR, MEMORIA, exibir, padrao_tabela, brl, col_texto, col_moeda,
+    EDITOR, MEMORIA, exibir, padrao_tabela, brl, num,
+    col_texto, col_moeda, col_colegio, col_pecas,
 )
+from etl import config_edicao
 from etl.config_store import extrair_parametros, obter_repositorio_parametros
 from pedidos.integracoes.repositorio import obter_repositorio_integracoes
 from pedidos.integracoes import oauth, bling as cliente_bling, olist as cliente_olist
@@ -45,6 +57,19 @@ from auth_store import (
     normalizar_email, obter_repositorio_usuarios,
 )
 
+# Seções da página: slug → rótulo. O slug vai em ?secao=, o que deixa um link
+# de outra tela (ou um favorito) cair direto na seção certa.
+SECOES = {
+    "comercial": "🎯 Comercial",
+    "reposicao": "📦 Reposição de Loja",
+    "producao": "🏭 Produção",
+    "colegios": "🏫 Colégios e Crescimento",
+    "integracoes": "🔌 Integrações",
+    "usuarios": "👥 Usuários",
+    "sistema": "ℹ️ Sistema",
+}
+CHAVE_SECAO = "cfg_secao"
+
 # =================================================================
 # CALLBACK OAUTH (integrações) — processa o retorno capturado no topo
 # O state foi persistido no banco (a sessão do Streamlit morre no redirect),
@@ -52,6 +77,8 @@ from auth_store import (
 # =================================================================
 _ret = st.session_state.pop("_oauth_retorno", None)
 if _ret:
+    # O resultado da conexão interessa à seção de Integrações: abre nela.
+    st.session_state[CHAVE_SECAO] = "integracoes"
     try:
         _repo_int = obter_repositorio_integracoes()
         _integ = _repo_int.buscar_por_state(_ret["state"])
@@ -154,320 +181,110 @@ def validar_config(config):
     return erros
 
 
+# Uma lista só de níveis de serviço para a página inteira (eram duas, e o 92%
+# usado na baixa não existia nos seletores da Reposição nem dos colégios).
+NIVEIS_SERVICO = [90, 92, 95, 97, 98, 99]
+
+
+def _indice_ns(valor, padrao: int) -> int:
+    """Posição de `valor` em NIVEIS_SERVICO; cai no `padrao` se estiver fora da lista."""
+    nivel = round(float(valor)) if valor is not None else padrao
+    return NIVEIS_SERVICO.index(nivel if nivel in NIVEIS_SERVICO else padrao)
+
+
+def _indice_mes(valor, padrao: int) -> int:
+    """Posição (0-11) do mês `valor` (1-12) no seletor; cai no `padrao` se inválido."""
+    try:
+        mes = int(valor)
+    except (TypeError, ValueError):
+        mes = padrao
+    return (mes if 1 <= mes <= 12 else padrao) - 1
+
+
+def _seletor(widget, rotulo: str, opcoes: list, chave: str, inicial=None, **kwargs):
+    """
+    `st.segmented_control`/`st.pills` de navegação: sempre com UMA opção marcada.
+
+    Os dois permitem DESMARCAR clicando na opção ativa (devolvem None), o que
+    deixaria a barra sem destaque e a tela sem dono. O callback devolve a
+    última escolha antes do rerun. A última escolha mora numa chave que NÃO é
+    de widget — o Streamlit apaga o estado do widget que deixa de ser
+    desenhado, e é ela que faz a sub-aba ser lembrada ao voltar à seção.
+    """
+    ultima = f"_{chave}_ultima"
+    if chave not in st.session_state:
+        candidata = st.session_state.get(ultima, inicial)
+        st.session_state[chave] = candidata if candidata in opcoes else opcoes[0]
+
+    def _segurar():
+        if st.session_state.get(chave) is None:
+            st.session_state[chave] = st.session_state.get(ultima, opcoes[0])
+
+    valor = widget(rotulo, opcoes, key=chave, on_change=_segurar,
+                   label_visibility="collapsed", **kwargs)
+    if valor is None:
+        valor = st.session_state.get(ultima, opcoes[0])
+    st.session_state[ultima] = valor
+    return valor
+
+
+def _salvar_secao(config, mensagem: str) -> None:
+    """Valida, grava e avisa — o fecho comum dos formulários de parâmetros."""
+    erros = validar_config(config)
+    if erros:
+        st.error("❌ Corrija antes de salvar:")
+        for erro in erros:
+            st.write(f"- {erro}")
+        return
+    if not salvar_parametros(config):
+        st.stop()
+    # Só o cache de CONFIG — não o de dados (TTL 1 h). O clear() global levava
+    # junto a leitura do Supabase, e cada "Salvar" custava uma carga fria.
+    carregar_config.clear()
+    st.success(mensagem)
+
+
+@st.cache_data(ttl=600, show_spinner="Levantando o realizado dos últimos meses…")
+def _realizado_mensal():
+    """Faturamento/peças/pedidos realizados por (ano, mês, loja) — a âncora
+    que o gestor usa para decidir a meta. Vem do MESMO pipeline do Daily
+    (processar_daily), então bate com o que a tela de acompanhamento mostra."""
+    from etl.daily import processar_daily
+    cfg = carregar_config()
+    det, _, _ = processar_daily(carregar_dados(), cfg)
+    sits = cfg["daily"]["situacoes_venda"]
+    v = det[det["id_situacao"].isin(sits)].copy()
+    v["_ano"] = v["Data"].dt.year
+    v["_mes"] = v["Data"].dt.month
+    g = (
+        v.groupby(["_ano", "_mes", "LojaConfig"])
+        .agg(faturamento=("Valor", "sum"), pecas=("Qtd Peças", "sum"),
+             pedidos=("ID_pedido", "nunique"))
+        .reset_index()
+    )
+    g["pa"] = g.apply(lambda r: (r["pecas"] / r["pedidos"]) if r["pedidos"] else 0.0, axis=1)
+    return g
+
+
 # =================================================================
-# INTERFACE PRINCIPAL
+# SEÇÃO — COMERCIAL (metas mensais + vendedores por loja)
 # =================================================================
 
-st.title("⚙️ Configurações do Sistema")
-st.markdown("_Gerenciar parâmetros de produção, exceções de SKU e sistema._")
-
-tab1, tab2, tab_int, tab_usr, tab3 = st.tabs([
-    "📋 Parâmetros Gerais",
-    "📦 Exceções de SKU",
-    "🔌 Integrações",
-    "👥 Usuários",
-    "ℹ️ Sistema"
-])
-
-# =================================================================
-# ABA 1 — PARÂMETROS GERAIS
-# =================================================================
-
-with tab1:
-    config = carregar_config()
-
-    st.subheader("Parâmetros de Operação")
-
-    cfg_vm = config.get("vm", {})
-    cfg_dem = config.get("demanda", {})
-    _ns_opts = [90, 92, 95, 97, 98, 99]
-    _meses_opts = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-
-    with st.form("form_parametros"):
-        # =========================================================
-        # 1. COMERCIAL (Daily)
-        # =========================================================
-        st.markdown("### 📈 Comercial")
-        st.caption(
-            "IDs de status de pedido do Bling. As **metas** migraram para a seção "
-            "*Metas Mensais* logo abaixo — são por loja × mês, em três níveis."
-        )
-        col_c1, col_c2, col_c3 = st.columns(3)
-        with col_c1:
-            status_aberto = st.number_input(
-                "Status ID — Em Aberto",
-                value=int(config["daily"]["status_ids"]["em_aberto"]),
-            )
-        with col_c2:
-            status_andamento = st.number_input(
-                "Status ID — Em Andamento",
-                value=int(config["daily"]["status_ids"]["em_andamento"]),
-            )
-        with col_c3:
-            status_pronto = st.number_input(
-                "Status ID — Pronto para Retirada",
-                value=int(config["daily"]["status_ids"]["pronto_retirada"]),
-            )
-
-        st.divider()
-
-        # =========================================================
-        # 2. REPOSIÇÃO DE LOJA (VM Dinâmico)
-        # =========================================================
-        st.markdown("### 📦 Reposição de Loja")
-        st.caption(
-            "VM (Visual Merchandising) calculado por SKU a partir das vendas reais da alta "
-            "temporada, com pulmão de reposição por nível de serviço. Os campos de *fallback* "
-            "só entram quando o SKU não tem giro suficiente para o cálculo dinâmico."
-        )
-        col_vm1, col_vm2, col_vm3 = st.columns(3)
-        with col_vm1:
-            vm_dias_cobertura = st.number_input(
-                "Dias de cobertura",
-                value=int(cfg_vm.get("dias_cobertura", 15)), min_value=1,
-            )
-            vm_mult_pa = st.number_input(
-                "Multiplicador PA (piso do VM)",
-                value=float(cfg_vm.get("mult_pa", 2.0)), min_value=0.1, step=0.1,
-            )
-            vm_minimo = st.number_input(
-                "VM mínimo absoluto (unidades)",
-                value=int(cfg_vm.get("vm_minimo", 2)), min_value=0,
-            )
-        with col_vm2:
-            vm_inicio_alta = st.number_input(
-                "Início alta temporada (mês)",
-                value=int(cfg_vm.get("inicio_alta", 10)), min_value=1, max_value=12,
-            )
-            vm_fim_alta = st.number_input(
-                "Fim alta temporada (mês)",
-                value=int(cfg_vm.get("fim_alta", 3)), min_value=1, max_value=12,
-            )
-            vm_lead_time = st.number_input(
-                "Lead time reposição (dias)",
-                value=int(cfg_vm.get("lead_time", 3)), min_value=1,
-            )
-        with col_vm3:
-            vm_nivel_servico = st.selectbox(
-                "Nível de serviço padrão (%)",
-                options=[90, 95, 97, 98, 99],
-                index=[90, 95, 97, 98, 99].index(
-                    round(cfg_vm.get("nivel_servico_default", 95))
-                    if round(cfg_vm.get("nivel_servico_default", 95)) in [90, 95, 97, 98, 99]
-                    else 95
-                ),
-            )
-            vm_toggle_cresc = st.checkbox(
-                "Aplicar crescimento (colégio × grupo)",
-                value=cfg_vm.get("aplicar_crescimento", True),
-            )
-
-        st.markdown("**Fallback — SKU sem giro para o cálculo dinâmico**")
-        col_fb1, col_fb2 = st.columns(2)
-        with col_fb1:
-            vm_padrao = st.number_input(
-                "VM padrão fixo (unidades)",
-                value=int(config["logistica"]["vm_padrao"]), min_value=0,
-            )
-        with col_fb2:
-            dias_analise = st.number_input(
-                "Dias de análise de giro",
-                value=int(config["logistica"]["dias_analise_giro"]), min_value=1,
-            )
-
-        st.divider()
-
-        # =========================================================
-        # 3. PRODUÇÃO (Simulador — Demanda + Planejamento)
-        # =========================================================
-        st.markdown("### 🏭 Produção (Simulador)")
-        st.caption(
-            "Motor único de demanda ancorada na última temporada de ALTA × crescimento, com "
-            "política order-up-to (estoque de segurança por nível de serviço). Base comum da "
-            "Sugestão por SKU (tática) e da Visão Geral (rodadas anuais)."
-        )
-
-        st.markdown("**Demanda / Abastecimento**")
-        col_d1, col_d2, col_d3 = st.columns(3)
-        with col_d1:
-            dem_ns_alta = st.selectbox(
-                "Nível de serviço — ALTA (%)",
-                options=_ns_opts,
-                index=_ns_opts.index(round(cfg_dem.get("nivel_servico_alta", 99)))
-                if round(cfg_dem.get("nivel_servico_alta", 99)) in _ns_opts else 5,
-                help="Não pode faltar na alta → nível alto (99%).",
-            )
-            dem_ns_baixa = st.selectbox(
-                "Nível de serviço — BAIXA (%)",
-                options=_ns_opts,
-                index=_ns_opts.index(round(cfg_dem.get("nivel_servico_baixa", 92)))
-                if round(cfg_dem.get("nivel_servico_baixa", 92)) in _ns_opts else 1,
-            )
-        with col_d2:
-            dem_cv = st.number_input(
-                "Variação da Demanda — incerteza",
-                value=float(cfg_dem.get("variacao_demanda", 0.25)),
-                min_value=0.0, max_value=2.0, step=0.05,
-                help="Multiplica o estoque de segurança. Maior = mais margem.",
-            )
-            dem_janela_alta = st.multiselect(
-                "Meses da alta temporada (âncora)",
-                options=_meses_opts,
-                default=cfg_dem.get("janela_alta", [12, 1, 2]),
-                format_func=lambda x: MESES_NOME_CFG[x],
-                help="Ordem cronológica da temporada (ex: Dez, Jan, Fev).",
-            )
-        with col_d3:
-            dem_toggle_fab = st.checkbox(
-                "Aplicar crescimento na produção",
-                value=cfg_dem.get("aplicar_crescimento_fabrica", True),
-            )
-
-        st.markdown("**Planejamento — calendário de rodadas**")
-        st.info(
-            "📅 O calendário de rodadas agora é editado no **Simulador de Produção → "
-            "Visão Geral**, junto com as coberturas alvo — lá o efeito de cada data na "
-            "produção aparece ao vivo. Datas e coberturas formam um plano só."
-        )
-        _datas_atuais = sorted(config["planejamento"].get("rodadas_datas") or [])
-        if _datas_atuais:
-            _rot = ", ".join(pd.Timestamp(str(d)).strftime("%d/%m/%Y") for d in _datas_atuais)
-            st.caption(f"Datas configuradas atualmente: {_rot}")
-        else:
-            st.caption("Nenhuma data configurada ainda — defina no Simulador de Produção.")
-
-        col_p1, col_p2, col_p3 = st.columns(3)
-        with col_p1:
-            lead_time = st.number_input(
-                "Lead time de produção (semanas)",
-                value=int(config["planejamento"]["lead_time_semanas"]), min_value=1,
-            )
-        with col_p2:
-            periodo_hist_ini = st.date_input(
-                "Período histórico — Início",
-                value=datetime.fromisoformat(config["planejamento"]["periodo_historico_inicio"]).date(),
-                help="Janela de vendas passadas que ensina o FORMATO do ano (sazonalidade "
-                     "e base dos SKUs que só vendem na baixa). Use 12+ meses, incluindo baixa. "
-                     "O tamanho do pico NÃO vem daqui — vem das vendas reais da última alta.",
-            )
-        with col_p3:
-            periodo_hist_fim = st.date_input(
-                "Período histórico — Fim",
-                value=datetime.fromisoformat(config["planejamento"]["periodo_historico_fim"]).date(),
-            )
-
-        st.markdown("**Fallback da Fábrica**")
-        st.caption(
-            "Crescimento é o fallback para colégios sem taxa própria (Configurações → Colégios); "
-            "cobertura só entra quando nenhuma rodada está configurada acima; "
-            "correção manual soma um ajuste fixo à demanda de todo SKU."
-        )
-        col_f1, col_f2, col_f3 = st.columns(3)
-        with col_f1:
-            crescimento = st.number_input(
-                "Crescimento — fallback (%)",
-                value=float(config["fabrica"]["crescimento_pct"]), min_value=0.0, step=0.5,
-            )
-        with col_f2:
-            cobertura_meses = st.number_input(
-                "Cobertura — fallback (meses)",
-                value=int(config["fabrica"]["cobertura_meses"]), min_value=1,
-            )
-        with col_f3:
-            correcao_manual = st.number_input(
-                "Correção manual global (unidades)",
-                value=int(config["fabrica"]["correcao_manual"]), step=1,
-            )
-
-        # Botão enviar
-        submitted = st.form_submit_button("💾 Salvar Configurações", type="primary")
-
-    if submitted:
-        # Atualizar config
-        config["daily"]["status_ids"]["em_aberto"] = status_aberto
-        config["daily"]["status_ids"]["em_andamento"] = status_andamento
-        config["daily"]["status_ids"]["pronto_retirada"] = status_pronto
-        config["logistica"]["vm_padrao"] = vm_padrao
-        config["logistica"]["dias_analise_giro"] = dias_analise
-        config.setdefault("vm", {})
-        config["vm"]["dias_cobertura"] = vm_dias_cobertura
-        config["vm"]["inicio_alta"] = vm_inicio_alta
-        config["vm"]["fim_alta"] = vm_fim_alta
-        config["vm"]["mult_pa"] = vm_mult_pa
-        config["vm"]["vm_minimo"] = vm_minimo
-        config["vm"]["lead_time"] = vm_lead_time
-        config["vm"]["nivel_servico_default"] = vm_nivel_servico
-        config["vm"]["aplicar_crescimento"] = bool(vm_toggle_cresc)
-        config.setdefault("demanda", {})
-        config["demanda"]["nivel_servico_alta"] = dem_ns_alta
-        config["demanda"]["nivel_servico_baixa"] = dem_ns_baixa
-        config["demanda"]["variacao_demanda"] = dem_cv
-        config["demanda"]["janela_alta"] = list(dem_janela_alta)
-        config["demanda"]["aplicar_crescimento_fabrica"] = bool(dem_toggle_fab)
-        config["fabrica"]["crescimento_pct"] = crescimento
-        config["fabrica"]["cobertura_meses"] = cobertura_meses
-        config["fabrica"]["correcao_manual"] = correcao_manual
-        # rodadas_datas NÃO é mais editado aqui (vive no Simulador → Visão Geral);
-        # o valor carregado apenas trafega de volta no save (extrair_parametros).
-        config["planejamento"]["lead_time_semanas"] = lead_time
-        config["planejamento"]["periodo_historico_inicio"] = periodo_hist_ini.isoformat()
-        config["planejamento"]["periodo_historico_fim"] = periodo_hist_fim.isoformat()
-
-        # Validar
-        erros = validar_config(config)
-        if erros:
-            st.error("❌ Erros encontrados:")
-            for erro in erros:
-                st.write(f"- {erro}")
-        else:
-            # Salvar
-            if not salvar_parametros(config):
-                st.stop()
-            # Só o cache de CONFIG — não o de dados (TTL 1 h). O clear()
-            # global levava junto a leitura do Supabase, e cada "Salvar"
-            # custava uma carga fria (~10 s) na tela seguinte.
-            carregar_config.clear()
-            st.success("✅ Configurações salvas com sucesso!")
-            st.info("💡 Cache limpo. Os dados serão recarregados na próxima visualização das páginas.")
-
-    # =================================================================
-    # Metas Mensais Escalonadas (Prata/Ouro/Diamante) por Loja × Mês
-    # Spec: docs/requisitos/metas-escalonadas.md
-    # =================================================================
-    st.markdown("---")
-    st.subheader("🎯 Metas Mensais")
+def _bloco_metas():
+    """Metas escalonadas (Prata/Ouro/Diamante) por loja × mês.
+    Spec: docs/requisitos/metas-escalonadas.md"""
     st.markdown(
         "Três níveis por mês e por loja — **Prata** (o piso aceitável), **Ouro** "
         "(a meta de verdade) e **Diamante** (a superação). Valem para "
         "**Faturamento** e **PA** (peças por atendimento). Célula em branco = mês "
         "sem meta: o Daily avisa em vez de inventar um número. A meta de cada "
         "**vendedor** é rateada automaticamente a partir da meta da loja "
-        "(configure a atribuição logo abaixo)."
+        "(a atribuição fica na aba *Vendedores por loja*)."
     )
 
     config = carregar_config()
     _lojas_cfg = [l["nome"] for l in config["depositos"]["lojas"]]
     _ano_atual = date.today().year
-
-    @st.cache_data(ttl=600, show_spinner="Levantando o realizado dos últimos meses…")
-    def _realizado_mensal():
-        """Faturamento/peças/pedidos realizados por (ano, mês, loja) — a âncora
-        que o gestor usa para decidir a meta. Vem do MESMO pipeline do Daily
-        (processar_daily), então bate com o que a tela de acompanhamento mostra."""
-        from etl.daily import processar_daily
-        det, _, _ = processar_daily(carregar_dados(), carregar_config())
-        sits = config["daily"]["situacoes_venda"]
-        v = det[det["id_situacao"].isin(sits)].copy()
-        v["_ano"] = v["Data"].dt.year
-        v["_mes"] = v["Data"].dt.month
-        g = (
-            v.groupby(["_ano", "_mes", "LojaConfig"])
-            .agg(faturamento=("Valor", "sum"), pecas=("Qtd Peças", "sum"),
-                 pedidos=("ID_pedido", "nunique"))
-            .reset_index()
-        )
-        g["pa"] = g.apply(lambda r: (r["pecas"] / r["pedidos"]) if r["pedidos"] else 0.0, axis=1)
-        return g
 
     try:
         _realizado = _realizado_mensal()
@@ -486,20 +303,16 @@ with tab1:
         if loja_meta is None:
             loja_meta = _lojas_cfg[0]
 
-    # O espelho mudou de codificação de situação em 2026: o histórico antigo
-    # está quase todo em id_situacao=1, e `daily.situacoes_venda` (hoje [9] =
-    # Atendido) não o alcança. Sem isso a coluna de referência vem vazia — e
-    # vazio silencioso engana quem está definindo a meta.
+    # Sem realizado do ano anterior a coluna de referência vem vazia — e vazio
+    # silencioso engana quem está definindo a meta: avisa e desabilita o Propor.
     _ref_ano = ano_meta - 1
     _tem_ref = len(_realizado[(_realizado["_ano"] == _ref_ano)
                               & (_realizado["LojaConfig"] == loja_meta)]) > 0
     if not _tem_ref:
         st.caption(
-            f"ℹ️ Sem realizado de **{_ref_ano}** para {loja_meta} nas situações contadas como venda "
-            f"(`daily.situacoes_venda` = {config['daily']['situacoes_venda']}). O histórico anterior a "
-            "2026 está gravado com outro código de situação no espelho — a coluna de referência e o "
-            "botão *Propor* ficam sem base neste ano. Defina as metas manualmente ou ajuste "
-            "`situacoes_venda` no `config.yaml`."
+            f"ℹ️ Sem vendas de **{_ref_ano}** para {loja_meta} no histórico — a coluna de "
+            "referência e o botão *Propor* ficam sem base neste ano. Defina as metas à mão "
+            "ou use *Copiar metas*."
         )
 
     _metas_salvas = dict(config["daily"].get("metas_mensais") or {})
@@ -678,10 +491,13 @@ with tab1:
             carregar_config.clear()
             st.success(f"✅ Metas de **{loja_meta}** salvas — {n_meses} mês(es) configurado(s) em {ano_meta}.")
 
-    # -----------------------------------------------------------------
-    # Atribuição Vendedor → Loja (vigência mensal; base do rateio da meta)
-    # -----------------------------------------------------------------
-    st.markdown("#### 👥 Vendedores por Loja")
+
+def _bloco_vendedores():
+    """Atribuição vendedor → loja (vigência mensal; base do rateio da meta)."""
+    config = carregar_config()
+    _lojas_cfg = [l["nome"] for l in config["depositos"]["lojas"]]
+    _ano_atual = date.today().year
+
     st.markdown(
         "Define **quem responde por qual loja** — é o que rateia a meta da loja "
         "entre os vendedores. O `peso` divide a meta proporcionalmente (1,0 = "
@@ -794,11 +610,552 @@ with tab1:
             carregar_config.clear()
             st.success(f"✅ Atribuição de {n_atrib} vendedor(es) salva, vigente a partir de {comp_vend}.")
 
-    # =================================================================
-    # Normalização de Colégios (de-para Marca_sku cru → nome de exibição)
-    # =================================================================
-    st.markdown("---")
-    st.subheader("Normalização de Colégios")
+
+def _secao_comercial():
+    _visoes = ["Metas da loja", "Vendedores por loja"]
+    visao = _seletor(st.pills, "Comercial", _visoes, "cfg_comercial_visao")
+    if visao == _visoes[1]:
+        _bloco_vendedores()
+    else:
+        _bloco_metas()
+
+
+# =================================================================
+# SEÇÃO — REPOSIÇÃO DE LOJA (VM dinâmico, pulmão, giro)
+# =================================================================
+
+def _secao_reposicao():
+    config = carregar_config()
+    cfg_vm = config.get("vm", {})
+    _meses = list(MESES_NOME_CFG.keys())
+
+    st.caption(
+        "Quanto cada loja deve ter na prateleira (**VM**) e de reserva (**pulmão**). "
+        "O alvo é calculado por SKU a partir das vendas da temporada; a tela de "
+        "Logística compara esse alvo com o estoque e sugere a transferência."
+    )
+
+    with st.form("form_reposicao", border=False):
+        with st.container(border=True):
+            st.markdown("**Exposição na loja (VM)**")
+            st.caption("O VM de cada SKU é o **maior** entre os três valores abaixo.")
+            c1, c2, c3 = st.columns(3)
+            vm_dias_cobertura = c1.number_input(
+                "Cobertura (dias de venda)",
+                value=int(cfg_vm.get("dias_cobertura", 15)), min_value=1,
+                help="Quantos dias de venda da temporada a prateleira deve aguentar. "
+                     "VM de cobertura = venda diária × estes dias × crescimento.",
+            )
+            vm_mult_pa = c2.number_input(
+                "Piso por atendimento (× PA)",
+                value=float(cfg_vm.get("mult_pa", 2.0)), min_value=0.1, step=0.1,
+                help="Piso do VM: peças por atendimento (PA) do SKU × este multiplicador. "
+                     "Evita que um único cliente esvazie a prateleira.",
+            )
+            vm_minimo = c3.number_input(
+                "Mínimo absoluto (peças)",
+                value=int(cfg_vm.get("vm_minimo", 2)), min_value=0,
+                help="Nenhum SKU fica com VM abaixo disto, mesmo sem venda na temporada.",
+            )
+
+        with st.container(border=True):
+            st.markdown("**Pulmão de reposição**")
+            st.caption("Reserva acima do VM para a loja não zerar enquanto a reposição não chega.")
+            c1, c2, _ = st.columns(3)
+            vm_lead_time = c1.number_input(
+                "Prazo de reposição (dias)",
+                value=int(cfg_vm.get("lead_time", 3)), min_value=1,
+                help="Dias entre pedir e a mercadoria chegar à loja. Mais dias = pulmão maior.",
+            )
+            vm_nivel_servico = c2.selectbox(
+                "Nível de serviço padrão (%)",
+                options=NIVEIS_SERVICO,
+                index=_indice_ns(cfg_vm.get("nivel_servico_default"), 95),
+                help="Chance de NÃO faltar durante o prazo de reposição. Vale para o colégio "
+                     "sem nível próprio (Colégios e Crescimento → Por colégio).",
+            )
+
+        with st.container(border=True):
+            st.markdown("**Temporada da loja e giro**")
+            c1, c2, c3 = st.columns(3)
+            vm_inicio_alta = c1.selectbox(
+                "Temporada da loja — início",
+                options=_meses, index=_indice_mes(cfg_vm.get("inicio_alta"), 10),
+                format_func=lambda m: MESES_NOME_CFG[m],
+                help="As vendas entre o início e o fim medem a venda diária e o PA usados no VM. "
+                     "Não é a mesma janela do *Pico de vendas* da Produção: cada motor tem a sua.",
+            )
+            vm_fim_alta = c2.selectbox(
+                "Temporada da loja — fim",
+                options=_meses, index=_indice_mes(cfg_vm.get("fim_alta"), 3),
+                format_func=lambda m: MESES_NOME_CFG[m],
+                help="Pode virar o ano (ex: Outubro → Março).",
+            )
+            dias_analise = c3.number_input(
+                "Janela do giro (dias)",
+                value=int(config["logistica"]["dias_analise_giro"]), min_value=1,
+                help="Dias de venda recentes usados para medir o giro (peças/dia) de cada "
+                     "SKU na tela de Logística.",
+            )
+
+        with st.expander("Avançado"):
+            c1, _, _ = st.columns(3)
+            vm_padrao = c1.number_input(
+                "VM fixo de reserva (peças)",
+                value=int(config["logistica"]["vm_padrao"]), min_value=0,
+                help="Só entra se o cálculo dinâmico não cobrir o SKU.",
+            )
+
+        salvar = st.form_submit_button("💾 Salvar Reposição de Loja", type="primary")
+
+    st.caption(
+        "O interruptor que liga o **crescimento** na Reposição fica em "
+        "*Colégios e Crescimento → Regras gerais*."
+    )
+
+    if salvar:
+        config.setdefault("vm", {})
+        config["vm"]["dias_cobertura"] = vm_dias_cobertura
+        config["vm"]["mult_pa"] = vm_mult_pa
+        config["vm"]["vm_minimo"] = vm_minimo
+        config["vm"]["lead_time"] = vm_lead_time
+        config["vm"]["nivel_servico_default"] = vm_nivel_servico
+        config["vm"]["inicio_alta"] = vm_inicio_alta
+        config["vm"]["fim_alta"] = vm_fim_alta
+        config["logistica"]["dias_analise_giro"] = dias_analise
+        config["logistica"]["vm_padrao"] = vm_padrao
+        _salvar_secao(config, "✅ Reposição de Loja salva. A Logística recalcula na próxima abertura.")
+
+
+# =================================================================
+# SEÇÃO — PRODUÇÃO (margem de segurança + calendário do motor)
+# =================================================================
+
+def _secao_producao():
+    config = carregar_config()
+    cfg_dem = config.get("demanda", {})
+    cfg_plan = config["planejamento"]
+    cfg_fab = config["fabrica"]
+    _meses = list(MESES_NOME_CFG.keys())
+
+    st.caption(
+        "Parâmetros do motor do **Simulador de Produção** (Sugestão por SKU e Visão Geral): "
+        "a demanda parte das vendas da última alta × crescimento, e o pedido cobre essa "
+        "demanda mais uma margem de segurança."
+    )
+
+    with st.form("form_producao", border=False):
+        with st.container(border=True):
+            st.markdown("**Margem de segurança**")
+            st.caption(
+                "O estoque de segurança cresce com o nível de serviço e com a variação. "
+                "Vale o nível da ALTA quando o período da rodada contém meses de pico."
+            )
+            c1, c2, c3 = st.columns(3)
+            dem_ns_alta = c1.selectbox(
+                "Nível de serviço — alta (%)",
+                options=NIVEIS_SERVICO,
+                index=_indice_ns(cfg_dem.get("nivel_servico_alta"), 99),
+                help="Chance de NÃO faltar no pico. Não pode faltar na volta às aulas → nível alto.",
+            )
+            dem_ns_baixa = c2.selectbox(
+                "Nível de serviço — baixa (%)",
+                options=NIVEIS_SERVICO,
+                index=_indice_ns(cfg_dem.get("nivel_servico_baixa"), 92),
+                help="Chance de NÃO faltar fora do pico. Menor = menos estoque parado.",
+            )
+            dem_cv = c3.number_input(
+                "Variação da demanda",
+                value=float(cfg_dem.get("variacao_demanda", 0.25)),
+                min_value=0.0, max_value=2.0, step=0.05,
+                help="Incerteza da previsão (0,25 = a demanda pode fugir ~25%). "
+                     "Multiplica o estoque de segurança: maior = mais margem.",
+            )
+
+        with st.container(border=True):
+            st.markdown("**Calendário do motor**")
+            c1, c2 = st.columns([2, 1])
+            dem_janela_alta = c1.multiselect(
+                "Pico de vendas (meses da alta)",
+                options=_meses,
+                default=cfg_dem.get("janela_alta", [12, 1, 2]),
+                format_func=lambda m: MESES_NOME_CFG[m],
+                help="Âncora da demanda: as vendas reais destes meses na última temporada "
+                     "definem o tamanho do pico de cada SKU. Ordem cronológica (ex: Dez, Jan, Fev).",
+            )
+            lead_time = c2.number_input(
+                "Prazo de produção (semanas)",
+                value=int(cfg_plan["lead_time_semanas"]), min_value=1,
+                help="Tempo entre disparar a rodada e a mercadoria chegar.",
+            )
+            c1, c2, _ = st.columns(3)
+            periodo_hist_ini = c1.date_input(
+                "Histórico de referência — início",
+                value=datetime.fromisoformat(cfg_plan["periodo_historico_inicio"]).date(),
+                format="DD/MM/YYYY",
+                help="Janela de vendas passadas que ensina o FORMATO do ano (como a baixa se "
+                     "distribui mês a mês) e a base dos SKUs que só vendem na baixa. Use 12+ "
+                     "meses. O tamanho do pico NÃO vem daqui.",
+            )
+            periodo_hist_fim = c2.date_input(
+                "Histórico de referência — fim",
+                value=datetime.fromisoformat(cfg_plan["periodo_historico_fim"]).date(),
+                format="DD/MM/YYYY",
+            )
+
+        with st.expander("Avançado"):
+            c1, c2, _ = st.columns(3)
+            cobertura_meses = c1.number_input(
+                "Cobertura sem rodadas (meses)",
+                value=int(cfg_fab["cobertura_meses"]), min_value=1,
+                help="Só entra quando não há plano de rodadas: a Sugestão por SKU passa a "
+                     "cobrir este número fixo de meses.",
+            )
+            correcao_manual = c2.number_input(
+                "Ajuste global (peças por SKU)",
+                value=int(cfg_fab["correcao_manual"]), step=1,
+                help="Somado à demanda projetada de TODOS os SKUs. Deixe 0, salvo decisão "
+                     "deliberada: 1 peça aqui vira milhares de peças na rede.",
+            )
+
+        salvar = st.form_submit_button("💾 Salvar Produção", type="primary")
+
+    if salvar:
+        if not dem_janela_alta:
+            st.error("❌ Escolha ao menos um mês em *Pico de vendas* — é a âncora da demanda.")
+        else:
+            config.setdefault("demanda", {})
+            config["demanda"]["nivel_servico_alta"] = dem_ns_alta
+            config["demanda"]["nivel_servico_baixa"] = dem_ns_baixa
+            config["demanda"]["variacao_demanda"] = dem_cv
+            config["demanda"]["janela_alta"] = list(dem_janela_alta)
+            config["planejamento"]["lead_time_semanas"] = lead_time
+            config["planejamento"]["periodo_historico_inicio"] = periodo_hist_ini.isoformat()
+            config["planejamento"]["periodo_historico_fim"] = periodo_hist_fim.isoformat()
+            config["fabrica"]["cobertura_meses"] = cobertura_meses
+            config["fabrica"]["correcao_manual"] = correcao_manual
+            # rodadas_datas/cobertura_override NÃO são editados aqui (vivem no
+            # Simulador → Visão Geral); o valor carregado só trafega de volta.
+            _salvar_secao(config, "✅ Produção salva. O Simulador recalcula na próxima abertura.")
+
+    with st.container(border=True):
+        st.markdown("**Plano de rodadas**")
+        _datas = sorted(cfg_plan.get("rodadas_datas") or [])
+        if _datas:
+            _rot = " · ".join(pd.Timestamp(str(d)).strftime("%d/%m/%Y") for d in _datas)
+            st.write(f"Disparos configurados: {_rot}")
+        else:
+            st.write("Nenhuma rodada configurada — a Sugestão por SKU usa a cobertura fixa do *Avançado*.")
+        st.caption(
+            "Datas e coberturas-alvo formam um plano só e são editadas no Simulador, "
+            "onde o efeito de cada mudança aparece ao vivo."
+        )
+        st.page_link("pages/3_Fabrica.py", label="Editar no Simulador de Produção → Visão Geral", icon="🏭")
+
+    st.caption(
+        "O interruptor que liga o **crescimento** na Produção fica em "
+        "*Colégios e Crescimento → Regras gerais*."
+    )
+
+
+# =================================================================
+# SEÇÃO — COLÉGIOS E CRESCIMENTO
+# A ordem das abas internas é a ordem da cascata de
+# demanda.taxa_crescimento_efetiva, do geral ao específico.
+# =================================================================
+
+def _base_colegios(config):
+    """
+    Colégios e grupos VIVOS — a base comum dos editores desta seção. Só produtos
+    ativos (colégio descontinuado, ex: OVD, não aparece) e com o nome já
+    normalizado pelo de-para. Devolve `(dados_ativos, det)`.
+    """
+    from etl.demanda import colegio_efetivo, restringir_a_ativos
+    dados, _ = carregar_com_feedback()
+    dados_ativos = restringir_a_ativos(dados)
+    det = dados_ativos["detalhes"][["Marca_sku", "Grupo"]].copy()
+    det["Colegio"] = (
+        det["Marca_sku"].fillna("").astype(str).str.strip()
+        .map(lambda v: colegio_efetivo(v, config))
+    )
+    det["GrupoC"] = det["Grupo"].fillna("").astype(str).str.strip()
+    det = det[(det["Colegio"] != "") & (det["Colegio"] != "nan")]
+    return dados_ativos, det
+
+
+def _crescimento_medido(dados_ativos, config):
+    """Camada observada do crescimento, ou None quando desligada — exatamente
+    o que os motores recebem (demanda.py e vm_dinamico.py)."""
+    from etl.demanda import calcular_crescimento_observado
+    if not (config.get("demanda", {}) or {}).get("crescimento_observado_ativo", True):
+        return None
+    return calcular_crescimento_observado(dados_ativos, config)
+
+
+def _duas_casas(valor):
+    """Multiplicador de crescimento arredondado para exibição (None passa)."""
+    return None if valor is None else round(float(valor), 2)
+
+
+def _registros(df) -> list:
+    """Linhas do editor como dicts, com célula vazia (NaN/NA) virando None."""
+    return df.astype(object).where(df.notna(), None).to_dict("records")
+
+
+def _bloco_regras_crescimento():
+    config = carregar_config()
+    cfg_dem = config.get("demanda", {}) or {}
+
+    st.markdown(
+        "O crescimento multiplica as vendas da última alta para projetar a próxima. "
+        "Para cada SKU vale a **primeira** regra que existir, nesta ordem:\n\n"
+        "1. ajuste da **série** — aba *Por série*\n"
+        "2. taxa do **colégio** — aba *Por colégio*\n"
+        "3. crescimento **medido** do colégio naquele segmento\n"
+        "4. crescimento **medido** do colégio inteiro\n"
+        "5. **taxa padrão** (abaixo)"
+    )
+
+    with st.form("form_crescimento", border=False):
+        with st.container(border=True):
+            st.markdown("**De onde vem a taxa**")
+            c1, c2 = st.columns([2, 1])
+            usar_medido = c1.toggle(
+                "Usar o crescimento medido nas vendas",
+                value=bool(cfg_dem.get("crescimento_observado_ativo", True)),
+                help="Mede, por colégio e por segmento, quanto a última alta cresceu sobre a "
+                     "anterior (limitado entre 0,5× e 2×; só com 30+ peças). Desligado, as "
+                     "regras 3 e 4 somem: o que não tem ajuste manual usa a taxa padrão.",
+            )
+            taxa_padrao = c2.number_input(
+                "Taxa padrão (%)",
+                value=float(config["fabrica"]["crescimento_pct"]), min_value=0.0, step=0.5,
+                help="Usada quando não há ajuste manual nem medição confiável (colégio novo, "
+                     "amostra pequena).",
+            )
+
+        with st.container(border=True):
+            st.markdown("**Onde o crescimento entra**")
+            c1, c2 = st.columns(2)
+            aplicar_producao = c1.toggle(
+                "Produção",
+                value=bool(cfg_dem.get("aplicar_crescimento_fabrica", True)),
+                help="Posição inicial do interruptor *Aplicar crescimento* do Simulador de "
+                     "Produção — lá ele pode ser desligado só para comparar.",
+            )
+            aplicar_reposicao = c2.toggle(
+                "Reposição de Loja",
+                value=bool(config.get("vm", {}).get("aplicar_crescimento", True)),
+                help="Aplica o crescimento ao VM de cobertura das lojas.",
+            )
+
+        salvar = st.form_submit_button("💾 Salvar regras gerais", type="primary")
+
+    if salvar:
+        config.setdefault("demanda", {})
+        config["demanda"]["crescimento_observado_ativo"] = bool(usar_medido)
+        config["demanda"]["aplicar_crescimento_fabrica"] = bool(aplicar_producao)
+        config["fabrica"]["crescimento_pct"] = taxa_padrao
+        config.setdefault("vm", {})["aplicar_crescimento"] = bool(aplicar_reposicao)
+        _salvar_secao(config, "✅ Regras de crescimento salvas.")
+
+
+def _bloco_por_colegio():
+    from etl.demanda import calcular_proporcao_baixa
+
+    config = carregar_config()
+    dados_ativos, det = _base_colegios(config)
+    cfg_colegios = config.get("colegios") or {}
+    ns_padrao = int(config.get("vm", {}).get("nivel_servico_default", 95))
+    taxa_padrao = 1 + float(config.get("fabrica", {}).get("crescimento_pct", 0)) / 100
+    prop_global = round(float(calcular_proporcao_baixa(dados_ativos, config)), 3)
+    medido = _crescimento_medido(dados_ativos, config) or {}
+    colegios = sorted(c for c in det["Colegio"].unique() if c and c != "nan")
+
+    st.markdown(
+        "Preencha **só onde você sabe de algo que os dados não sabem**. Célula **vazia** "
+        "segue a regra geral e se atualiza sozinha a cada temporada; célula **preenchida** "
+        "é decisão sua e fica fixa até você apagar."
+    )
+    st.caption(
+        f"Vazio significa — **Taxa de crescimento**: o medido (sem medição, a taxa padrão "
+        f"{num(taxa_padrao, 2)}×) · **Nível de serviço**: {ns_padrao}% (padrão da Reposição) · "
+        f"**Proporção da baixa**: {num(prop_global, 3)} (medida na rede, últimos 2 ciclos)."
+    )
+
+    if not colegios:
+        st.info("Nenhum colégio com produto ativo encontrado.")
+        return
+
+    df_colegios = pd.DataFrame([
+        {
+            "colegio": c,
+            "taxa_crescimento": (cfg_colegios.get(c) or {}).get("taxa_crescimento"),
+            "nivel_servico": (cfg_colegios.get(c) or {}).get("nivel_servico"),
+            "proporcao_baixa": (cfg_colegios.get(c) or {}).get("proporcao_baixa"),
+            "medido": _duas_casas((medido.get(c) or {}).get("__geral__")),
+        }
+        for c in colegios
+    ])
+    # Tipos explícitos: coluna toda vazia nasceria `object` e o editor não
+    # saberia que é número. Int64 (anulável) mantém o nível de serviço inteiro.
+    for _col in ("taxa_crescimento", "proporcao_baixa", "medido"):
+        df_colegios[_col] = pd.to_numeric(df_colegios[_col], errors="coerce")
+    df_colegios["nivel_servico"] = pd.to_numeric(
+        df_colegios["nivel_servico"], errors="coerce").astype("Int64")
+
+    # st.form: o data_editor só reprocessa a página no submit,
+    # não a cada célula editada.
+    with st.form("form_colegios_param", border=False):
+        df_colegios_editado = st.data_editor(
+            df_colegios,
+            column_config={
+                "colegio": col_colegio(),
+                "taxa_crescimento": st.column_config.NumberColumn(
+                    "Taxa de crescimento (×)", min_value=0.0, step=0.01, format="%.2f",
+                    help="Multiplicador do colégio inteiro (1,10 = +10%). Vence o medido. "
+                         "Vale para Produção e Reposição."),
+                "nivel_servico": st.column_config.SelectboxColumn(
+                    "Nível de serviço — Reposição (%)", options=NIVEIS_SERVICO,
+                    help="Só a Reposição de Loja usa (pulmão). A Produção usa os níveis "
+                         "de alta/baixa da seção Produção."),
+                "proporcao_baixa": st.column_config.NumberColumn(
+                    "Proporção da baixa — Produção", min_value=0.0, step=0.05, format="%.3f",
+                    help="Quanto a baixa vende em relação à alta. Mude só no colégio que "
+                         "você sabe ter cauda diferente (ex: vende o ano todo)."),
+                "medido": st.column_config.NumberColumn(
+                    "Crescimento medido (×)", format="%.2f",
+                    help="Última alta sobre a anterior, no colégio inteiro. Vazio = amostra "
+                         "pequena ou medição desligada."),
+            },
+            disabled=["colegio", "medido"],
+            **padrao_tabela(EDITOR, len(df_colegios)),
+            key="editor_colegios",
+        )
+
+        _salvar_colegios = st.form_submit_button("💾 Salvar parâmetros por colégio", type="primary")
+
+    if _salvar_colegios:
+        novo_colegios, n_overrides = config_edicao.aplicar_edicao_colegios(
+            config.get("colegios"), _registros(df_colegios_editado))
+        config["colegios"] = novo_colegios
+        if not salvar_parametros(config):
+            st.stop()
+        # Só o cache de CONFIG — não o de dados (TTL 1 h).
+        carregar_config.clear()
+        st.success(
+            f"✅ {n_overrides} ajuste(s) manual(is) gravado(s) — o resto segue a regra geral."
+        )
+
+
+def _bloco_por_serie():
+    from etl import demanda as _dem
+
+    config = carregar_config()
+    dados_ativos, det = _base_colegios(config)
+    cfg_colegios = config.get("colegios") or {}
+    obs_cresc = _crescimento_medido(dados_ativos, config)
+    mapa_seg_cfg = _dem.mapa_grupo_segmento(config)
+
+    st.markdown(
+        "A coluna **Crescimento aplicado** já vem com o que o motor usa hoje em cada série. "
+        "Edite só onde você **sabe de algo que os dados não sabem** (turma nova, colégio em "
+        "expansão). Célula deixada **igual ao _Sem ajuste_ fica viva** — re-mede sozinha a "
+        "cada temporada; só o que você **mudar** vira ajuste fixo. Para desfazer um ajuste, "
+        "volte a célula ao valor de _Sem ajuste_."
+    )
+
+    def _sem_ajuste(colegio, grupo):
+        """O que o motor aplicaria SEM o ajuste da série — o próprio
+        taxa_crescimento_efetiva, com `crescimento_grupos` do colégio removido.
+        Usar o motor (e não reimplementar a cascata) é o que garante que a
+        tela mostra exatamente o número aplicado."""
+        entrada = {k: v for k, v in (cfg_colegios.get(colegio) or {}).items()
+                   if k != "crescimento_grupos"}
+        cfg_sem = {**config, "colegios": {**cfg_colegios, colegio: entrada}}
+        # 2 casas, as mesmas do editor: ele TRUNCA a exibição na precisão do
+        # step, então "aplicado" e "sem ajuste" têm de nascer do MESMO número —
+        # senão 1,126 aparece 1,12 numa coluna e 1,126 na outra e parece ajuste.
+        return round(_dem.taxa_crescimento_efetiva(colegio, cfg_sem, grupo, True, obs_cresc), 2)
+
+    def _origem(colegio, grupo, manual):
+        if manual is not None:
+            return "ajuste da série"
+        if "taxa_crescimento" in (cfg_colegios.get(colegio) or {}):
+            return "taxa do colégio"
+        obs = (obs_cresc or {}).get(colegio) or {}
+        tem_medido = ((obs.get("segmentos") or {}).get(mapa_seg_cfg.get(grupo, "Outros")) is not None
+                      or obs.get("__geral__") is not None)
+        return "medido" if tem_medido else "taxa padrão"
+
+    celulas = (
+        det[det["GrupoC"].ne("") & det["GrupoC"].ne("nan")]
+        .groupby(["Colegio", "GrupoC"]).size().reset_index(name="n_skus")
+        .sort_values(["Colegio", "GrupoC"])
+    )
+    linhas_matriz = []
+    for _, r in celulas.iterrows():
+        col_, gr_ = r["Colegio"], r["GrupoC"]
+        manual = ((cfg_colegios.get(col_) or {}).get("crescimento_grupos") or {}).get(gr_)
+        base = _sem_ajuste(col_, gr_)
+        linhas_matriz.append({
+            "colegio": col_, "grupo": gr_,
+            "taxa_crescimento": float(manual) if manual is not None else base,
+            "base": base,
+            "origem": _origem(col_, gr_, manual),
+            "segmento": mapa_seg_cfg.get(gr_, "Outros"),
+            "skus": int(r["n_skus"]),
+        })
+    df_matriz = pd.DataFrame(linhas_matriz)
+
+    if len(df_matriz) == 0:
+        st.info("Nenhuma série com produto ativo encontrada.")
+        return
+
+    # st.form: o data_editor só reprocessa a página no submit,
+    # não a cada célula editada.
+    with st.form("form_matriz_grupo", border=False):
+        df_matriz_editado = st.data_editor(
+            df_matriz,
+            column_config={
+                "colegio": col_colegio(),
+                "grupo": col_texto("Série (grupo)", largura="small"),
+                "taxa_crescimento": st.column_config.NumberColumn(
+                    "Crescimento aplicado (×)", min_value=0.0, step=0.01, format="%.2f",
+                    help="Multiplicador usado pelo motor nesta série (1,10 = +10%)."),
+                "base": st.column_config.NumberColumn(
+                    "Sem ajuste (×)", format="%.2f",
+                    help="O que vale se você não mexer: a taxa do colégio, o medido "
+                         "ou a taxa padrão — nessa ordem."),
+                "origem": col_texto(
+                    "Origem",
+                    ajuda="De onde vem o valor aplicado: ajuste da série (você definiu aqui) · "
+                          "taxa do colégio · medido · taxa padrão."),
+                "segmento": col_texto("Segmento"),
+                "skus": col_pecas("SKUs"),
+            },
+            disabled=["colegio", "grupo", "base", "origem", "segmento", "skus"],
+            **padrao_tabela(EDITOR, len(df_matriz)),
+            key="editor_matriz_grupo",
+        )
+
+        _salvar_matriz = st.form_submit_button("💾 Salvar crescimento por série", type="primary")
+
+    if _salvar_matriz:
+        novo_colegios, n_overrides = config_edicao.aplicar_edicao_crescimento_grupos(
+            config.get("colegios"), _registros(df_matriz_editado))
+        config["colegios"] = novo_colegios
+        if not salvar_parametros(config):
+            st.stop()
+        # Só o cache de CONFIG — não o de dados (TTL 1 h).
+        carregar_config.clear()
+        st.success(
+            f"✅ {n_overrides} ajuste(s) de série gravado(s) — o resto segue a regra geral (vivo)."
+        )
+
+
+def _bloco_nomes_segmentos():
+    st.markdown("**Nomes dos colégios**")
     st.markdown(
         "O colégio é extraído automaticamente da SKU e às vezes sai **errado** "
         "(ex: `27`, códigos soltos). Aqui você define **como cada valor cru aparece** "
@@ -807,13 +1164,13 @@ with tab1:
         "mudar vira regra — o resto segue como está. A coluna _Sugestão_ é só uma dica."
     )
 
-    from etl.demanda import colegio_efetivo, parece_ruido, restringir_a_ativos
+    from etl.demanda import parece_ruido
 
     config = carregar_config()
     alias_atual = config.get("colegios_alias") or {}
     # Só produtos ATIVOS: colégios descontinuados (ex: OVD) não devem aparecer
     # nos editores de Colégios / Grupo→Segmento.
-    dados_colegios = restringir_a_ativos(carregar_dados())
+    dados_colegios, det_cfg = _base_colegios(config)
 
     _crus = dados_colegios["detalhes"]["Marca_sku"].fillna("").astype(str).str.strip()
     _crus = _crus[(_crus != "") & (_crus.str.lower() != "nan")]
@@ -867,178 +1224,8 @@ with tab1:
         n_outros = sum(1 for v in novo_alias.values() if v == "Outros")
         st.success(f"✅ {len(novo_alias)} regra(s) de colégio salva(s) ({n_outros} → Outros). Cache limpo.")
 
-    st.markdown("---")
-    st.subheader("Parâmetros por Colégio")
-    st.markdown(
-        "Taxa de crescimento **base** e nível de serviço por colégio (usados por VM e Fábrica). "
-        "Colégio sem linha usa taxa 1.0 e o nível de serviço padrão. "
-        "Os nomes abaixo já são os **normalizados** (pós de-para acima)."
-    )
-
-    config = carregar_config()
-    cfg_colegios = config.get("colegios") or {}
-    ns_default_atual = int(config.get("vm", {}).get("nivel_servico_default", 95))
-
-    det_cfg = dados_colegios["detalhes"][["Marca_sku", "Grupo"]].copy()
-    det_cfg["Colegio"] = (
-        det_cfg["Marca_sku"].fillna("").astype(str).str.strip()
-        .map(lambda v: colegio_efetivo(v, config))
-    )
-    det_cfg["GrupoC"] = det_cfg["Grupo"].fillna("").astype(str).str.strip()
-    det_cfg = det_cfg[(det_cfg["Colegio"] != "") & (det_cfg["Colegio"] != "nan")]
-
-    colegios_disponiveis = sorted(
-        c for c in det_cfg["Colegio"].unique() if c and c != "nan"
-    )
-
-    from etl.demanda import calcular_proporcao_baixa
-    prop_global = round(float(calcular_proporcao_baixa(dados_colegios, config)), 3)
-    st.caption(
-        f"**Proporção da baixa** = quanto a baixa vende em relação à alta. Base **global {prop_global}** "
-        "(medida, últimos 2 ciclos), pré-preenchida. Só mude num colégio que você sabe ter cauda "
-        "diferente (ex: vende o ano todo). Célula igual ao global fica viva; só o que mudar vira override."
-    )
-
-    df_colegios = pd.DataFrame([
-        {
-            "colegio": c,
-            "taxa_crescimento": float(cfg_colegios.get(c, {}).get("taxa_crescimento", 1.0)),
-            "nivel_servico": int(cfg_colegios.get(c, {}).get("nivel_servico", ns_default_atual)),
-            "proporcao_baixa": float(cfg_colegios.get(c, {}).get("proporcao_baixa", prop_global)),
-        }
-        for c in colegios_disponiveis
-    ])
-
-    # st.form: o data_editor só reprocessa a página no submit,
-    # não a cada célula editada.
-    with st.form("form_colegios_param", border=False):
-        df_colegios_editado = st.data_editor(
-            df_colegios,
-            column_config={
-                "colegio": st.column_config.TextColumn("Colégio", disabled=True),
-                "taxa_crescimento": st.column_config.NumberColumn("Taxa base", min_value=0.0, step=0.05),
-                "nivel_servico": st.column_config.SelectboxColumn("Nível de serviço (%)", options=[90, 95, 97, 98, 99]),
-                "proporcao_baixa": st.column_config.NumberColumn("Proporção baixa", min_value=0.0, step=0.05, format="%.3f",
-                                                                 help=f"Cauda da baixa vs alta. Global (default) = {prop_global}"),
-            },
-            **padrao_tabela(EDITOR, len(df_colegios)),
-            key="editor_colegios",
-        )
-
-        _salvar_colegios = st.form_submit_button("💾 Salvar Colégios (taxa base)", key="btn_salvar_colegios", type="primary")
-
-    if _salvar_colegios:
-        novo_colegios = dict(config.get("colegios") or {})
-        for _, row in df_colegios_editado.iterrows():
-            c = row["colegio"]
-            entry = dict(novo_colegios.get(c, {}))     # preserva crescimento_grupos
-            entry["taxa_crescimento"] = float(row["taxa_crescimento"])
-            entry["nivel_servico"] = int(row["nivel_servico"])
-            pb = float(row["proporcao_baixa"])
-            if abs(pb - prop_global) > 1e-6:           # só grava override se difere do global
-                entry["proporcao_baixa"] = round(pb, 4)
-            else:
-                entry.pop("proporcao_baixa", None)
-            novo_colegios[c] = entry
-        config["colegios"] = novo_colegios
-        if not salvar_parametros(config):
-            st.stop()
-        # Só o cache de CONFIG — não o de dados (TTL 1 h). O clear()
-        # global levava junto a leitura do Supabase, e cada "Salvar"
-        # custava uma carga fria (~10 s) na tela seguinte.
-        carregar_config.clear()
-        st.success(f"✅ Taxa base de {len(df_colegios_editado)} colégio(s) salva!")
-
-    # --- Matriz crescimento por (colégio × grupo/série) ---
-    st.markdown("#### Crescimento por Colégio × Grupo (série)")
-    st.markdown(
-        "**Pré-preenchido com o crescimento medido dos dados** (coluna _Observado_ = alta-sobre-alta "
-        "por colégio×segmento). Edite só onde você **sabe de algo que os dados não sabem** (expansão de "
-        "turma futura, colégio novo). Célula deixada **igual ao observado fica viva** — re-mede sozinha "
-        "a cada temporada; só o que você **mudar** vira override fixo. Vazio no Observado = amostra pequena."
-    )
-    from etl import demanda as _dem
-    obs_cresc = _dem.calcular_crescimento_observado(dados_colegios, config)
-    mapa_seg_cfg = _dem.mapa_grupo_segmento(config)
-
-    def _obs_cel(colegio, grupo):
-        o = obs_cresc.get(colegio, {})
-        v = (o.get("segmentos") or {}).get(mapa_seg_cfg.get(grupo, "Outros"))
-        return v if v is not None else o.get("__geral__")
-
-    celulas = (
-        det_cfg[det_cfg["GrupoC"].ne("") & det_cfg["GrupoC"].ne("nan")]
-        .groupby(["Colegio", "GrupoC"]).size().reset_index(name="n_skus")
-        .sort_values(["Colegio", "GrupoC"])
-    )
-    linhas_matriz = []
-    for _, r in celulas.iterrows():
-        col_, gr_ = r["Colegio"], r["GrupoC"]
-        manual = (cfg_colegios.get(col_, {}).get("crescimento_grupos") or {}).get(gr_)
-        ob = _obs_cel(col_, gr_)
-        base = ob if ob is not None else 1.0
-        linhas_matriz.append({
-            "colegio": col_, "grupo": gr_, "segmento": mapa_seg_cfg.get(gr_, "Outros"),
-            "skus": int(r["n_skus"]),
-            "observado": round(ob, 3) if ob is not None else None,
-            "taxa_crescimento": round(float(manual) if manual is not None else base, 3),
-            "origem": "manual" if manual is not None else ("medido" if ob is not None else "padrão"),
-        })
-    df_matriz = pd.DataFrame(linhas_matriz)
-
-    # st.form: o data_editor só reprocessa a página no submit,
-    # não a cada célula editada.
-    with st.form("form_matriz_grupo", border=False):
-        df_matriz_editado = st.data_editor(
-            df_matriz,
-            column_config={
-                "colegio": st.column_config.TextColumn("Colégio", disabled=True),
-                "grupo": st.column_config.TextColumn("Grupo", disabled=True),
-                "segmento": st.column_config.TextColumn("Segmento", disabled=True),
-                "skus": st.column_config.NumberColumn("SKUs", disabled=True),
-                "observado": st.column_config.NumberColumn("Observado", disabled=True, format="%.3f",
-                                                           help="Crescimento medido dos dados (colégio×segmento). Vazio = amostra insuficiente"),
-                "taxa_crescimento": st.column_config.NumberColumn("Crescimento aplicado", min_value=0.0, step=0.05),
-                "origem": st.column_config.TextColumn("Origem", disabled=True,
-                                                      help="manual = você definiu · medido = dos dados · padrão = fallback global"),
-            },
-            **padrao_tabela(EDITOR, len(df_matriz)),
-            key="editor_matriz_grupo",
-        )
-
-        _salvar_matriz = st.form_submit_button("💾 Salvar Crescimento por Grupo", key="btn_salvar_matriz", type="primary")
-
-    if _salvar_matriz:
-        novo_colegios = dict(config.get("colegios") or {})
-        # Grava override SÓ onde o usuário mudou vs o observado (senão fica vivo)
-        grupos_por_col = {}
-        for _, row in df_matriz_editado.iterrows():
-            col_, gr_ = row["colegio"], row["grupo"]
-            taxa = float(row["taxa_crescimento"])
-            ob = _obs_cel(col_, gr_)
-            base = ob if ob is not None else 1.0
-            if abs(taxa - base) > 1e-6:
-                grupos_por_col.setdefault(col_, {})[gr_] = round(taxa, 4)
-        for c in colegios_disponiveis:
-            entry = dict(novo_colegios.get(c, {}))
-            if c in grupos_por_col:
-                entry["crescimento_grupos"] = grupos_por_col[c]
-            else:
-                entry.pop("crescimento_grupos", None)
-            novo_colegios[c] = entry
-        config["colegios"] = novo_colegios
-        if not salvar_parametros(config):
-            st.stop()
-        # Só o cache de CONFIG — não o de dados (TTL 1 h). O clear()
-        # global levava junto a leitura do Supabase, e cada "Salvar"
-        # custava uma carga fria (~10 s) na tela seguinte.
-        carregar_config.clear()
-        n = sum(len(v) for v in grupos_por_col.values())
-        st.success(f"✅ {n} override(s) manual(is) salvos — o resto segue o observado (vivo).")
-
-    # --- Agrupamento de Grupos em Segmentos (nível intermediário) ---
-    st.markdown("---")
-    st.subheader("Agrupamento de Grupos em Segmentos")
+    st.divider()
+    st.markdown("**Segmentos (agrupamento das séries)**")
     st.markdown(
         "O **crescimento observado** é medido por _colégio × segmento_. O segmento é um nível "
         "intermediário que junta as siglas de Grupo (EF1·EF2·EFD → Fundamental, EDF → Ed. Física…) "
@@ -1088,114 +1275,25 @@ with tab1:
         carregar_config.clear()
         st.success(f"✅ Agrupamento salvo — {len(set(novo_seg.values()))} segmento(s).")
 
-# =================================================================
-# ABA 2 — EXCEÇÕES DE SKU
-# =================================================================
 
-with tab2:
-    config = carregar_config()
+def _secao_colegios():
+    _visoes = ["Regras gerais", "Por colégio", "Por série", "Nomes e segmentos"]
+    visao = _seletor(st.pills, "Colégios e Crescimento", _visoes, "cfg_colegios_visao")
+    if visao == _visoes[1]:
+        _bloco_por_colegio()
+    elif visao == _visoes[2]:
+        _bloco_por_serie()
+    elif visao == _visoes[3]:
+        _bloco_nomes_segmentos()
+    else:
+        _bloco_regras_crescimento()
 
-    st.subheader("Gerenciar Exceções de SKU")
-    st.markdown(
-        "Sobrescreve regras globais para produtos específicos. Colunas: "
-        "**`vm_override`** (força o VM de prateleira na Reposição de Loja), "
-        "**`correcao_manual`** (ajuste do SKU — unidades no PCP, fator no VM dinâmico) e "
-        "**`proporcao_baixa`** (cauda da baixa vs alta do SKU — para gigantes de cauda curta como o NEV009; "
-        "vazio = usa o global/colégio)."
-    )
-
-    col_down, col_up = st.columns(2)
-
-    # Download template
-    with col_down:
-        st.markdown("#### 📥 Baixar Template")
-
-        # Preparar dados atuais
-        excecoes = config.get("excecoes_sku") or {}
-        df_excecoes = pd.DataFrame([
-            {
-                "sku": sku,
-                "vm_override": params.get("vm", "") if isinstance(params, dict) else "",
-                "correcao_manual": params.get("correcao", "") if isinstance(params, dict) else "",
-                "proporcao_baixa": params.get("proporcao_baixa", "") if isinstance(params, dict) else "",
-            }
-            for sku, params in excecoes.items()
-        ])
-
-        if len(df_excecoes) == 0:
-            df_excecoes = pd.DataFrame({
-                "sku": ["EXEMPLO-P", "EXEMPLO-M"],
-                "vm_override": [5, 8],
-                "correcao_manual": ["", 10],
-                "proporcao_baixa": [0.15, ""],
-            })
-            csv_data = df_excecoes.to_csv(index=False)
-            st.info("📝 Template padrão (nenhuma exceção cadastrada ainda)")
-        else:
-            csv_data = df_excecoes.to_csv(index=False)
-            st.info(f"📝 {len(df_excecoes)} exceção(ões) cadastrada(s)")
-
-        st.download_button(
-            label="⬇️ Baixar CSV",
-            data=csv_data,
-            file_name="excecoes_sku.csv",
-            mime="text/csv",
-            type="primary",
-        )
-
-    # Upload de exceções
-    with col_up:
-        st.markdown("#### 📤 Fazer Upload")
-
-        uploaded_file = st.file_uploader("Selecione arquivo CSV", type=["csv"])
-
-        if uploaded_file is not None:
-            try:
-                df_novo = pd.read_csv(uploaded_file)
-
-                # Validar colunas
-                colunas_obrigatorias = ["sku"]
-                if not all(col in df_novo.columns for col in colunas_obrigatorias):
-                    st.error(f"❌ Colunas obrigatórias: {', '.join(colunas_obrigatorias)}")
-                else:
-                    exibir(df_novo, MEMORIA)
-
-                    if st.button("✅ Aplicar Exceções", key="btn_aplicar_sku", type="primary"):
-                        # Converter para dict
-                        excecoes_novo = {}
-                        for _, row in df_novo.iterrows():
-                            sku = str(row["sku"]).strip()
-                            params = {}
-
-                            if pd.notna(row.get("vm_override")):
-                                params["vm"] = int(row["vm_override"])
-                            if pd.notna(row.get("correcao_manual")):
-                                params["correcao"] = int(row["correcao_manual"])
-                            if pd.notna(row.get("proporcao_baixa")):
-                                params["proporcao_baixa"] = float(row["proporcao_baixa"])
-
-                            if params:
-                                excecoes_novo[sku] = params
-
-                        # Salvar
-                        config["excecoes_sku"] = excecoes_novo
-                        if not salvar_parametros(config):
-                            st.stop()
-                        # Só o cache de CONFIG — não o de dados (TTL 1 h). O clear()
-                        # global levava junto a leitura do Supabase, e cada "Salvar"
-                        # custava uma carga fria (~10 s) na tela seguinte.
-                        carregar_config.clear()
-                        st.success(f"✅ {len(excecoes_novo)} exceção(ões) aplicada(s)!")
-
-            except Exception as e:
-                st.error(f"❌ Erro ao processar CSV: {e}")
 
 # =================================================================
-# ABA — INTEGRAÇÕES (Bling = compra AK · Olist = venda Art Kamizetas)
+# SEÇÃO — INTEGRAÇÕES (Bling = compra AK · Olist = venda Art Kamizetas)
 # =================================================================
 
-with tab_int:
-    st.subheader("Integrações com os ERPs")
+def _secao_integracoes():
     st.caption(
         "Conecte o **Bling** (pedido de compra da AK Uniformes) e o **Olist** "
         "(pedido de venda da Art Kamizetas). As chaves ficam no Supabase, não no "
@@ -1350,7 +1448,7 @@ with tab_int:
         """
         Card de configuração + conexão OAuth de uma plataforma.
         `extras_form(cfg, conectado) -> dict` desenha campos extras DENTRO do
-        form de IDs de negócio e devolve o que gravar junto (salvar_config
+        form de dados do pedido e devolve o que gravar junto (salvar_config
         substitui o jsonb inteiro — tudo precisa sair no mesmo submit).
         """
         repo_int = obter_repositorio_integracoes()
@@ -1361,120 +1459,138 @@ with tab_int:
         # status vai no cabeçalho, para ler de relance sem precisar expandir.
         with st.expander(rotulo, expanded=not conectado):
 
-            # -- 1. Chaves do app OAuth --
-            with st.form(f"chaves_{plataforma}"):
-                st.markdown("**Credenciais do aplicativo (OAuth2)**")
-                cid = st.text_input("Client ID", value=integ.get("client_id") or "",
-                                    key=f"cid_{plataforma}")
-                tem_secret = bool(integ.get("client_secret"))
-                csecret = st.text_input(
-                    "Client Secret", value="", type="password",
-                    placeholder="••• salvo (deixe em branco p/ manter)" if tem_secret else "",
-                    key=f"csec_{plataforma}")
-                redir = st.text_input(
-                    "URL de redirecionamento", value=integ.get("redirect_uri") or "",
-                    help="Registre esta MESMA URL no portal da plataforma. "
-                         "Deve ser a URL pública do app + /configuracoes.",
-                    key=f"redir_{plataforma}")
-                if st.form_submit_button("💾 Salvar credenciais"):
-                    repo_int.salvar_chaves(plataforma, cid, csecret, redir,
-                                           usuario)
-                    st.success("Credenciais salvas.")
-                    st.rerun()
-
-            if integ.get("redirect_uri"):
-                st.caption("Redirect a registrar no portal:")
-                st.code(integ["redirect_uri"], language=None)
-
-            # -- 2. Conexão --
-            # Ter refresh_token != estar utilizável: o refresh do Olist (Keycloak)
-            # morre com a sessão SSO e só descobrimos na hora de renovar. Access
-            # vencido há muito tempo = aviso, não o "✅ Conectado" que mentia.
-            st.markdown("**Conexão**")
+            # Ordem dos blocos: no SETUP (sem conexão) as credenciais vêm primeiro
+            # — sem elas não há como conectar. Depois de conectado elas quase
+            # nunca mudam: vão para o fim, atrás de um interruptor, e o que se
+            # consulta no dia a dia (conexão, dados do pedido) sobe.
             if conectado:
-                validade, exp = "?", None
-                if integ.get("token_expira_em"):
-                    exp = pd.Timestamp(str(integ["token_expira_em"]))
-                    if exp.tzinfo is None:
-                        exp = exp.tz_localize("UTC")
-                    validade = exp.tz_convert(None).strftime("%d/%m/%Y %H:%M")
-                quem = integ.get("conectado_por", "?")
-                if exp is not None and not oauth.token_valido(integ):
-                    st.warning(
-                        f"⚠️ Autorizado por {quem}, mas o token venceu em "
-                        f"{validade} (UTC). A renovação é automática — se a "
-                        "sessão na plataforma tiver expirado, ela falha e é "
-                        "preciso reconectar. Use **Testar conexão** antes de emitir.")
-                else:
-                    st.success(f"✅ Conectado por {quem} · token expira {validade} (UTC)")
+                area_conexao, area_dados, area_app = (
+                    st.container(), st.container(), st.container())
             else:
-                st.info("❌ Não conectado.")
+                area_app, area_conexao, area_dados = (
+                    st.container(), st.container(), st.container())
 
-            cc1, cc2 = st.columns(2)
-            with cc1:
-                pronto_p_conectar = bool(integ.get("client_id") and integ.get("redirect_uri"))
-                if pronto_p_conectar:
-                    state = oauth.gerar_state()
-                    repo_int.salvar_state_oauth(plataforma, state, usuario)
-                    url = oauth.montar_authorize_url(
-                        plataforma, integ["client_id"], integ["redirect_uri"], state)
-                    st.link_button("🔗 Conectar / Reconectar", url, use_container_width=True)
+            with area_app:
+                editar_app = (not conectado) or st.toggle(
+                    "Alterar as credenciais do aplicativo (OAuth)",
+                    key=f"ver_app_{plataforma}")
+                if editar_app:
+                    # -- Aplicativo OAuth (credenciais) --
+                    with st.form(f"chaves_{plataforma}"):
+                        st.markdown("**Credenciais do aplicativo (OAuth2)**")
+                        cid = st.text_input("Client ID", value=integ.get("client_id") or "",
+                                            key=f"cid_{plataforma}")
+                        tem_secret = bool(integ.get("client_secret"))
+                        csecret = st.text_input(
+                            "Client Secret", value="", type="password",
+                            placeholder="••• salvo (deixe em branco p/ manter)" if tem_secret else "",
+                            key=f"csec_{plataforma}")
+                        redir = st.text_input(
+                            "URL de redirecionamento", value=integ.get("redirect_uri") or "",
+                            help="Registre esta MESMA URL no portal da plataforma. "
+                                 "Deve ser a URL pública do app + /configuracoes.",
+                            key=f"redir_{plataforma}")
+                        if st.form_submit_button("💾 Salvar credenciais"):
+                            repo_int.salvar_chaves(plataforma, cid, csecret, redir,
+                                                   usuario)
+                            st.success("Credenciais salvas.")
+                            st.rerun()
+
+                    if integ.get("redirect_uri"):
+                        st.caption("Redirect a registrar no portal:")
+                        st.code(integ["redirect_uri"], language=None)
+
+            with area_conexao:
+                # -- Conexão --
+                # Ter refresh_token != estar utilizável: o refresh do Olist (Keycloak)
+                # morre com a sessão SSO e só descobrimos na hora de renovar. Access
+                # vencido há muito tempo = aviso, não o "✅ Conectado" que mentia.
+                st.markdown("**Conexão**")
+                if conectado:
+                    validade, exp = "?", None
+                    if integ.get("token_expira_em"):
+                        exp = pd.Timestamp(str(integ["token_expira_em"]))
+                        if exp.tzinfo is None:
+                            exp = exp.tz_localize("UTC")
+                        validade = exp.tz_convert(None).strftime("%d/%m/%Y %H:%M")
+                    quem = integ.get("conectado_por", "?")
+                    if exp is not None and not oauth.token_valido(integ):
+                        st.warning(
+                            f"⚠️ Autorizado por {quem}, mas o token venceu em "
+                            f"{validade} (UTC). A renovação é automática — se a "
+                            "sessão na plataforma tiver expirado, ela falha e é "
+                            "preciso reconectar. Use **Testar conexão** antes de emitir.")
+                    else:
+                        st.success(f"✅ Conectado por {quem} · token expira {validade} (UTC)")
                 else:
-                    st.button("🔗 Conectar", disabled=True, use_container_width=True,
-                              help="Salve Client ID e URL de redirecionamento primeiro.",
-                              key=f"conn_disabled_{plataforma}")
-            with cc2:
-                if st.button("🧪 Testar conexão", key=f"testar_{plataforma}",
-                             disabled=not conectado, use_container_width=True):
-                    try:
-                        token = oauth.obter_access_token(plataforma, repo_int)
-                        testar = (cliente_bling.testar_conexao if plataforma == "bling"
-                                  else cliente_olist.testar_conexao)
-                        ok, msg = testar(token)
-                        repo_int.registrar_evento(plataforma, "testar_conexao", ok,
-                                                  detalhe={"msg": msg}, usuario=usuario)
-                        st.success(msg) if ok else st.error(msg)
-                    except Exception as exc:
-                        st.error(f"Falha: {exc}")
+                    st.info("❌ Não conectado.")
 
-            # -- 3. IDs de negócio --
-            with st.form(f"negocio_{plataforma}"):
-                st.markdown("**IDs de negócio**")
-                cfg = integ.get("config") or {}
-                valores = {}
-                for chave, rotulo, ajuda in campos_negocio:
-                    valores[chave] = st.text_input(
-                        rotulo, value=str(cfg.get(chave, "") or ""),
-                        help=ajuda, key=f"neg_{plataforma}_{chave}")
-                extras = extras_form(cfg, conectado) if extras_form else {}
-                if st.form_submit_button("💾 Salvar IDs de negócio"):
-                    novo = {k: v.strip() for k, v in valores.items() if v.strip()}
-                    # extras já vêm tipados (int/str) — só descarta string vazia
-                    novo.update({k: v for k, v in extras.items()
-                                 if not (isinstance(v, str) and not v)})
-                    if plataforma == "olist" and "situacao" not in novo:
-                        novo["situacao"] = 0
-                    repo_int.salvar_config(plataforma, novo, usuario)
-                    st.success("IDs de negócio salvos.")
-                    st.rerun()
+                cc1, cc2 = st.columns(2)
+                with cc1:
+                    pronto_p_conectar = bool(integ.get("client_id") and integ.get("redirect_uri"))
+                    if pronto_p_conectar:
+                        state = oauth.gerar_state()
+                        repo_int.salvar_state_oauth(plataforma, state, usuario)
+                        url = oauth.montar_authorize_url(
+                            plataforma, integ["client_id"], integ["redirect_uri"], state)
+                        st.link_button("🔗 Conectar / Reconectar", url, width="stretch")
+                    else:
+                        st.button("🔗 Conectar", disabled=True, width="stretch",
+                                  help="Salve Client ID e URL de redirecionamento primeiro.",
+                                  key=f"conn_disabled_{plataforma}")
+                with cc2:
+                    if st.button("🧪 Testar conexão", key=f"testar_{plataforma}",
+                                 disabled=not conectado, width="stretch"):
+                        try:
+                            token = oauth.obter_access_token(plataforma, repo_int)
+                            testar = (cliente_bling.testar_conexao if plataforma == "bling"
+                                      else cliente_olist.testar_conexao)
+                            ok, msg = testar(token)
+                            repo_int.registrar_evento(plataforma, "testar_conexao", ok,
+                                                      detalhe={"msg": msg}, usuario=usuario)
+                            st.success(msg) if ok else st.error(msg)
+                        except Exception as exc:
+                            st.error(f"Falha: {exc}")
 
-            # -- 4. Só Bling: validar contrato do POST via GET (sem escrita) --
-            if plataforma == "bling" and conectado:
-                if st.button("📋 Validar contrato (GET pedido exemplo)",
-                             key="contrato_bling"):
-                    try:
-                        token = oauth.obter_access_token("bling", repo_int)
-                        exemplo = cliente_bling.obter_pedido_compra_exemplo(token)
-                        repo_int.registrar_evento("bling", "contrato_get", True,
-                                                  usuario=usuario)
-                        if exemplo:
-                            st.caption("Shape real de um pedido de compra do Bling "
-                                       "(confira contra o payload de emissão):")
-                            st.json(exemplo, expanded=False)
-                        else:
-                            st.info("A conta ainda não tem pedidos de compra p/ inspecionar.")
-                    except Exception as exc:
-                        st.error(f"Falha: {exc}")
+            with area_dados:
+                # -- Dados do pedido (IDs de negócio + pagamento) --
+                with st.form(f"negocio_{plataforma}"):
+                    st.markdown("**Dados do pedido**")
+                    cfg = integ.get("config") or {}
+                    valores = {}
+                    for chave, rotulo, ajuda in campos_negocio:
+                        valores[chave] = st.text_input(
+                            rotulo, value=str(cfg.get(chave, "") or ""),
+                            help=ajuda, key=f"neg_{plataforma}_{chave}")
+                    extras = extras_form(cfg, conectado) if extras_form else {}
+                    if st.form_submit_button("💾 Salvar dados do pedido"):
+                        novo = {k: v.strip() for k, v in valores.items() if v.strip()}
+                        # extras já vêm tipados (int/str) — só descarta string vazia
+                        novo.update({k: v for k, v in extras.items()
+                                     if not (isinstance(v, str) and not v)})
+                        if plataforma == "olist" and "situacao" not in novo:
+                            novo["situacao"] = 0
+                        repo_int.salvar_config(plataforma, novo, usuario)
+                        st.success("Dados do pedido salvos.")
+                        st.rerun()
+
+                # -- Só Bling: validar contrato do POST via GET (sem escrita) --
+                if plataforma == "bling" and conectado:
+                    if st.button("📋 Validar contrato (GET pedido exemplo)",
+                                 key="contrato_bling"):
+                        try:
+                            token = oauth.obter_access_token("bling", repo_int)
+                            exemplo = cliente_bling.obter_pedido_compra_exemplo(token)
+                            repo_int.registrar_evento("bling", "contrato_get", True,
+                                                      usuario=usuario)
+                            if exemplo:
+                                st.caption("Shape real de um pedido de compra do Bling "
+                                           "(confira contra o payload de emissão):")
+                                st.json(exemplo, expanded=False)
+                            else:
+                                st.info("A conta ainda não tem pedidos de compra p/ inspecionar.")
+                        except Exception as exc:
+                            st.error(f"Falha: {exc}")
 
     if _integracoes_disponivel:
         _card_integracao(
@@ -1525,18 +1641,14 @@ with tab_int:
             else:
                 st.caption("Nenhum evento ainda.")
 
-# =================================================================
-# ABA 3 — INFORMAÇÕES DO SISTEMA
-# =================================================================
 
 # =================================================================
-# ABA USUÁRIOS — allowlist de acesso (app.usuario, DDL 006)
-# O login é Google; esta aba decide QUEM entra e O QUE vê. Não há
+# SEÇÃO — USUÁRIOS: allowlist de acesso (app.usuario, DDL 006)
+# O login é Google; esta seção decide QUEM entra e O QUE vê. Não há
 # auto-cadastro: o formulário de convite é a única porta de entrada.
 # =================================================================
 
-with tab_usr:
-    st.subheader("Usuários com acesso")
+def _secao_usuarios():
     st.caption("O login é feito com conta Google. Só os e-mails desta lista conseguem entrar.")
 
     _repo_usr = obter_repositorio_usuarios()
@@ -1657,59 +1769,134 @@ with tab_usr:
         st.info("Nenhum usuário cadastrado ainda.")
 
 
-with tab3:
-    st.subheader("Informações do Sistema")
+# =================================================================
+# SEÇÃO — SISTEMA (versões, mapeamento do Bling, cache, backup)
+# =================================================================
+
+def _secao_sistema():
+    config = carregar_config()
 
     col1, col2 = st.columns(2)
-
     with col1:
-        st.markdown("#### 📊 Versões")
-        st.write(f"**Python:** {__import__('sys').version.split()[0]}")
-        st.write(f"**Streamlit:** {st.__version__}")
-        st.write(f"**Pandas:** {pd.__version__}")
-
+        with st.container(border=True):
+            st.markdown("**Versões**")
+            st.write(f"Python {__import__('sys').version.split()[0]} · "
+                     f"Streamlit {st.__version__} · Pandas {pd.__version__}")
     with col2:
-        st.markdown("#### 📊 Fonte de Dados")
-        st.write("**Fonte:** Supabase — Bling ERP")
-        st.write("**Cache:** Recarregado a cada 1 hora (ou ao clicar 🔄)")
+        with st.container(border=True):
+            st.markdown("**Fonte de dados**")
+            st.write("Supabase — espelho do Bling ERP · releitura a cada 1 hora")
+            try:
+                # Última gravação de parâmetros no Supabase (app.parametros)
+                meta = obter_repositorio_parametros().ler_metadados()
+                if meta:
+                    _quando = pd.Timestamp(meta["atualizado_em"]).tz_convert("America/Fortaleza")
+                    _quem = meta.get("atualizado_por") or "—"
+                    st.caption(f"Parâmetros salvos pela última vez em {_quando:%d/%m/%Y %H:%M} por {_quem}")
+                else:
+                    st.caption("Parâmetros ainda não semeados (rode scripts/seed_parametros.py)")
+            except Exception:
+                st.caption("Supabase indisponível — usando os defaults do config.yaml")
 
-        try:
-            # Última gravação de parâmetros no Supabase (app.parametros)
-            meta = obter_repositorio_parametros().ler_metadados()
-            if meta:
-                _quando = pd.Timestamp(meta["atualizado_em"]).tz_convert("America/Fortaleza")
-                _quem = meta.get("atualizado_por") or "—"
-                st.write(f"**Parâmetros:** {_quando:%d/%m/%Y %H:%M} por {_quem}")
-            else:
-                st.write("**Parâmetros:** ainda não semeados (rode scripts/seed_parametros.py)")
-        except Exception:
-            st.write("**Parâmetros:** Supabase indisponível — usando defaults do config.yaml")
-
-    # Veio da Home: os IDs internos servem a quem configura, não a quem vende.
-    with st.expander("🏬 Depósitos cadastrados (IDs do Bling)"):
-        exibir(carregar_dados()["depositos"][["ID", "descricao"]], MEMORIA, {
-            "ID": col_texto("ID"),
-            "descricao": col_texto("Nome"),
-        })
-
-    st.markdown("---")
-
-    col3, col4 = st.columns(2)
-
-    with col3:
-        if st.button("🔄 Forçar Recarga de Dados"):
-            # Clear GLOBAL de propósito: é a intenção explícita do botão
-            # (relê o espelho do Bling, não só os parâmetros).
-            st.cache_data.clear()
-            st.success("✅ Cache limpo. A próxima tela relê o Supabase (~10 s).")
-
-    with col4:
-        # Backup do config EFETIVO (yaml defaults + parâmetros do Supabase
-        # mesclados) — o que os motores realmente usam agora.
-        config_efetivo = carregar_config()
-        st.download_button(
-            label="💾 Backup config efetivo",
-            data=yaml.safe_dump(config_efetivo, allow_unicode=True, sort_keys=False),
-            file_name=f"config_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.yaml",
-            mime="text/plain",
+    # Veio do topo do antigo form de parâmetros: são códigos do cadastro do
+    # Bling, não decisão de gestão — só mudam se o Bling mudar.
+    with st.container(border=True):
+        st.markdown("**Mapeamento do Bling**")
+        st.caption(
+            "Os códigos que ligam o dashboard ao cadastro do Bling. Só mexa aqui se o "
+            "cadastro do Bling mudar."
         )
+
+        with st.form("form_status_ids", border=False):
+            st.write("Situações de pedido contadas nos cartões do Daily")
+            c1, c2, c3 = st.columns(3)
+            status_aberto = c1.number_input(
+                "Em aberto (ID)", value=int(config["daily"]["status_ids"]["em_aberto"]), step=1)
+            status_andamento = c2.number_input(
+                "Em andamento (ID)", value=int(config["daily"]["status_ids"]["em_andamento"]), step=1)
+            status_pronto = c3.number_input(
+                "Pronto para retirada (ID)",
+                value=int(config["daily"]["status_ids"]["pronto_retirada"]), step=1)
+            salvar_status = st.form_submit_button("💾 Salvar situações")
+
+        if salvar_status:
+            config["daily"]["status_ids"]["em_aberto"] = status_aberto
+            config["daily"]["status_ids"]["em_andamento"] = status_andamento
+            config["daily"]["status_ids"]["pronto_retirada"] = status_pronto
+            _salvar_secao(config, "✅ Situações de pedido salvas.")
+
+        st.write("Lojas e depósitos em uso (definidos no `config.yaml`)")
+        _central = config["depositos"]["central"]
+        _df_locais = pd.DataFrame(
+            [{"nome": _central.get("nome", "Estoque Central"), "loja_id": "",
+              "deposito_id": str(_central["deposito_id"])}]
+            + [{"nome": l["nome"], "loja_id": str(l["loja_id"]),
+                "deposito_id": str(l["deposito_id"])}
+               for l in config["depositos"]["lojas"]]
+        )
+        exibir(_df_locais, MEMORIA, {
+            "nome": col_texto("Local"),
+            "loja_id": col_texto("ID da loja", ajuda="Aparece nos PEDIDOS (onde a venda aconteceu)."),
+            "deposito_id": col_texto("ID do depósito", ajuda="Aparece no ESTOQUE (onde a peça está)."),
+        })
+        st.caption(
+            f"Situações que contam como **venda efetiva**: {config['daily']['situacoes_venda']} · "
+            f"como **backlog** (consomem estoque sem faturar): "
+            f"{config['fabrica'].get('situacoes_backlog', [])}. Também vêm do `config.yaml`."
+        )
+
+        # Veio da Home: os IDs internos servem a quem configura, não a quem vende.
+        with st.expander("Todos os depósitos cadastrados no Bling"):
+            _dados, _ = carregar_com_feedback()
+            exibir(_dados["depositos"][["ID", "descricao"]], MEMORIA, {
+                "ID": col_texto("ID"),
+                "descricao": col_texto("Nome"),
+            })
+
+    with st.container(border=True):
+        st.markdown("**Manutenção**")
+        col3, col4 = st.columns(2)
+        with col3:
+            if st.button("🔄 Forçar recarga de dados"):
+                # Clear GLOBAL de propósito: é a intenção explícita do botão
+                # (relê o espelho do Bling, não só os parâmetros).
+                st.cache_data.clear()
+                st.success("✅ Cache limpo. A próxima tela relê o Supabase (~10 s).")
+        with col4:
+            # Backup do config EFETIVO (yaml defaults + parâmetros do Supabase
+            # mesclados) — o que os motores realmente usam agora.
+            st.download_button(
+                label="💾 Baixar backup do config efetivo",
+                data=yaml.safe_dump(config, allow_unicode=True, sort_keys=False),
+                file_name=f"config_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.yaml",
+                mime="text/plain",
+            )
+
+
+# =================================================================
+# INTERFACE PRINCIPAL — só a seção ativa é executada
+# =================================================================
+
+st.title("⚙️ Configurações")
+
+# Seção inicial: a da URL (?secao=) quando válida; senão a primeira. Depois
+# disso quem manda é o widget — o session_state é a fonte, a URL é o espelho.
+_secao = _seletor(
+    st.segmented_control, "Seção", list(SECOES), CHAVE_SECAO,
+    inicial=st.query_params.get("secao"), format_func=lambda s: SECOES[s],
+)
+if st.query_params.get("secao") != _secao:
+    st.query_params["secao"] = _secao
+
+st.caption("Cada bloco tem o seu **Salvar** — o que não foi salvo se perde ao trocar de seção.")
+
+_RENDER_SECAO = {
+    "comercial": _secao_comercial,
+    "reposicao": _secao_reposicao,
+    "producao": _secao_producao,
+    "colegios": _secao_colegios,
+    "integracoes": _secao_integracoes,
+    "usuarios": _secao_usuarios,
+    "sistema": _secao_sistema,
+}
+_RENDER_SECAO[_secao]()
