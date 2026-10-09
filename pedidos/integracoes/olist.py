@@ -36,6 +36,16 @@ _ESPERA_429_PADRAO_S = 3
 # dois documentos) e é injetado em montar_payload_venda(prazo_dias=...).
 PRAZO_PAGAMENTO_PADRAO = 30
 
+# `situacao` do pedido de venda (enum fixo da API v3). "Aberta" é o filtro que
+# libera alterar/cancelar um pedido já emitido.
+SITUACAO_ABERTA = 0
+SITUACAO_CANCELADA = 2
+ROTULOS_SITUACAO = {
+    8: "Dados incompletos", 0: "Aberta", 3: "Aprovada", 4: "Preparando envio",
+    1: "Faturada", 7: "Pronto para envio", 5: "Enviada", 6: "Entregue",
+    10: "Em devolução", 2: "Cancelada", 9: "Não entregue",
+}
+
 
 class OlistFalhou(Exception):
     """Resposta não-2xx da API do Olist (mensagem legível p/ a UI)."""
@@ -259,6 +269,27 @@ def mapear_por_familia(token: str, skus: list, http=None, dormir=None) -> tuple:
     return mapa, pendentes
 
 
+def montar_itens_venda(itens: pd.DataFrame, mapa_sku: dict) -> list:
+    """
+    Itens do pedido de venda (PURO), só quantidade_final > 0. É a MESMA lista
+    no POST da emissão e no PUT /pedidos/{id}/itens da alteração — uma função
+    só, para a venda alterada não sair num formato diferente da emitida.
+    """
+    itens_payload = []
+    for _, linha in itens[itens["quantidade_final"] > 0].iterrows():
+        sku = str(linha["sku"]).strip()
+        if sku not in mapa_sku:
+            raise ValueError(f"SKU {sku} não encontrado no catálogo do Olist — "
+                             "rode a pré-validação na tela do pedido.")
+        itens_payload.append({
+            "produto": {"id": int(mapa_sku[sku]), "tipo": "P"},
+            "quantidade": int(linha["quantidade_final"]),
+            "valorUnitario": float(linha["custo_unit"]),
+            "infoAdicional": sku,
+        })
+    return itens_payload
+
+
 def montar_payload_venda(pedido: dict, itens: pd.DataFrame, rodada: dict,
                          cfg: dict, mapa_sku: dict, bling_numero: str,
                          obs_completa: str, prazo_dias=None,
@@ -297,18 +328,7 @@ def montar_payload_venda(pedido: dict, itens: pd.DataFrame, rodada: dict,
     if len(validos) == 0:
         raise ValueError("Pedido sem itens com quantidade final > 0 — nada a emitir.")
 
-    itens_payload = []
-    for _, linha in validos.iterrows():
-        sku = str(linha["sku"]).strip()
-        if sku not in mapa_sku:
-            raise ValueError(f"SKU {sku} não encontrado no catálogo do Olist — "
-                             "rode a pré-validação na tela do pedido.")
-        itens_payload.append({
-            "produto": {"id": int(mapa_sku[sku]), "tipo": "P"},
-            "quantidade": int(linha["quantidade_final"]),
-            "valorUnitario": float(linha["custo_unit"]),
-            "infoAdicional": sku,
-        })
+    itens_payload = montar_itens_venda(validos, mapa_sku)
 
     chegada = pd.Timestamp(str(rodada["data_chegada"])).normalize()
     payload = {
@@ -359,3 +379,75 @@ def criar_pedido_venda(token: str, payload: dict, http=None, dormir=None) -> dic
     corpo = resp.json() or {}
     return {"olist_id": str(corpo.get("id", "")),
             "olist_numero": str(corpo.get("numeroPedido", ""))}
+
+
+# ---------------------------------------------------------------------------
+# Pós-emissão: ler, alterar e cancelar um pedido de venda que já existe
+# ---------------------------------------------------------------------------
+def normalizar_pedido(corpo: dict) -> dict:
+    """
+    GET /pedidos/{id} → o que o pós-emissão usa (PURO). Itens como
+    [{"id_produto", "sku", "quantidade", "valor"}] — o SKU vem do cadastro do
+    produto; `infoAdicional` (onde gravamos o SKU na emissão) é o reserva.
+    """
+    corpo = corpo or {}
+    try:
+        situacao = int(corpo.get("situacao"))
+    except (TypeError, ValueError):
+        situacao = None
+    itens = []
+    for item in corpo.get("itens") or []:
+        produto = item.get("produto") or {}
+        itens.append({
+            "id_produto": str(produto.get("id") or "").strip(),
+            "sku": str(produto.get("sku") or item.get("infoAdicional") or "").strip(),
+            "quantidade": float(item.get("quantidade") or 0),
+            "valor": float(item.get("valorUnitario") or 0),
+        })
+    return {
+        "id": str(corpo.get("id") or ""),
+        "numero": corpo.get("numeroPedido"),
+        "situacao": situacao,
+        "situacao_rotulo": ROTULOS_SITUACAO.get(situacao, f"situação {situacao}"),
+        "itens": itens,
+    }
+
+
+def obter_pedido(token: str, id_pedido, http=None, dormir=None) -> dict:
+    """GET /pedidos/{id}, normalizado. 404 = pedido excluído no Olist."""
+    http = http or _http_default()
+    resp = _requisitar(http, "get", f"{BASE}/pedidos/{id_pedido}", token, dormir=dormir)
+    if resp.status_code >= 300:
+        raise OlistFalhou(_erro_legivel(resp))
+    return normalizar_pedido(resp.json() or {})
+
+
+def atualizar_itens_pedido(token: str, id_pedido, itens_payload: list,
+                           http=None, dormir=None) -> None:
+    """
+    PUT /pedidos/{id}/itens — a grade enviada SUBSTITUI a atual, e o Olist
+    recalcula totais e o valor das parcelas existentes.
+    """
+    http = http or _http_default()
+    resp = _requisitar(http, "put", f"{BASE}/pedidos/{id_pedido}/itens", token,
+                       json={"itens": itens_payload}, dormir=dormir)
+    if resp.status_code >= 300:
+        raise OlistFalhou(_erro_legivel(resp))
+
+
+def atualizar_pedido(token: str, id_pedido, campos: dict, http=None, dormir=None) -> None:
+    """PUT /pedidos/{id} — cabeçalho (dataPrevista, observações). Itens têm endpoint próprio."""
+    http = http or _http_default()
+    resp = _requisitar(http, "put", f"{BASE}/pedidos/{id_pedido}", token,
+                       json=campos, dormir=dormir)
+    if resp.status_code >= 300:
+        raise OlistFalhou(_erro_legivel(resp))
+
+
+def cancelar_pedido(token: str, id_pedido, http=None, dormir=None) -> None:
+    """PUT /pedidos/{id}/situacao → Cancelada (2)."""
+    http = http or _http_default()
+    resp = _requisitar(http, "put", f"{BASE}/pedidos/{id_pedido}/situacao", token,
+                       json={"situacao": SITUACAO_CANCELADA}, dormir=dormir)
+    if resp.status_code >= 300:
+        raise OlistFalhou(_erro_legivel(resp))

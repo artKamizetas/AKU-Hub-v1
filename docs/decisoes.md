@@ -9,6 +9,109 @@ Records). Adicione no topo as mais recentes.
 
 ---
 
+## 2026-10 · Pedido emitido pode ser alterado e cancelado (sobrepondo Bling e Olist)
+
+**Contexto:** o pedido ficava só-leitura assim que a compra ia ao Bling. Ajuste
+pós-emissão era feito à mão nos dois ERPs e o dashboard não ficava sabendo.
+Spec: `docs/requisitos/alteracao-pos-emissao.md`.
+
+- **O filtro é o status nativo de cada ERP** (decisão da diretoria): compra "Em
+  aberto" no Bling e venda "Aberta" no Olist. Nada além disso bloqueia — nem um
+  status nosso, nem prazo. **Por quê:** quem sabe se o pedido já foi assumido é
+  o ERP de quem o executa; uma regra nossa por cima envelheceria.
+- **Estado novo (`EM_ALTERACAO`) em vez de voltar a `RASCUNHO`.** Rascunho
+  significa "não existe nos ERPs" e libera cancelar pedido e rodada; reusá-lo
+  quebraria essa garantia. O "estado emitido" de volta é **derivado** do
+  `olist_id`, não gravado — não tem como divergir do que os ERPs têm.
+- **Linha de base em tabela própria** (`app.pedido_compra_revisao`, DDL 008):
+  uma linha por versão que foi aos ERPs, com carimbo por ERP. Descartada a
+  alternativa de uma coluna `quantidade_emitida` no item: num envio parcial os
+  dois ERPs ficam em versões diferentes, e uma coluna só não representa isso.
+  A tabela ainda dá a auditoria (quem, quando, motivo) de graça.
+- **Olist primeiro, Bling depois.** É o lado da fábrica, onde a recusa importa:
+  se o Olist recusar, nada mudou em lugar nenhum. (Na emissão a ordem é a
+  inversa por necessidade — a venda referencia o nº da compra.)
+- **"Concluir" em vez de "Destravar".** PUT/PATCH são idempotentes: falha no
+  meio se resolve reexecutando, sem o risco de duplicata do POST. O lock da
+  emissão e o do pós-emissão têm helpers separados (`emitindo` ×
+  `enviando_alteracao`) porque a mensagem ao usuário é oposta.
+- **Edição manual no ERP não bloqueia: vira pergunta.** O envio compara cada
+  ERP com o que nós enviamos a ELE por último e, se difere, mostra e pede um
+  "sobrepor". Comparar com a linha de base acusaria como edição manual o nosso
+  próprio envio parcial.
+- **O PUT do Bling preserva o que não gerimos** (número, data, vencimento das
+  parcelas, frete, desconto). Ele substitui o pedido inteiro: sem devolver o
+  número o Bling renumera e o `numeroOrdemCompra` do Olist fica órfão.
+- **Cancelar muda a situação, não exclui**, e confere com um GET que o pedido
+  ficou de fato Cancelado no Bling — o id da situação é configuração, e um id
+  errado moveria o pedido para outra situação sem erro nenhum. "Já cancelado no
+  ERP" conta como feito: cancelar à mão lá e registrar aqui é o mesmo botão.
+- **Fora do escopo:** alteração/cancelamento em lote (é exceção, não rotina) e
+  refazer o grupo na mesma rodada depois de cancelar (a próxima rodada recompra).
+- **Validado contra os ERPs reais em 09/10/2026** (DDL 008 aplicado; um pedido
+  de teste percorreu emitir → alterar 3× → divergência → cancelar; resultado na
+  spec, §9). O PUT do Bling **não envia a situação**: a API devolve
+  `situacao.id = 0` na maioria das compras, então decide-se só pelo `valor`.
+
+## 2026-10 · Pedidos de Compra: tela do pedido enxuta, filtros e fila
+Revisar 69 pedidos um a um era lento por dois motivos: a tela repetia a mesma
+informação (status e colégio × categoria apareciam três vezes antes da tabela)
+e o que importa ficava longe — os totais e o **Salvar** nasciam no fim, depois
+de três blocos recolhíveis, fora da área visível.
+
+- **Ordem: escolher → conferir → agir → apoio.** O seletor é o título (status ·
+  colégio · categoria · peças · R$); os totais ficam numa linha ACIMA da tabela
+  e as ações coladas nela. Memória de cálculo, observações, preview e inclusão
+  manual vão abaixo. O título do Bling e o "criado em/por" viraram rodapé.
+- **Filtros de Colégio, Super Categoria e Status** valem para os dois modos
+  (um pedido × lote). O status mostra a contagem — é a fila de trabalho.
+- **Anterior/próximo** ao lado do seletor. Com filtro "Rascunho", marcar um
+  pedido como Pronto o tira da lista e a tela cai no seguinte.
+- **Trocar de pedido com edição pendente é desfeito e avisado** (mesma regra da
+  troca Lista × Grade) — o editor que sai da tela perde o que foi digitado.
+- **Uma ação primária por vez:** Salvar mostra quantas alterações há e fica
+  apagado sem pendência; "Marcar como Pronto" fica bloqueado COM pendência (ele
+  não grava a tabela, e a quantidade digitada se perdia sem aviso).
+- **Sucesso vira toast**, aviso e erro continuam fixos no topo.
+- **Uma seção titulada** (`Pedidos da rodada`): modo e filtros ficavam soltos
+  acima de um retângulo sem título, e não se via que eram a mesma seção. Agora é
+  uma caixa só, no molde de `Rodadas congeladas` / `Resumo da rodada`, sem caixa
+  dentro de caixa.
+- **Rótulo do seletor: `Colégio · Super categoria — peças · R$ · Status`.** Com
+  o status na frente (textos de tamanhos diferentes) o colégio começava cada
+  linha numa posição; a lista é ordenada por colégio e agora alinha à esquerda.
+- **Quantidade alterada em âmbar + negrito** (final ≠ sugerida, ao vivo). O
+  editor do Streamlit só aceita estilo em coluna **não editável**, então o sinal
+  muda de lugar: no rascunho, a célula Sugerida (Lista) ou o SKU da linha + uma
+  legenda com `sku 48→50` (Grade); com o pedido travado, a própria célula.
+  Coluna "Δ" recalculada foi **descartada**: trocar o dado da tabela reinicia o
+  editor e apaga a digitação (o dado entra na identidade do widget; a cor não —
+  conferido com três edições seguidas no navegador).
+- **Leituras uma vez por rerun de app** (`_memo`): digitar uma célula rerroda o
+  fragment, e cada tecla relia os itens do pedido; em pedido Pronto eram 8 idas
+  ao banco por interação (o corpo do expander de preview roda mesmo fechado —
+  agora fica atrás de um interruptor). A bolsa é zerada no topo da página, que
+  roda em todo `st.rerun()` de app — o mesmo que toda escrita dispara.
+
+## 2026-10 · Pedidos de Compra: leitura em lote e retry só de leitura
+A tela de Pedidos caiu com `502 Bad Gateway` do Supabase. A falha em si é
+transitória (o gateway na frente do banco tropeça de vez em quando), mas a tela
+estava exposta demais: `listar_pedidos` fazia **uma leitura por pedido** para
+somar os itens — 70 requests em série na rodada de out/2026 (69 pedidos), a
+cada clique, sem cache e sem retry. Bastava um falhar para derrubar a página, e
+a soma levava ~20 s.
+
+- **Leitura em lote** (`_selecionar_in`): os itens da rodada inteira vêm numa
+  leitura só, com apenas as colunas dos totais (sem o jsonb `memoria_sugerida`).
+  20 s → 1 s, mesmos números. Pagina com `.order("id")` porque o Supabase corta
+  em 1.000 linhas sem avisar (a rodada de outubro já tem 550 itens) e fatia a
+  lista de ids, que viaja na URL.
+- **Retry só na LEITURA** (`_ler_com_retry`, 3 tentativas): cobre 5xx do gateway
+  e queda de rede. Erro de verdade do banco (`23505`, `PGRST204`…) sobe na hora.
+  **Escrita não tem retry, de propósito:** um 502 pode chegar depois de o banco
+  já ter gravado — repetir duplicaria o insert ou faria o compare-and-swap
+  parecer corrida perdida. É a mesma lógica do "Destravar" da emissão.
+
 ## 2026-10 · Ícones da interface: Material Symbols no lugar de emoji
 Os ícones da interface (menu, títulos, botões, alertas, seletores) eram emoji. Emoji
 é desenhado pelo sistema operacional — o 📦 do Windows do operador não é o do

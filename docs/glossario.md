@@ -101,3 +101,8 @@ o número saiu), **placar** (compara poucos itens), **editor** (digita valores).
 | **Grupo** | Campo que mistura série/ensino (EF1, EFM, EME…) e linha de produto (DIA, ESP…). |
 | **`limpar_id()`** | Normaliza IDs para string antes de joins (evita `'123.0'`). |
 | **PostgREST** | API REST do Supabase usada pelo `loader.py`. |
+| **Estado emitido** | Pedido de compra que já existe nos ERPs: `COMPRA_EMITIDA` (só Bling) ou `EMITIDO` (Bling + Olist). |
+| **Revisão** | Uma versão do pedido que foi aos ERPs (`app.pedido_compra_revisao`): a emissão é a nº 1; cada alteração e o cancelamento geram outra. |
+| **Linha de base** | A última revisão concluída — "o que está nos ERPs agora". É a coluna **Emitida** da tela de alteração. |
+| **Envio parcial** | Um ERP recebeu a versão nova e o outro não. O pedido fica no lock até **Concluir**. |
+| **Em aberto (ERP)** | O status nativo que libera alterar/cancelar: compra "Em aberto" no Bling, venda "Aberta" no Olist. |

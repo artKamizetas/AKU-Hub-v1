@@ -149,6 +149,34 @@ def exibir(df, tipo: str, colunas: dict = None, *, max_linhas: int = None, **kwa
 
 
 # =================================================================
+# Cor de exceção — "alterado à mão"
+# =================================================================
+# Âmbar + negrito = decisão manual que diverge do cálculo (atenção, não erro:
+# vermelho segue reservado a ruptura/negativo). Texto escuro fixo para o
+# contraste não depender do tema; o negrito mantém o sinal legível para quem
+# não distingue a cor.
+ESTILO_ALTERADO = "background-color: #FFE7A0; color: #3D3000; font-weight: 700"
+
+
+def destacar(df: pd.DataFrame, celulas, estilo: str = ESTILO_ALTERADO) -> Styler:
+    """
+    Styler de `df` com `estilo` nas células indicadas — `celulas` é uma lista
+    de (posição da linha, nome da coluna). Célula vazia continua vazia.
+
+    Serve também ao `st.data_editor`, com um limite do Streamlit: o estilo só
+    aparece em coluna NÃO editável (as editáveis o ignoram por inteiro — cor e
+    negrito). Em compensação o Styler não entra na identidade do widget (só o
+    dado entra): dá para repintar a cada tecla sem o editor reiniciar e perder
+    o que foi digitado.
+    """
+    mapa = pd.DataFrame("", index=df.index, columns=df.columns)
+    for pos, coluna in celulas:
+        if coluna in mapa.columns and 0 <= int(pos) < len(mapa):
+            mapa.iat[int(pos), mapa.columns.get_loc(coluna)] = estilo
+    return df.style.apply(lambda _: mapa, axis=None).format(na_rep="")
+
+
+# =================================================================
 # Colunas prontas — o vocabulário único do app
 # =================================================================
 def col_texto(rotulo: str, *, ajuda: str = None, largura=None, fixa: bool = None):

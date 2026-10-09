@@ -245,6 +245,11 @@ estoque físico** — senão o físico sobe e o on-order ainda conta o mesmo vol
 - **Continua** a arquitetura da [Pedidos Fase 0](../decisoes.md) — `app.pedido_compra`
   (intenção) × `public.pedidos_compra` (realidade, espelho futuro) já foi desenhada
   justamente para este acerto de contas; o `ref:<uuid>` já existe.
+- **Depende** da [alteração pós-emissão](alteracao-pos-emissao.md): com ela, o
+  on-order de um pedido deixa de ser `quantidade_final`. Pedido `EM_ALTERACAO`
+  tem ali um rascunho não enviado — o que está comprometido é a **linha de
+  base** (`pedidos/revisoes.linha_de_base`). E pedido `CANCELADO` com
+  `bling_id` foi cancelado nos ERPs: sai do on-order.
 
 ---
 

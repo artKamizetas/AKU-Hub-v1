@@ -249,3 +249,77 @@ class TestRevendaECadastroSujo:
             cat.reset_index(), [{"sku_pai": "KID", "tamanho": "35", "quantidade": 2}])
         assert [i["sku"] for i in itens] == ["KID-35"] and faltantes == []
 
+
+
+# ---------------------------------------------------------------------------
+# Destaque do que foi alterado em relação à sugestão
+# ---------------------------------------------------------------------------
+def itens_com_sugestao(linhas):
+    """[(id, sku, tamanho, sugerida, final)] → itens no formato de listar_itens."""
+    df = pd.DataFrame(linhas, columns=["id", "sku", "tamanho",
+                                       "quantidade_sugerida", "quantidade_final"])
+    df["produto"] = "Camiseta Tamanho:" + df["tamanho"]
+    return df
+
+
+class TestAlteradoVsSugerido:
+    ITENS = [("a", "CAM-P", "P", 10, 10), ("b", "CAM-M", "M", 20, 24), ("c", "CAM-G", "G", 6, 0)]
+
+    def test_aplicar_edicoes_nao_mexe_no_original(self):
+        df = itens_com_sugestao(self.ITENS)
+        editado = grade.aplicar_edicoes(df, {0: {"quantidade_final": 12}})
+        assert editado.loc[0, "quantidade_final"] == 12
+        assert df.loc[0, "quantidade_final"] == 10
+
+    def test_sem_edicao_devolve_igual(self):
+        df = itens_com_sugestao(self.ITENS)
+        pd.testing.assert_frame_equal(grade.aplicar_edicoes(df, {}), df)
+        pd.testing.assert_frame_equal(grade.aplicar_edicoes(df, None), df)
+
+    def test_celula_apagada_vira_vazio_e_conta_zero(self):
+        df = itens_com_sugestao(self.ITENS)
+        editado = grade.aplicar_edicoes(df, {1: {"quantidade_final": None}})
+        assert pd.isna(editado.loc[1, "quantidade_final"])
+        assert grade._qtd(editado.loc[1, "quantidade_final"]) == 0
+
+    def test_edicao_fora_da_tabela_e_ignorada(self):
+        # estado de widget antigo (linha/coluna que não existe mais) não pode quebrar a tela
+        df = itens_com_sugestao(self.ITENS)
+        editado = grade.aplicar_edicoes(df, {9: {"quantidade_final": 1}, 0: {"sumiu": 1}})
+        pd.testing.assert_frame_equal(editado, df)
+
+    def test_aplicar_edicoes_na_grade_reproduz_o_que_o_editor_devolve(self):
+        itens = itens_com_sugestao(self.ITENS)
+        df_grade, celulas = grade.montar_grade(itens)
+        previsto = grade.aplicar_edicoes(df_grade, {0: {"P": 15, "G": None}})
+        por_item = grade.quantidades_por_item(previsto, celulas)
+        assert por_item == {"a": 15, "b": 24, "c": 0}
+
+    def test_divergencias_so_o_que_difere_da_sugestao(self):
+        itens = itens_com_sugestao(self.ITENS)
+        salvo = dict(zip(itens["id"], itens["quantidade_final"]))
+        assert grade.divergencias(itens, salvo) == [
+            {"id": "b", "sku": "CAM-M", "tamanho": "M", "sugerida": 20, "final": 24},
+            {"id": "c", "sku": "CAM-G", "tamanho": "G", "sugerida": 6, "final": 0},
+        ]
+
+    def test_voltar_ao_sugerido_tira_da_lista(self):
+        itens = itens_com_sugestao(self.ITENS)
+        assert grade.divergencias(itens, {"a": 10, "b": 20, "c": 6}) == []
+
+    def test_item_manual_sempre_diverge(self):
+        itens = itens_com_sugestao([("m", "CAM-GG", "GG", 0, 4)])
+        assert [d["id"] for d in grade.divergencias(itens, {"m": 4})] == ["m"]
+
+    def test_com_base_a_referencia_e_o_emitido_nao_a_sugestao(self):
+        """Alteração pós-emissão: importa o que difere do que está nos ERPs."""
+        itens = itens_com_sugestao(self.ITENS)          # b: sugerida 20, final 24
+        emitido = {"a": 10, "b": 24, "c": 0}
+        assert grade.divergencias(itens, emitido, base=emitido) == []   # nada mudou
+        assert grade.divergencias(itens, {"a": 10, "b": 30, "c": 0}, base=emitido) == [
+            {"id": "b", "sku": "CAM-M", "tamanho": "M", "sugerida": 24, "final": 30}]
+
+    def test_item_fora_da_base_foi_incluido_na_alteracao(self):
+        itens = itens_com_sugestao(self.ITENS)
+        difs = grade.divergencias(itens, {"a": 10, "b": 24, "c": 2}, base={"a": 10, "b": 24})
+        assert [(d["id"], d["sugerida"], d["final"]) for d in difs] == [("c", 0, 2)]

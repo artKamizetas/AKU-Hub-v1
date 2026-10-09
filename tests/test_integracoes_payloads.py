@@ -35,6 +35,14 @@ class HttpFake:
         self.chamadas.append(("post", url, dict(json or {})))
         return self.respostas.pop(0)
 
+    def put(self, url, headers=None, json=None):
+        self.chamadas.append(("put", url, dict(json or {})))
+        return self.respostas.pop(0)
+
+    def patch(self, url, headers=None, json=None):
+        self.chamadas.append(("patch", url, dict(json or {})))
+        return self.respostas.pop(0)
+
 
 def itens_df(linhas=None):
     """Itens no shape de repo.listar_itens()."""
@@ -369,3 +377,170 @@ class TestHttpOlist:
             {"id": "733816562", "nome": "Pix", "ativa": True},
             {"id": "479365356", "nome": "Cheque", "ativa": False},
         ]
+
+
+# ---------------------------------------------------------------------------
+# Pós-emissão — ler, alterar e cancelar um pedido que já existe no ERP
+# ---------------------------------------------------------------------------
+def bling_pedido(valor=0, itens=None, parcelas=None, **extra):
+    """Corpo de GET /pedidos/compras/{id}."""
+    dados = {
+        "id": 555, "numero": 78, "data": "2026-08-01",
+        "situacao": {"id": 4401, "valor": valor},
+        "parcelas": parcelas if parcelas is not None else [
+            {"valor": 710.0, "dataVencimento": "2026-08-31",
+             "formaPagamento": {"id": 555}}],
+        "itens": itens if itens is not None else [
+            {"produto": {"id": 111, "codigo": "CAL-P"}, "codigoFornecedor": "CAL-P",
+             "quantidade": 10, "valor": 50.0},
+            {"produto": {"id": 333, "codigo": "CAL-G"}, "codigoFornecedor": "CAL-G",
+             "quantidade": 4, "valor": 52.5}],
+    }
+    dados.update(extra)
+    return dados
+
+
+class TestBlingPedidoExistente:
+    def test_normaliza_situacao_e_itens(self):
+        n = bling.normalizar_pedido_compra(bling_pedido(valor=3))
+        assert n["situacao_valor"] == 3 and n["situacao_rotulo"] == "Em andamento"
+        assert n["situacao_id"] == 4401 and n["numero"] == 78 and n["data"] == "2026-08-01"
+        assert n["itens"][0] == {"id_produto": "111", "sku": "CAL-P",
+                                 "quantidade": 10.0, "valor": 50.0}
+
+    def test_item_incluido_a_mao_no_bling_usa_o_codigo_do_produto(self):
+        n = bling.normalizar_pedido_compra(bling_pedido(itens=[
+            {"produto": {"id": 999, "codigo": "MEIA-U"}, "quantidade": 2, "valor": 9.0}]))
+        assert n["itens"][0]["sku"] == "MEIA-U"
+
+    def test_obter_pedido_compra(self):
+        http = HttpFake([RespostaFake(200, {"data": bling_pedido()})])
+        n = bling.obter_pedido_compra("tok", "555", http)
+        assert http.chamadas[0][:2] == ("get", f"{bling.BASE}/pedidos/compras/555")
+        assert n["situacao_valor"] == bling.SITUACAO_EM_ABERTO
+
+    def test_pedido_excluido_no_bling_levanta(self):
+        http = HttpFake([RespostaFake(404, {"error": {"description": "Não encontrado"}})])
+        with pytest.raises(bling.BlingFalhou, match="Não encontrado"):
+            bling.obter_pedido_compra("tok", "555", http)
+
+    def _novo(self):
+        """Payload de emissão refeito com as quantidades da alteração (10→6)."""
+        itens = itens_df([("CAL-P", "111", "Calça P", 6, 50.0),
+                          ("CAL-G", "333", "Calça G", 4, 52.5)])
+        return bling.montar_payload_compra(PEDIDO, itens, RODADA, CFG_BLING, OBS,
+                                           data_emissao="2026-10-09")
+
+    def test_alteracao_preserva_numero_e_data(self):
+        """Sem o número o Bling renumera o pedido — e o Olist aponta para ele."""
+        atual = bling.normalizar_pedido_compra(bling_pedido())
+        p = bling.montar_payload_alteracao_compra(self._novo(), atual)
+        assert p["numero"] == 78
+        assert p["data"] == "2026-08-01"                 # emissão original, não hoje
+        assert [i["quantidade"] for i in p["itens"]] == [6, 4]
+
+    def test_situacao_com_id_zerado_decide_pelo_valor_e_nao_vai_no_put(self):
+        """O Bling devolve situacao.id = 0 na maioria das compras: só o valor conta."""
+        atual = bling.normalizar_pedido_compra(
+            bling_pedido(situacao={"id": 0, "valor": 0}))
+        assert atual["situacao_valor"] == bling.SITUACAO_EM_ABERTO
+        assert atual["situacao_rotulo"] == "Em aberto"
+        assert "situacao" not in bling.montar_payload_alteracao_compra(self._novo(), atual)
+
+    def test_alteracao_mantem_o_vencimento_e_refaz_o_valor_da_parcela(self):
+        """Mudar quantidade não muda o acordo de pagamento: mesma data, valor novo."""
+        atual = bling.normalizar_pedido_compra(bling_pedido())
+        p = bling.montar_payload_alteracao_compra(self._novo(), atual)
+        assert p["parcelas"] == [{"valor": 510.0, "dataVencimento": "2026-08-31",
+                                  "formaPagamento": {"id": 555}}]
+
+    def test_alteracao_rateia_varias_parcelas_fechando_o_total(self):
+        atual = bling.normalizar_pedido_compra(bling_pedido(parcelas=[
+            {"valor": 236.67, "dataVencimento": "2026-08-31", "formaPagamento": {"id": 5}},
+            {"valor": 236.67, "dataVencimento": "2026-09-30", "formaPagamento": {"id": 5}},
+            {"valor": 236.66, "dataVencimento": "2026-10-30", "formaPagamento": {"id": 5}}]))
+        parcelas = bling.montar_payload_alteracao_compra(self._novo(), atual)["parcelas"]
+        assert [p["dataVencimento"] for p in parcelas] == [
+            "2026-08-31", "2026-09-30", "2026-10-30"]
+        assert round(sum(p["valor"] for p in parcelas), 2) == 510.0
+
+    def test_alteracao_devolve_o_que_nao_gerimos(self):
+        """O PUT substitui tudo: frete lançado à mão no Bling não pode sumir."""
+        atual = bling.normalizar_pedido_compra(bling_pedido(
+            transporte={"frete": 35.0, "transportador": "Zé"},
+            desconto={"valor": 0, "unidade": "REAL"}, ordemCompra="OC-9"))
+        p = bling.montar_payload_alteracao_compra(self._novo(), atual)
+        assert p["transporte"] == {"frete": 35.0, "transportador": "Zé"}
+        assert p["ordemCompra"] == "OC-9"
+        assert "desconto" not in p            # zerado: nada a preservar
+
+    def test_alterar_pedido_compra_e_put_no_id(self):
+        http = HttpFake([RespostaFake(200, {"data": {
+            "id": 555, "numero": 78, "alertas": ["aviso"]}})])
+        res = bling.alterar_pedido_compra("tok", "555", {"itens": []}, http)
+        assert http.chamadas[0][:2] == ("put", f"{bling.BASE}/pedidos/compras/555")
+        assert res == {"bling_numero": "78", "alertas": ["aviso"]}
+
+    def test_listar_situacoes_acha_o_modulo_de_compras(self):
+        http = HttpFake([
+            RespostaFake(200, {"data": [{"id": 1, "nome": "Vendas", "descricao": "Pedidos de Venda"},
+                                        {"id": 7, "nome": "Compras", "descricao": "Pedidos de Compra"}]}),
+            RespostaFake(200, {"data": [{"id": 4401, "nome": "Em aberto"},
+                                        {"id": 4403, "nome": "Cancelado"}]}),
+        ])
+        assert bling.listar_situacoes_compra("tok", http) == [
+            {"id": "4401", "nome": "Em aberto"}, {"id": "4403", "nome": "Cancelado"}]
+        assert http.chamadas[1][1] == f"{bling.BASE}/situacoes/modulos/7"
+
+    def test_cancelar_confere_que_ficou_cancelado(self):
+        http = HttpFake([RespostaFake(204), RespostaFake(200, {"data": bling_pedido(valor=2)})])
+        bling.cancelar_pedido_compra("tok", "555", "4403", http)
+        assert http.chamadas[0][:2] == (
+            "patch", f"{bling.BASE}/pedidos/compras/555/situacoes/4403")
+
+    def test_id_de_situacao_errado_nao_passa_calado(self):
+        """PATCH aceito, mas o pedido foi parar em 'Em andamento': é erro."""
+        http = HttpFake([RespostaFake(204), RespostaFake(200, {"data": bling_pedido(valor=3)})])
+        with pytest.raises(bling.BlingFalhou, match="Em andamento"):
+            bling.cancelar_pedido_compra("tok", "555", "4402", http)
+
+
+class TestOlistPedidoExistente:
+    CORPO = {"id": 900, "numeroPedido": 12, "situacao": 3, "itens": [
+        {"produto": {"id": 1001, "sku": "CAL-P"}, "quantidade": 10, "valorUnitario": 50.0},
+        {"produto": {"id": 1003}, "quantidade": 4, "valorUnitario": 52.5,
+         "infoAdicional": "CAL-G"}]}
+
+    def test_normaliza_situacao_e_itens(self):
+        n = olist.normalizar_pedido(self.CORPO)
+        assert n["situacao"] == 3 and n["situacao_rotulo"] == "Aprovada"
+        assert [i["sku"] for i in n["itens"]] == ["CAL-P", "CAL-G"]   # sku ou infoAdicional
+
+    def test_itens_da_alteracao_sao_os_mesmos_da_emissao(self):
+        """Uma função só para o POST e para o PUT de itens."""
+        itens = itens_df()
+        venda = olist.montar_payload_venda(PEDIDO, itens, RODADA, CFG_OLIST, MAPA, "78", OBS)
+        assert olist.montar_itens_venda(itens, MAPA) == venda["itens"]
+        assert len(venda["itens"]) == 2                    # o zerado fica de fora
+
+    def test_atualizar_itens_substitui_a_grade(self):
+        http = HttpFake([RespostaFake(204)])
+        olist.atualizar_itens_pedido("tok", "900", [{"quantidade": 6}], http)
+        assert http.chamadas == [
+            ("put", f"{olist.BASE}/pedidos/900/itens", {"itens": [{"quantidade": 6}]})]
+
+    def test_cancelar_muda_a_situacao_para_cancelada(self):
+        http = HttpFake([RespostaFake(204)])
+        olist.cancelar_pedido("tok", "900", http)
+        assert http.chamadas == [
+            ("put", f"{olist.BASE}/pedidos/900/situacao", {"situacao": 2})]
+
+    def test_erro_do_olist_sobe_legivel(self):
+        http = HttpFake([RespostaFake(400, {"mensagem": "Pedido não pode ser alterado"})])
+        with pytest.raises(olist.OlistFalhou, match="não pode ser alterado"):
+            olist.atualizar_pedido("tok", "900", {"observacoes": "x"}, http)
+
+    def test_429_no_put_e_reemitido(self):
+        http = HttpFake([RespostaFake(429, headers={"Retry-After": "1"}), RespostaFake(204)])
+        olist.atualizar_itens_pedido("tok", "900", [], http, dormir=lambda _s: None)
+        assert [c[0] for c in http.chamadas] == ["put", "put"]
