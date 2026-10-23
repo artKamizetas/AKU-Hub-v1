@@ -779,3 +779,136 @@ class TestDescartarAlteracao:
         with pytest.raises(ItemNaoRemovivel, match="já emitido"):
             repo.remover_itens_manuais(pid, [ids["Y-G"]], "diogo")
         assert repo.remover_itens_manuais(pid, [ids["Z-M"]], "diogo") == 1
+
+
+# ---------------------------------------------------------------------------
+# Reabrir pedido cancelado (CANCELADO → RASCUNHO, só pela guarda)
+# ---------------------------------------------------------------------------
+class TestReabrirCancelado:
+    def _cancelado(self, repo):
+        res = repo.congelar_rodada(snapshot_min(), grupos_min())
+        pid = repo.listar_pedidos(res["id"]).iloc[0]["id"]
+        repo.transicionar_pedido(pid, e.RASCUNHO, e.PRONTO, "tester")
+        repo.transicionar_pedido(pid, e.PRONTO, e.CANCELADO, "tester")
+        return res["id"], pid
+
+    def test_nunca_emitido_volta_a_rascunho_editavel(self):
+        repo = RepoFake()
+        _, pid = self._cancelado(repo)
+        assert repo.reabrir_cancelado(pid, "diogo") is True
+        ped = repo.obter_pedido(pid)
+        assert ped["status"] == e.RASCUNHO and ped["pronto_em"] is None
+        item = next(i for i in repo.tabelas[TAB_ITEM] if i["pedido_id"] == pid)
+        assert repo.atualizar_quantidades(
+            pid, [{"id": item["id"], "quantidade_final": 7}], "diogo") == 1
+
+    @pytest.mark.parametrize("ids", [{"bling_id": "555"}, {"olist_id": "900"}])
+    def test_cancelado_nos_erps_nao_reabre(self, ids):
+        repo = RepoFake()
+        _, pid = self._cancelado(repo)
+        next(p for p in repo.tabelas[TAB_PEDIDO] if p["id"] == pid).update(ids)
+        with pytest.raises(TransicaoInvalida, match="cancelado nos ERPs"):
+            repo.reabrir_cancelado(pid, "diogo")
+        assert repo.obter_pedido(pid)["status"] == e.CANCELADO
+
+    def test_rodada_cancelada_nao_reabre(self):
+        repo = RepoFake()
+        res = repo.congelar_rodada(snapshot_min(), grupos_min())
+        pid = repo.listar_pedidos(res["id"]).iloc[0]["id"]
+        repo.cancelar_rodada(res["id"], "tester")
+        with pytest.raises(TransicaoInvalida, match="rodada"):
+            repo.reabrir_cancelado(pid, "diogo")
+        assert repo.obter_pedido(pid)["status"] == e.CANCELADO
+
+    def test_rodada_cancelada_no_meio_desfaz_a_reabertura(self):
+        repo = RepoFake()
+        rodada_id, pid = self._cancelado(repo)
+        original = repo.transicionar_pedido
+
+        def cas_e_cancela_rodada(*a, **kw):
+            ok = original(*a, **kw)
+            next(r for r in repo.tabelas[TAB_RODADA] if r["id"] == rodada_id)["status"] = \
+                e.RODADA_CANCELADA
+            return ok
+        repo.transicionar_pedido = cas_e_cancela_rodada
+        with pytest.raises(TransicaoInvalida, match="continua cancelado"):
+            repo.reabrir_cancelado(pid, "diogo")
+        assert repo.obter_pedido(pid)["status"] == e.CANCELADO
+
+    def test_transicao_generica_nao_sai_de_cancelado(self):
+        """Nenhum chamador pula a guarda (botão de lote, outra tela...)."""
+        repo = RepoFake()
+        _, pid = self._cancelado(repo)
+        with pytest.raises(TransicaoInvalida, match="Reabrir"):
+            repo.transicionar_pedido(pid, e.CANCELADO, e.RASCUNHO, "diogo")
+        assert repo.obter_pedido(pid)["status"] == e.CANCELADO
+
+    def test_pedido_nao_cancelado_nao_usa_a_reabertura(self):
+        repo = RepoFake()
+        res = repo.congelar_rodada(snapshot_min(), grupos_min())
+        pid = repo.listar_pedidos(res["id"]).iloc[0]["id"]
+        with pytest.raises(TransicaoInvalida, match="Só pedido cancelado"):
+            repo.reabrir_cancelado(pid, "diogo")
+
+
+# ---------------------------------------------------------------------------
+# Alteração pronta (o PRONTO do pós-emissão)
+# ---------------------------------------------------------------------------
+class TestAlteracaoPronta:
+    def _em_alteracao(self, repo=None):
+        """Emitido, alteração aberta e A-PP mudado (10 → 6)."""
+        repo = repo or RepoFake()
+        pid = pedido_emitido(repo)
+        repo.abrir_alteracao(pid, "diogo")
+        item = next(i for i in repo.tabelas[TAB_ITEM] if i["sku"] == "A-PP")
+        repo.atualizar_quantidades(pid, [{"id": item["id"], "quantidade_final": 6}], "diogo")
+        return repo, pid
+
+    def test_sem_mudanca_nao_marca(self):
+        repo = RepoFake()
+        pid = pedido_emitido(repo)
+        repo.abrir_alteracao(pid, "diogo")
+        with pytest.raises(TransicaoInvalida, match="Nenhuma quantidade difere"):
+            repo.marcar_alteracao_pronta(pid, "diogo")
+        assert repo.obter_pedido(pid)["status"] == e.EM_ALTERACAO
+
+    def test_envio_parcial_marca_mesmo_sem_diferenca(self):
+        """Um ERP recebeu e o outro não: reenviar é o que alinha os dois."""
+        repo = RepoFake()
+        pid = pedido_emitido(repo)
+        repo.abrir_alteracao(pid, "diogo")
+        parcial = repo.registrar_revisao(pid, e.REVISAO_ALTERACAO, "diogo")
+        repo.confirmar_revisao(parcial["id"], "olist")
+        assert repo.marcar_alteracao_pronta(pid, "diogo") is True
+
+    def test_marcar_trava_os_itens_e_reabrir_destrava(self):
+        repo, pid = self._em_alteracao()
+        item = next(i for i in repo.tabelas[TAB_ITEM] if i["sku"] == "A-PP")
+        assert repo.marcar_alteracao_pronta(pid, "diogo") is True
+        assert repo.obter_pedido(pid)["status"] == e.ALTERACAO_PRONTA
+        with pytest.raises(PedidoNaoEditavel, match="reabra a alteração"):
+            repo.atualizar_quantidades(pid, [{"id": item["id"], "quantidade_final": 1}], "d")
+
+        assert repo.reabrir_alteracao(pid, "diogo") is True
+        assert repo.obter_pedido(pid)["status"] == e.EM_ALTERACAO
+        assert repo.atualizar_quantidades(
+            pid, [{"id": item["id"], "quantidade_final": 1}], "d") == 1
+
+    def test_descartar_exige_reabrir_antes(self):
+        repo, pid = self._em_alteracao()
+        repo.marcar_alteracao_pronta(pid, "diogo")
+        with pytest.raises(TransicaoInvalida):
+            repo.descartar_alteracao(pid, "diogo")
+        assert repo.obter_pedido(pid)["status"] == e.ALTERACAO_PRONTA
+
+    def test_sem_o_ddl_009_responde_migracao_pendente(self):
+        class SemEstado(RepoFake):
+            def _atualizar(self, tabela, filtros, valores):
+                if valores.get("status") == e.ALTERACAO_PRONTA:
+                    raise FakeAPIError("23514")
+                return super()._atualizar(tabela, filtros, valores)
+
+        repo, pid = self._em_alteracao(SemEstado())
+        with pytest.raises(MigracaoPendente, match="009"):
+            repo.marcar_alteracao_pronta(pid, "diogo")
+        assert repo.obter_pedido(pid)["status"] == e.EM_ALTERACAO

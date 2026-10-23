@@ -18,7 +18,7 @@ Padrão de consistência (mesmo espírito do CONGELANDO da Fase 0):
 
 DEPOIS da emissão (DDL 008):
 
-    enviar_alteracao(): EM_ALTERACAO → sobrepõe os itens no Olist e no Bling
+    enviar_alteracao(): ALTERACAO_PRONTA → sobrepõe os itens no Olist e no Bling
     cancelar_emitido(): pedido emitido → cancela nos dois ERPs → CANCELADO
 
   - O FILTRO é o status nativo de cada ERP: compra "Em aberto" no Bling e
@@ -226,6 +226,10 @@ def emitir_venda_olist(pedido_id: str, usuario: str, repo_ped, repo_int,
         repo_int.registrar_evento(
             "olist", "emitir_venda", True, pedido_id=pedido_id, usuario=usuario,
             detalhe={"olist_numero": res["olist_numero"], "titulo": pedido["titulo"]})
+        # Marcadores depois de a venda existir: falha aqui só avisa (a venda
+        # está criada; o lote "Marcadores Olist" reaplica).
+        res["marcadores_erro"] = _marcar_venda(
+            pedido, rodada, res["olist_id"], repo_int, usuario, http)
         return res
 
     except Exception as exc:
@@ -238,6 +242,52 @@ def emitir_venda_olist(pedido_id: str, usuario: str, repo_ped, repo_int,
         if isinstance(exc, EmissaoFalhou):
             raise
         raise EmissaoFalhou(str(exc)) from exc
+
+
+def _aplicar_marcadores(pedido: dict, rodada: dict, olist_id, repo_int, usuario: str,
+                        http=None, dormir=None, token=None) -> list:
+    """Aplica os marcadores e audita (sucesso e falha). Levanta em falha."""
+    nomes = olist.marcadores_venda(pedido, rodada)
+    try:
+        token = token or oauth.obter_access_token("olist", repo_int, http)
+        criados = olist.aplicar_marcadores(token, olist_id, nomes, http, dormir)
+    except Exception as exc:
+        repo_int.registrar_evento(
+            "olist", "marcadores", False, pedido_id=pedido.get("id"), usuario=usuario,
+            detalhe={"erro": str(exc)[:300], "marcadores": nomes})
+        raise
+    repo_int.registrar_evento(
+        "olist", "marcadores", True, pedido_id=pedido.get("id"), usuario=usuario,
+        detalhe={"marcadores": nomes, "criados": criados})
+    return criados
+
+
+def _marcar_venda(pedido: dict, rodada: dict, olist_id, repo_int, usuario: str,
+                  http=None, dormir=None, token=None):
+    """Melhor esforço: None = ok; senão a mensagem de erro. Nunca levanta."""
+    try:
+        _aplicar_marcadores(pedido, rodada, olist_id, repo_int, usuario, http, dormir, token)
+        return None
+    except Exception as exc:
+        return str(exc)
+
+
+def marcar_venda_olist(pedido_id: str, usuario: str, repo_ped, repo_int,
+                       http=None, dormir=None) -> list:
+    """
+    Garante os marcadores (colégio, super categoria, rodada) numa venda JÁ
+    emitida — retroativo para os pedidos de antes desta função e reaplicação
+    quando a marcação da emissão falhou. Não mexe em estado nem em itens; não
+    remove marcadores postos à mão. Devolve os criados agora.
+    """
+    pedido, _, rodada = _carregar_contexto(repo_ped, pedido_id)
+    olist_id = str(pedido.get("olist_id") or "").strip()
+    if not olist_id:
+        raise EmissaoFalhou("Pedido sem venda no Olist — emita a venda primeiro.")
+    try:
+        return _aplicar_marcadores(pedido, rodada, olist_id, repo_int, usuario, http, dormir)
+    except Exception as exc:
+        raise EmissaoFalhou(f"Marcadores no Olist falharam: {exc}") from exc
 
 
 def destravar(pedido_id: str, usuario: str, repo_ped, repo_int) -> bool:
@@ -267,10 +317,11 @@ def destravar(pedido_id: str, usuario: str, repo_ped, repo_int) -> bool:
     return ok
 
 
-def validar_pre_emissao_olist(itens, cfg: dict, mapa_sku: dict) -> list:
+def validar_pre_emissao_olist(itens, cfg: dict, mapa_sku: dict, pedido: dict = None) -> list:
     """
-    Checks puros antes de habilitar o botão de venda: config incompleta e
-    SKUs sem match. Lista vazia = pode emitir.
+    Checks puros antes de habilitar o botão de venda: config incompleta,
+    SKUs sem match e, no modo OC (com `pedido`), colégio sem OC ou SKU fora do
+    padrão. Lista vazia = pode emitir.
     """
     erros = []
     faltando_cfg = [c for c in ("contato_id", "vendedor_id", "deposito_id")
@@ -283,6 +334,8 @@ def validar_pre_emissao_olist(itens, cfg: dict, mapa_sku: dict) -> list:
     if faltantes:
         erros.append(f"{len(faltantes)} SKU(s) sem match no Olist: "
                      f"{', '.join(faltantes[:8])}" + ("…" if len(faltantes) > 8 else ""))
+    if pedido is not None:
+        erros.extend(olist.problemas_modo_oc(pedido, itens, cfg))
     return erros
 
 
@@ -371,6 +424,8 @@ def preview_payloads(pedido_id: str, repo_ped, repo_int, mapa_sku: dict = None) 
     except Exception as exc:
         out["venda"] = {"erro": str(exc)}
 
+    # Vão numa 2ª chamada, depois do POST da venda (o POST não aceita o campo).
+    out["marcadores"] = olist.marcadores_venda(pedido, rodada)
     return out
 
 
@@ -382,18 +437,22 @@ def _tem(valor) -> bool:
     return bool(texto) and texto.lower() not in ("nan", "none")
 
 
-def consultar_erps(pedido: dict, repo_int, http=None, dormir=None) -> dict:
+def consultar_erps(pedido: dict, repo_int, http=None, dormir=None,
+                   progresso=None) -> dict:
     """
     Lê o pedido como está AGORA em cada ERP: {"bling": {...}, "olist": {...}}
     (normalizados pelos clientes). None para o ERP onde o pedido não existe —
     quem só emitiu a compra não tem venda no Olist. Levanta se um ERP onde o
     pedido deveria existir não responde (ou o pedido foi excluído lá).
     """
+    avisar = progresso or (lambda _texto: None)
     erps = {"bling": None, "olist": None}
     if _tem(pedido.get("bling_id")):
+        avisar(f"Bling: lendo a compra nº {pedido.get('bling_numero') or '?'}…")
         token = oauth.obter_access_token("bling", repo_int, http)
         erps["bling"] = bling.obter_pedido_compra(token, pedido["bling_id"], http)
     if _tem(pedido.get("olist_id")):
+        avisar(f"Olist: lendo a venda nº {pedido.get('olist_numero') or '?'}…")
         token = oauth.obter_access_token("olist", repo_int, http)
         erps["olist"] = olist.obter_pedido(token, pedido["olist_id"], http, dormir)
     return erps
@@ -424,6 +483,31 @@ def avaliar_abertura(pedido: dict, erp_bling, erp_olist) -> list:
                 f"**{erp_olist.get('situacao_rotulo')}** — só pedido Aberta "
                 "pode ser alterado.")
     return impedimentos
+
+
+def abrir_alteracao_verificada(pedido_id: str, usuario: str, repo_ped, repo_int,
+                               http=None, dormir=None, progresso=None) -> list:
+    """
+    Estado emitido → EM_ALTERACAO, só se o pedido está em aberto nos ERPs onde
+    existe (o MESMO filtro do "Verificar nos ERPs" + "Alterar pedido" da tela
+    de um pedido — aqui numa chamada só, para o lote). Devolve os impedimentos
+    (lista vazia = abriu); não abre nada quando há impedimento, para o pedido
+    não ficar "em alteração" sem poder ser enviado.
+    """
+    pedido = repo_ped.obter_pedido(pedido_id)
+    if not estados.alteravel(pedido.get("status", "")):
+        raise EmissaoFalhou(
+            f"Pedido está {pedido.get('status') or 'inexistente'} — só pedido "
+            "emitido abre alteração.")
+    erps = consultar_erps(pedido, repo_int, http, dormir, progresso)
+    impedimentos = avaliar_abertura(pedido, erps["bling"], erps["olist"])
+    if impedimentos:
+        return impedimentos
+    if progresso:
+        progresso("Em aberto nos ERPs — abrindo a alteração…")
+    if not repo_ped.abrir_alteracao(pedido_id, usuario):
+        raise EmissaoFalhou("O estado do pedido mudou em outra sessão — recarregue.")
+    return []
 
 
 def _por_sku(itens_erp, id_para_sku: dict = None) -> dict:
@@ -488,7 +572,7 @@ def enviar_alteracao(pedido_id: str, motivo: str, usuario: str, repo_ped, repo_i
                      sobrepor: bool = False, http=None, dormir=None,
                      progresso=None) -> dict:
     """
-    EM_ALTERACAO → sobrepõe o pedido nos ERPs → volta ao estado emitido.
+    ALTERACAO_PRONTA → sobrepõe o pedido nos ERPs → volta ao estado emitido.
     Chamado sobre um pedido em ALTERACAO_ENVIANDO é a RETOMADA ("Concluir"):
     reenvia a mesma versão (os itens ficam travados no lock) — PUT é idempotente.
 
@@ -501,10 +585,11 @@ def enviar_alteracao(pedido_id: str, motivo: str, usuario: str, repo_ped, repo_i
     pedido, itens, rodada = _carregar_contexto(repo_ped, pedido_id)
     retomando = pedido.get("status") == estados.ALTERACAO_ENVIANDO
     if not retomando:
-        if not str(motivo or "").strip():
-            raise EmissaoFalhou("Informe o motivo da alteração.")
+        # Motivo é opcional (vai à revisão e aos eventos quando informado).
+        if pedido.get("status") == estados.EM_ALTERACAO:
+            raise EmissaoFalhou("Marque a alteração como pronta antes de enviar.")
         if not repo_ped.transicionar_pedido(
-                pedido_id, estados.EM_ALTERACAO, estados.ALTERACAO_ENVIANDO, usuario):
+                pedido_id, estados.ALTERACAO_PRONTA, estados.ALTERACAO_ENVIANDO, usuario):
             raise EmissaoFalhou(
                 "Outra sessão está enviando este pedido (ou o estado mudou) — recarregue.")
 
@@ -557,14 +642,19 @@ def enviar_alteracao(pedido_id: str, motivo: str, usuario: str, repo_ped, repo_i
         token_o, itens_o = None, []
         if erps["olist"] is not None:
             etapa = "olist"
+            cfg_o = (repo_int.ler("olist") or {}).get("config") or {}
             token_o = oauth.obter_access_token("olist", repo_int, http)
             skus = itens[itens["quantidade_final"] > 0]["sku"].tolist()
+            avisar(f"Olist: conferindo {len(skus)} SKU(s) no catálogo…")
             mapa_sku, faltantes = resolver_ids_olist(skus, repo_int, http, dormir)
             if faltantes:
                 raise EmissaoFalhou(
                     f"{len(faltantes)} SKU(s) sem match no catálogo do Olist: "
                     f"{', '.join(faltantes[:8])}" + ("…" if len(faltantes) > 8 else ""))
-            itens_o = olist.montar_itens_venda(itens, mapa_sku)
+            # Mesmo modo de preenchimento da emissão (SKU × OC) — a venda
+            # alterada não pode sair num formato diferente da emitida.
+            itens_o = olist.montar_itens_venda(itens, mapa_sku, cfg_o, pedido)
+            obs_o = olist.observacoes_venda(obs, pedido, cfg_o)
 
         if not revisao:
             revisao = repo_ped.registrar_revisao(
@@ -578,10 +668,15 @@ def enviar_alteracao(pedido_id: str, motivo: str, usuario: str, repo_ped, repo_i
             tocou = True
             olist.atualizar_pedido(token_o, pedido["olist_id"], {
                 "dataPrevista": str(pd.Timestamp(str(rodada["data_chegada"])).date()),
-                "observacoes": obs,
+                "observacoes": obs_o,
                 "observacoesInternas": str(pedido["titulo"]),
             }, http, dormir)
             repo_ped.confirmar_revisao(revisao["id"], "olist")
+            # Pedidos emitidos antes dos marcadores ganham os seus aqui
+            # (melhor esforço: a alteração não depende disso).
+            avisar("Olist: conferindo os marcadores da venda…")
+            _marcar_venda(pedido, rodada, pedido["olist_id"], repo_int, usuario,
+                          http, dormir, token_o)
             repo_int.registrar_evento(
                 "olist", "alterar_venda", True, pedido_id=pedido_id, usuario=usuario,
                 detalhe={"revisao": revisao.get("numero"), "motivo": revisao.get("motivo")})
@@ -607,11 +702,11 @@ def enviar_alteracao(pedido_id: str, motivo: str, usuario: str, repo_ped, repo_i
 
     except Exception as exc:
         if not tocou:
-            # Nenhum ERP foi tocado — volta a ser editável, sem revisão órfã
+            # Nenhum ERP foi tocado — volta à origem (pronta), sem revisão órfã
             if criada_agora:
                 _sem_falhar(lambda: repo_ped.remover_revisao(revisao["id"]))
             repo_ped.transicionar_pedido(
-                pedido_id, estados.ALTERACAO_ENVIANDO, estados.EM_ALTERACAO, usuario)
+                pedido_id, estados.ALTERACAO_ENVIANDO, estados.ALTERACAO_PRONTA, usuario)
         if isinstance(exc, DivergenciaNoErp):
             raise                                   # pergunta, não falha: sem evento
         repo_int.registrar_evento(

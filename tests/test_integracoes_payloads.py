@@ -32,7 +32,8 @@ class HttpFake:
         return self.respostas.pop(0)
 
     def post(self, url, headers=None, json=None):
-        self.chamadas.append(("post", url, dict(json or {})))
+        # marcadores do Olist vão como LISTA no corpo
+        self.chamadas.append(("post", url, json if isinstance(json, list) else dict(json or {})))
         return self.respostas.pop(0)
 
     def put(self, url, headers=None, json=None):
@@ -544,3 +545,120 @@ class TestOlistPedidoExistente:
         http = HttpFake([RespostaFake(429, headers={"Retry-After": "1"}), RespostaFake(204)])
         olist.atualizar_itens_pedido("tok", "900", [], http, dormir=lambda _s: None)
         assert [c[0] for c in http.chamadas] == ["put", "put"]
+
+
+# ---------------------------------------------------------------------------
+# Olist — modo de preenchimento por OC (número do modelo + tag nas observações)
+# ---------------------------------------------------------------------------
+PEDIDO_OC = {**PEDIDO, "colegio": "ADC"}
+CFG_OC = {**CFG_OLIST, "modo_itens": "oc", "oc_por_colegio": {"ADC": "0009"}}
+MAPA_OC = {"ADC012MCIEDF-GG": 2001, "ADC012MCIEDF-P": 2002}
+
+
+def itens_oc():
+    return itens_df([("ADC012MCIEDF-GG", "1", "Camisa GG", 3, 40.0),
+                     ("ADC012MCIEDF-P", "2", "Camisa P", 5, 40.0)])
+
+
+class TestModoOC:
+    @pytest.mark.parametrize("sku,esperado", [
+        ("ADC012MCIEDF-GG", "012"), ("NEV001BBBBER-GG", "001"),
+        ("CTE902CAIEQP-XGG", "902"), ("PAM02TEN-32", None),
+        ("00436-0041509960", None), ("CAL-P", None), ("", None)])
+    def test_numero_do_sku(self, sku, esperado):
+        assert olist.numero_do_sku(sku) == esperado
+
+    def test_tag(self):
+        assert olist.tag_oc("0009") == "tag{ OC:0009; PRORROGAVEL:S; }"
+
+    def test_modo_default_e_o_original(self):
+        assert olist.modo_itens({}) == olist.MODO_ITENS_SKU
+        assert olist.modo_itens({"modo_itens": "lixo"}) == olist.MODO_ITENS_SKU
+        assert olist.modo_itens(CFG_OC) == olist.MODO_ITENS_OC
+
+    def test_normalizar_ocs(self):
+        mapa, erros = olist.normalizar_ocs([
+            {"Colégio": " adc ", "OC": "9"},          # zero à esquerda + maiúscula
+            {"Colégio": "NEV", "OC": "0008"},
+            {"Colégio": None, "OC": None},            # linha vazia: ignorada
+            {"Colégio": "SES", "OC": "12345"},        # 5 dígitos
+            {"Colégio": "IBR", "OC": "OC4"},          # texto
+            {"Colégio": "NEV", "OC": "0001"},         # repetido
+            {"Colégio": "", "OC": "0002"},            # OC sem colégio
+        ])
+        assert mapa == {"ADC": "0009", "NEV": "0008"}
+        assert len(erros) == 4
+
+    def test_payload_no_modo_oc(self):
+        p = olist.montar_payload_venda(PEDIDO_OC, itens_oc(), RODADA, CFG_OC,
+                                       MAPA_OC, "PC-1", OBS)
+        assert [i["infoAdicional"] for i in p["itens"]] == ["012", "012"]
+        linhas = p["observacoes"].split("\n")
+        assert linhas[:-1] == OBS.split("\n")                 # resumo intacto
+        assert linhas[-1] == "tag{ OC:0009; PRORROGAVEL:S; }"  # tag na ÚLTIMA linha
+        assert p["observacoesInternas"] == PEDIDO["titulo"]
+
+    def test_modo_sku_explicito_e_identico_ao_de_hoje(self):
+        base = olist.montar_payload_venda(PEDIDO, itens_df(), RODADA, CFG_OLIST,
+                                          MAPA, "PC-1", OBS)
+        sku = olist.montar_payload_venda(
+            PEDIDO, itens_df(), RODADA, {**CFG_OLIST, "modo_itens": "sku",
+                                         "oc_por_colegio": {"NEV": "0008"}},
+            MAPA, "PC-1", OBS)
+        assert sku == base and base["observacoes"] == OBS
+        assert base["itens"][0]["infoAdicional"] == "CAL-P"
+
+    def test_colegio_sem_oc_bloqueia(self):
+        with pytest.raises(ValueError, match="sem OC"):
+            olist.montar_payload_venda({**PEDIDO, "colegio": "MAB"}, itens_oc(), RODADA,
+                                       CFG_OC, MAPA_OC, "PC-1", OBS)
+
+    def test_sku_fora_do_padrao_bloqueia(self):
+        with pytest.raises(ValueError, match="fora do padrão"):
+            olist.montar_itens_venda(itens_df(), MAPA, CFG_OC, {"colegio": "ADC"})
+
+    def test_problemas_ignoram_item_zerado_e_modo_sku(self):
+        itens = itens_df([("ADC012MCIEDF-GG", "1", "x", 3, 1.0),
+                          ("PAM02TEN-32", "2", "y", 0, 1.0)])   # zerado não conta
+        assert olist.problemas_modo_oc(PEDIDO_OC, itens, CFG_OC) == []
+        assert olist.problemas_modo_oc({}, itens_df(), CFG_OLIST) == []
+
+    def test_itens_da_alteracao_sao_os_mesmos_da_emissao_no_modo_oc(self):
+        venda = olist.montar_payload_venda(PEDIDO_OC, itens_oc(), RODADA, CFG_OC,
+                                           MAPA_OC, "78", OBS)
+        assert olist.montar_itens_venda(itens_oc(), MAPA_OC, CFG_OC, PEDIDO_OC) == venda["itens"]
+
+
+# ---------------------------------------------------------------------------
+# Olist — marcadores do pedido de venda
+# ---------------------------------------------------------------------------
+class TestMarcadores:
+    RODADA = {"mes_disparo": 10, "ano_disparo": 2026}
+
+    def test_nomes(self):
+        assert olist.marcadores_venda({"colegio": "adc", "super_categoria": "Body de bebê"},
+                                      self.RODADA) == ["AKU_ADC", "SCAT - Body de bebê", "R10/2026"]
+
+    def test_sem_colegio_e_sem_supercategoria_ficam_de_fora(self):
+        assert olist.marcadores_venda({"colegio": "(sem colégio)",
+                                       "super_categoria": "(sem supercategoria)"},
+                                      {"mes_disparo": 7, "ano_disparo": 2026}) == ["R07/2026"]
+
+    def test_aplicar_cria_so_o_que_falta_e_preserva_os_manuais(self):
+        http = HttpFake([RespostaFake(200, [{"descricao": "r10/2026"}, {"descricao": "Urgente"}]),
+                         RespostaFake(204)])
+        criados = olist.aplicar_marcadores("tok", 900, ["AKU_ADC", "R10/2026"], http)
+        assert criados == ["AKU_ADC"]
+        assert http.chamadas[1] == ("post", f"{olist.BASE}/pedidos/900/marcadores",
+                                    [{"descricao": "AKU_ADC"}])
+        assert not any(m == "put" for m, *_ in http.chamadas)   # PUT apagaria o "Urgente"
+
+    def test_aplicar_sem_faltantes_nao_posta(self):
+        http = HttpFake([RespostaFake(200, [{"descricao": "AKU_ADC"}])])
+        assert olist.aplicar_marcadores("tok", 900, ["AKU_ADC"], http) == []
+        assert len(http.chamadas) == 1
+
+    def test_erro_da_api_sobe_legivel(self):
+        http = HttpFake([RespostaFake(200, []), RespostaFake(400, {"message": "inválido"})])
+        with pytest.raises(olist.OlistFalhou, match="400"):
+            olist.aplicar_marcadores("tok", 900, ["X"], http)

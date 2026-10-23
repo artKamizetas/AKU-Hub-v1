@@ -30,14 +30,19 @@ pós-emissão era feito à mão nos dois ERPs — e o dashboard não ficava sabe
 
 ```
 estado emitido ──abrir alteração──▶ EM_ALTERACAO ──descartar──▶ estado emitido
-EM_ALTERACAO ──enviar──▶ ALTERACAO_ENVIANDO ──ok──▶ estado emitido
-                              └─ falha antes de tocar ERP ──▶ EM_ALTERACAO
+EM_ALTERACAO ──marcar pronta──▶ ALTERACAO_PRONTA ──reabrir──▶ EM_ALTERACAO
+ALTERACAO_PRONTA ──enviar──▶ ALTERACAO_ENVIANDO ──ok──▶ estado emitido
+                              ├─ falha antes de tocar ERP ──▶ ALTERACAO_PRONTA
+                              └─ voltar a editar ──▶ EM_ALTERACAO
 estado emitido ──cancelar──▶ CANCELAMENTO_ENVIANDO ──ok──▶ CANCELADO
                               └─ falha antes de tocar ERP ──▶ estado emitido
 ```
 
 - `EM_ALTERACAO` é repouso **editável**: `quantidade_final` é rascunho da
   alteração; os ERPs seguem na versão anterior.
+- `ALTERACAO_PRONTA` (out/2026, DDL 009) é o PRONTO do pós-emissão: sinaliza
+  que a digitação acabou e trava os itens. O envio só sai dele. Descartar exige
+  reabrir antes (o descarte reescreve itens).
 - Não se reusa `RASCUNHO`: ele significa "não existe nos ERPs" e libera cancelar
   pedido e rodada.
 - Falha **depois** de tocar um ERP: o pedido fica no lock (`*_ENVIANDO`) e a
@@ -67,7 +72,7 @@ travados desde a emissão, logo são o que foi emitido).
 
 ## 5. Envio da alteração (`emissor.enviar_alteracao`)
 
-1. Lock CAS `EM_ALTERACAO → ALTERACAO_ENVIANDO`.
+1. Lock CAS `ALTERACAO_PRONTA → ALTERACAO_ENVIANDO` (de EM_ALTERACAO: "marque a alteração como pronta").
 2. Lê os dois ERPs; aplica o filtro (`avaliar_abertura`).
 3. Compara cada ERP com o que nós enviamos a ele por último
    (`comparar_com_erp`); divergência sem `sobrepor=True` → `DivergenciaNoErp`.
@@ -119,7 +124,23 @@ aqui); qualquer outra situação → impedimento, nada é tocado.
      Δ pçs · Δ valor.
   3. *Edição manual no ERP:* aviso + tabela Enviado por nós · No Bling · No
      Olist · Vai ficar, com a célula divergente pintada, e a caixa "Sobrepor".
-- **Lote** não ganha alteração nem cancelamento pós-emissão (é exceção, não rotina).
+- **Em alteração:** Salvar · **Marcar alteração pronta** · Descartar; a conferência
+  emitida × nova aparece, sem o botão de enviar. **Alteração pronta:** Reabrir
+  alteração · motivo + **Enviar alteração**.
+- **Motivo da alteração é opcional** (out/2026, a pedido do Diogo): quando
+  informado vai para a revisão e para os eventos; o do cancelamento segue
+  obrigatório.
+- **Lote** (out/2026): **Abrir alteração (n)** leva os emitidos a Em alteração,
+  conferindo antes o status nativo de cada ERP (`emissor.abrir_alteracao_verificada`;
+  o que não está em aberto é pulado e não fica "em alteração" sem saída);
+  **Alteração pronta (n)** marca; **Enviar aos ERPs (n)**
+  envia as alterações prontas, uma por vez, com um motivo opcional comum. O lote
+  NUNCA sobrepõe edição feita direto no ERP — `DivergenciaNoErp` pula o pedido e
+  ele aparece no resumo para ser tratado no modo de um pedido. O **Reabrir** que
+  já existia cobre Alteração pronta → Em alteração. Cancelamento pós-emissão
+  segue só um a um.
+  "Nada difere do emitido" recusa a marcação no repositório
+  (`marcar_alteracao_pronta`), não só na tela.
 
 ## 8. Limites assumidos
 

@@ -9,6 +9,56 @@ Records). Adicione no topo as mais recentes.
 
 ---
 
+## 2026-10 · Reabrir pedido cancelado e estado "Alteração pronta"
+**Reabrir cancelado** (`CANCELADO → RASCUNHO`) entrou para desfazer cancelamento
+por engano — mas só para pedido que **nunca foi aos ERPs** e numa rodada **ABERTA**
+(`estados.impedimentos_reabrir`). **Por quê:** RASCUNHO significa "não existe nos
+ERPs"; reabrir um cancelado no Bling/Olist e reemitir criaria um 2º pedido lá e
+apagaria o rastro do `bling_id`. E rodada cancelada libera novo congelamento
+(`uq_rodada_congelada_ativa`): reabrir ali deixaria dois pedidos vivos do mesmo
+Colégio × Super Categoria. A guarda mora no repositório e o `transicionar_pedido`
+genérico recusa sair de CANCELADO, para nenhum botão (lote incluído) pulá-la. Volta
+sempre como RASCUNHO, nunca PRONTO: quem reabre revisa. Sem DDL.
+
+**`ALTERACAO_PRONTA`** (DDL 009) é o PRONTO do pós-emissão: não havia como sinalizar
+que a alteração já foi digitada. É **obrigatório** antes do envio (mesmo desenho de
+RASCUNHO → PRONTO → emitir) e **trava os itens** — o trigger do DDL 008 já só libera
+RASCUNHO/EM_ALTERACAO. Falha do envio antes de tocar ERP volta a PRONTA (a origem,
+como COMPRA_EMITINDO → PRONTO). Descartar exige reabrir. **Alternativa descartada:**
+marcador opcional com envio liberado dos dois estados — sinalização que não
+bloqueia vira ruído, e o "pronto" perderia o sentido de "conferido".
+
+## 2026-10 · Marcadores no pedido de venda do Olist
+Para filtrar a listagem do Olist, toda venda leva três marcadores: `AKU_<colégio>`,
+`SCAT - <super categoria>` e a rodada `Rmm/aaaa` (mês do disparo, o mesmo do título
+— escolhido no lugar de um ordinal R1/R2 para não depender de contar rodadas).
+- **Endpoint próprio, depois da venda criada**: o `POST /pedidos` não tem o campo.
+  Falha nos marcadores **não** derruba a emissão (a venda já existe): vira aviso +
+  evento, e o lote "Marcadores Olist" reaplica — o mesmo botão marca as vendas
+  emitidas antes desta mudança.
+- **GET + POST do que falta, nunca PUT**: o PUT substitui todos e apagaria
+  marcadores postos à mão no Olist.
+- **Nome automático, sem tabela de-para**: a API recebe só o nome e não lista os
+  marcadores da conta; onde a grafia do app difere ("Body de bebê"), o ajuste é
+  feito no Olist (decisão do Diogo).
+
+## 2026-10 · Pedido de venda do Olist com OC da fábrica (modo de preenchimento)
+O padrão da fábrica mudou: em vez do SKU completo em "Informações adicionais" de
+cada item, o sistema de produção da AK quer só o **número do modelo** (`ADC012MCIEDF-GG`
+→ `012`) e, nas Observações do pedido, a tag `tag{ OC:0009; PRORROGAVEL:S; }` com a
+**OC (ordem de criação)** do colégio. Os dois formatos convivem num seletor em
+Integrações → Olist (`modo_itens`: `sku` = original e default, `oc` = novo).
+- **A OC mora na config da integração** (`oc_por_colegio`, em `app.integracao`), não
+  em `colegios` do `app.parametros`: é contrato com o sistema da fábrica, não
+  parâmetro do motor de demanda. Chave = código do colégio no SKU (NEV, ADC…).
+- **Tag na última linha** das Observações, depois do resumo da rodada (que segue
+  intacto). `PRORROGAVEL:S` é fixo.
+- **Bloqueia, não degrada:** colégio sem OC ou SKU fora do padrão `XXX999…` barra a
+  venda (pré-validação + `ValueError` no payload). Como a compra no Bling é
+  irreversível, a 4_Pedidos já avisa em PRONTO (e no lote de compras) — senão o
+  problema só aparecia com a compra emitida.
+- A alteração pós-emissão usa o mesmo modo (mesma `montar_itens_venda` + tag).
+
 ## 2026-10 · Reposição de Loja v2: Estoque-Alvo por loja no lugar de VM + Pulmão
 
 **Contexto:** crítica da diretoria ao motor de reposição (VM Dinâmico + Pulmão): alvo
