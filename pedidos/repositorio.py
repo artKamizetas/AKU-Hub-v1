@@ -104,6 +104,10 @@ _MSG_DDL_008 = ("Alterar ou cancelar pedido emitido exige a migração "
                 "docs/sql/008_app_alteracao_pos_emissao.sql — rode "
                 "`python scripts/migrar.py aplicar`.")
 
+_MSG_DDL_009 = ("Marcar a alteração como pronta exige a migração "
+                "docs/sql/009_app_alteracao_pronta.sql — rode "
+                "`python scripts/migrar.py aplicar`.")
+
 
 def _e_falha_transitoria(exc: Exception) -> bool:
     """
@@ -469,6 +473,8 @@ class RepositorioPedidos:
             raise PedidoNaoEditavel(
                 f"Pedido está {status} — "
                 + ("abra uma alteração para editar." if estados.alteravel(status)
+                   else "reabra a alteração para editar."
+                   if status == estados.ALTERACAO_PRONTA
                    else "reabra o rascunho para editar."))
         return status
 
@@ -583,14 +589,19 @@ class RepositorioPedidos:
         valores.update({"atualizado_em": _agora_iso(), "atualizado_por": usuario})
         self._atualizar(TAB_PEDIDO, {"id": pedido_id}, valores)
 
-    def transicionar_pedido(self, pedido_id: str, de: str, para: str, usuario: str) -> bool:
+    def transicionar_pedido(self, pedido_id: str, de: str, para: str, usuario: str,
+                            _reabrindo: bool = False) -> bool:
         """
         Transição de estado via compare-and-swap: UPDATE ... WHERE status=de.
         Retorna False se a corrida foi perdida (outra sessão mudou o estado) —
         a UI mostra aviso e recarrega. TransicaoInvalida se a máquina não permite.
+        Sair de CANCELADO só por reabrir_cancelado (`_reabrindo`), que confere
+        antes se o pedido nunca foi aos ERPs e se a rodada segue aberta.
         """
         if not estados.pode_transicionar(de, para):
             raise TransicaoInvalida(f"Transição {de} → {para} não é permitida.")
+        if de == estados.CANCELADO and not _reabrindo:
+            raise TransicaoInvalida("Pedido cancelado só volta por \"Reabrir para edição\".")
 
         agora = _agora_iso()
         valores = {"status": para, "atualizado_em": agora, "atualizado_por": usuario}
@@ -601,6 +612,31 @@ class RepositorioPedidos:
 
         linhas = self._atualizar(TAB_PEDIDO, {"id": pedido_id, "status": de}, valores)
         return len(linhas) > 0
+
+    def reabrir_cancelado(self, pedido_id: str, usuario: str) -> bool:
+        """
+        CANCELADO → RASCUNHO, só para pedido que nunca foi aos ERPs numa rodada
+        ABERTA (estados.impedimentos_reabrir). A checagem não precisa de
+        transação: pedido CANCELADO não ganha bling_id. A rodada é relida depois
+        do CAS — se `cancelar_rodada` venceu no meio, o pedido volta a CANCELADO
+        (rascunho pendurado numa rodada morta seria pior que a recusa).
+        """
+        pedido = self.obter_pedido(pedido_id)
+        rodada = self.obter_rodada_leve(pedido.get("rodada_id", "")) if pedido else {}
+        motivos = estados.impedimentos_reabrir(pedido, rodada.get("status", ""))
+        if motivos:
+            raise TransicaoInvalida(" ".join(motivos))
+        if not self.transicionar_pedido(pedido_id, estados.CANCELADO, estados.RASCUNHO,
+                                        usuario, _reabrindo=True):
+            return False
+        rodada = self.obter_rodada_leve(pedido["rodada_id"])
+        if rodada.get("status") != estados.RODADA_ABERTA:
+            self._atualizar(TAB_PEDIDO, {"id": pedido_id, "status": estados.RASCUNHO},
+                            {"status": estados.CANCELADO, "atualizado_em": _agora_iso(),
+                             "atualizado_por": usuario})
+            raise TransicaoInvalida("A rodada foi cancelada enquanto o pedido era "
+                                    "reaberto — ele continua cancelado.")
+        return True
 
     # -----------------------------------------------------------------
     # Revisões (DDL 008) — o que foi aos ERPs, versão a versão
@@ -697,6 +733,31 @@ class RepositorioPedidos:
             if _e_check_violado(exc):
                 raise MigracaoPendente(_MSG_DDL_008) from exc
             raise
+
+    def marcar_alteracao_pronta(self, pedido_id: str, usuario: str) -> bool:
+        """
+        EM_ALTERACAO → ALTERACAO_PRONTA (CAS): digitação concluída, itens travam.
+        Recusa alteração que não muda nada em relação aos ERPs (o envio a
+        recusaria depois) — salvo envio parcial, que precisa ir de novo para
+        alinhar os dois ERPs. A regra mora aqui para valer na tela e no lote.
+        """
+        historico = self.listar_revisoes(pedido_id)
+        if not revisoes.envio_parcial(historico) and not revisoes.diferencas(
+                self.listar_itens(pedido_id), revisoes.linha_de_base(historico)):
+            raise TransicaoInvalida(
+                "Nenhuma quantidade difere do que está emitido — descarte a alteração.")
+        try:
+            return self.transicionar_pedido(
+                pedido_id, estados.EM_ALTERACAO, estados.ALTERACAO_PRONTA, usuario)
+        except Exception as exc:
+            if _e_check_violado(exc):
+                raise MigracaoPendente(_MSG_DDL_009) from exc
+            raise
+
+    def reabrir_alteracao(self, pedido_id: str, usuario: str) -> bool:
+        """ALTERACAO_PRONTA → EM_ALTERACAO (CAS): volta a editar a alteração."""
+        return self.transicionar_pedido(
+            pedido_id, estados.ALTERACAO_PRONTA, estados.EM_ALTERACAO, usuario)
 
     def descartar_alteracao(self, pedido_id: str, usuario: str) -> bool:
         """

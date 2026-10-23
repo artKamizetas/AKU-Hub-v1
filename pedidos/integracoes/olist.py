@@ -18,11 +18,12 @@ cabeçalho `Retry-After` e tenta de novo (backoff limitado) — a rede se
 autorregula em vez de falhar o pedido no primeiro esbarrão.
 """
 
+import re
 import time
 
 import pandas as pd
 
-from pedidos import grade
+from pedidos import builder, grade
 
 
 BASE = "https://api.tiny.com.br/public-api/v3"
@@ -45,6 +46,18 @@ ROTULOS_SITUACAO = {
     1: "Faturada", 7: "Pronto para envio", 5: "Enviada", 6: "Entregue",
     10: "Em devolução", 2: "Cancelada", 9: "Não entregue",
 }
+
+
+# Preenchimento dos itens — escolhido em Integrações → Olist (`modo_itens`).
+#   "sku": SKU completo em `infoAdicional` (o formato original; default).
+#   "oc":  só o número do modelo em `infoAdicional` (ADC012MCIEDF-GG → "012") e
+#          a tag de OC na última linha de `observacoes` — o sistema de produção
+#          da fábrica lê essa tag para saber qual ordem de criação usar.
+# A OC é por colégio (`oc_por_colegio`, 4 dígitos) e mora na config da
+# integração: é contrato com o sistema da fábrica, não parâmetro do motor.
+MODO_ITENS_SKU = "sku"
+MODO_ITENS_OC = "oc"
+_RE_NUMERO_SKU = re.compile(r"^[A-Za-z]{3}(\d{3})[A-Za-z]")
 
 
 class OlistFalhou(Exception):
@@ -269,12 +282,99 @@ def mapear_por_familia(token: str, skus: list, http=None, dormir=None) -> tuple:
     return mapa, pendentes
 
 
-def montar_itens_venda(itens: pd.DataFrame, mapa_sku: dict) -> list:
+def modo_itens(cfg: dict) -> str:
+    """Modo de preenchimento dos itens; sem nada salvo, o formato original."""
+    modo = str((cfg or {}).get("modo_itens") or "").strip()
+    return MODO_ITENS_OC if modo == MODO_ITENS_OC else MODO_ITENS_SKU
+
+
+def numero_do_sku(sku) -> str | None:
+    """Número do modelo no SKU (`ADC012MCIEDF-GG` → `012`); None fora do padrão."""
+    m = _RE_NUMERO_SKU.match(str(sku or "").strip())
+    return m.group(1) if m else None
+
+
+def normalizar_ocs(linhas) -> tuple:
+    """
+    Linhas do editor "OC por colégio" → ({COLEGIO: "0009"}, erros) (PURO).
+    Colégio em maiúsculas; OC só dígitos, completada com zeros até 4. Linha
+    totalmente vazia é ignorada; o resto inválido vira erro (nada é salvo).
+    """
+    mapa, erros = {}, []
+    for linha in linhas or []:
+        colegio = str(linha.get("Colégio") or "").strip().upper()
+        oc = str(linha.get("OC") or "").strip()
+        if colegio in ("NAN", "NONE"):
+            colegio = ""
+        if oc.lower() in ("nan", "none"):
+            oc = ""
+        if not colegio and not oc:
+            continue
+        if not colegio:
+            erros.append(f"OC {oc} sem colégio.")
+            continue
+        if not oc.isdigit() or len(oc) > 4:
+            erros.append(f"{colegio}: OC '{oc}' inválida — use até 4 dígitos.")
+            continue
+        if colegio in mapa:
+            erros.append(f"{colegio} aparece mais de uma vez.")
+            continue
+        mapa[colegio] = oc.zfill(4)
+    return mapa, erros
+
+
+def oc_do_colegio(cfg: dict, colegio) -> str | None:
+    oc = ((cfg or {}).get("oc_por_colegio") or {}).get(str(colegio or "").strip().upper())
+    return str(oc) if oc else None
+
+
+def tag_oc(oc: str) -> str:
+    """Tag lida pelo sistema de produção da fábrica. PRORROGAVEL é fixo em S."""
+    return f"tag{{ OC:{oc}; PRORROGAVEL:S; }}"
+
+
+def problemas_modo_oc(pedido: dict, itens: pd.DataFrame, cfg: dict) -> list:
+    """
+    O pedido pode sair no modo OC? Lista vazia = sim (e sempre vazia no modo
+    SKU). Colégio sem OC ou SKU fora do padrão BLOQUEIAM — nada sai pela metade.
+    """
+    if modo_itens(cfg) != MODO_ITENS_OC:
+        return []
+    erros = []
+    colegio = str((pedido or {}).get("colegio") or "").strip()
+    if not oc_do_colegio(cfg, colegio):
+        erros.append(f"Colégio {colegio or '(vazio)'} sem OC cadastrada "
+                     "(Configurações → Integrações → Olist).")
+    skus = itens[itens["quantidade_final"] > 0]["sku"].astype(str).str.strip()
+    fora = [s for s in skus if numero_do_sku(s) is None]
+    if fora:
+        erros.append(f"{len(fora)} SKU(s) fora do padrão (sem número do modelo): "
+                     f"{', '.join(fora[:8])}" + ("…" if len(fora) > 8 else ""))
+    return erros
+
+
+def observacoes_venda(obs: str, pedido: dict, cfg: dict) -> str:
+    """Observações da venda: no modo OC, a tag vai na ÚLTIMA linha do bloco."""
+    if modo_itens(cfg) != MODO_ITENS_OC:
+        return str(obs)
+    return f"{obs}\n{tag_oc(oc_do_colegio(cfg, pedido.get('colegio')))}"
+
+
+def montar_itens_venda(itens: pd.DataFrame, mapa_sku: dict, cfg: dict = None,
+                       pedido: dict = None) -> list:
     """
     Itens do pedido de venda (PURO), só quantidade_final > 0. É a MESMA lista
     no POST da emissão e no PUT /pedidos/{id}/itens da alteração — uma função
     só, para a venda alterada não sair num formato diferente da emitida.
+
+    `infoAdicional` segue o `modo_itens` da config: SKU completo (default) ou
+    só o número do modelo (modo OC — exige `pedido` para checar a OC).
     """
+    modo_oc = modo_itens(cfg) == MODO_ITENS_OC
+    if modo_oc:
+        problemas = problemas_modo_oc(pedido or {}, itens, cfg)
+        if problemas:
+            raise ValueError(" ".join(problemas))
     itens_payload = []
     for _, linha in itens[itens["quantidade_final"] > 0].iterrows():
         sku = str(linha["sku"]).strip()
@@ -285,7 +385,7 @@ def montar_itens_venda(itens: pd.DataFrame, mapa_sku: dict) -> list:
             "produto": {"id": int(mapa_sku[sku]), "tipo": "P"},
             "quantidade": int(linha["quantidade_final"]),
             "valorUnitario": float(linha["custo_unit"]),
-            "infoAdicional": sku,
+            "infoAdicional": numero_do_sku(sku) if modo_oc else sku,
         })
     return itens_payload
 
@@ -298,7 +398,8 @@ def montar_payload_venda(pedido: dict, itens: pd.DataFrame, rodada: dict,
     Payload do POST /pedidos (PURO). Itens só com quantidade_final>0.
 
     Texto espelha o Bling: observacoesInternas = título curto (busca/listagem),
-    observacoes = bloco completo (obs_completa) com o resumo da rodada.
+    observacoes = bloco completo (obs_completa) com o resumo da rodada — no
+    modo OC, com a tag de OC acrescentada na última linha (observacoes_venda).
     `dataPrevista` = data de chegada da rodada — o MESMO valor que vai no Bling,
     para os dois ERPs nunca divergirem sobre quando a mercadoria chega.
 
@@ -328,7 +429,7 @@ def montar_payload_venda(pedido: dict, itens: pd.DataFrame, rodada: dict,
     if len(validos) == 0:
         raise ValueError("Pedido sem itens com quantidade final > 0 — nada a emitir.")
 
-    itens_payload = montar_itens_venda(validos, mapa_sku)
+    itens_payload = montar_itens_venda(validos, mapa_sku, cfg, pedido)
 
     chegada = pd.Timestamp(str(rodada["data_chegada"])).normalize()
     payload = {
@@ -336,7 +437,7 @@ def montar_payload_venda(pedido: dict, itens: pd.DataFrame, rodada: dict,
         "situacao": int(cfg.get("situacao", 0)),          # 0 = Aberta
         "dataPrevista": str(chegada.date()),
         "numeroOrdemCompra": str(bling_numero),
-        "observacoes": str(obs_completa),
+        "observacoes": observacoes_venda(obs_completa, pedido, cfg),
         "observacoesInternas": str(pedido["titulo"]),
         "vendedor": {"id": int(cfg["vendedor_id"])},
         "deposito": {"id": int(cfg["deposito_id"])},
@@ -369,6 +470,60 @@ def montar_payload_venda(pedido: dict, itens: pd.DataFrame, rodada: dict,
     return payload
 
 
+# ---------------------------------------------------------------------------
+# Marcadores do pedido de venda — filtro na listagem do Olist
+# ---------------------------------------------------------------------------
+# O POST /pedidos NÃO aceita marcadores: eles têm endpoint próprio. A API só
+# recebe o NOME (sem id, sem cor) e não lista os marcadores da conta — nome com
+# grafia diferente vira marcador novo. O PUT SUBSTITUI todos, e apagaria os que
+# alguém pôs à mão no Olist: por isso lemos os atuais e criamos só os que faltam.
+def marcadores_venda(pedido: dict, rodada: dict) -> list:
+    """
+    Nomes dos marcadores (PURO), nos dois modos de preenchimento:
+    colégio `AKU_<código>`, super categoria `SCAT - <nome do app>` e rodada
+    `Rmm/aaaa` (a mesma do título). Colégio/super categoria ausentes ficam de fora.
+    """
+    nomes = []
+    colegio = str(pedido.get("colegio") or "").strip()
+    if colegio and colegio != builder.SEM_COLEGIO:
+        nomes.append(f"AKU_{colegio.upper()}")
+    supercat = str(pedido.get("super_categoria") or "").strip()
+    if supercat and supercat != builder.SEM_SUPERCATEGORIA:
+        nomes.append(f"SCAT - {supercat}")
+    nomes.append(f"R{int(rodada['mes_disparo']):02d}/{int(rodada['ano_disparo'])}")
+    return nomes
+
+
+def obter_marcadores(token: str, id_pedido, http=None, dormir=None) -> list:
+    """GET /pedidos/{id}/marcadores → nomes."""
+    http = http or _http_default()
+    resp = _requisitar(http, "get", f"{BASE}/pedidos/{id_pedido}/marcadores", token,
+                       dormir=dormir)
+    if resp.status_code >= 300:
+        raise OlistFalhou(_erro_legivel(resp))
+    corpo = resp.json() or []
+    if isinstance(corpo, dict):          # tolera envelope {"itens": [...]}
+        corpo = corpo.get("itens") or corpo.get("marcadores") or []
+    return [str(m.get("descricao") or "").strip() for m in corpo if isinstance(m, dict)]
+
+
+def aplicar_marcadores(token: str, id_pedido, nomes: list, http=None, dormir=None) -> list:
+    """
+    Garante os `nomes` no pedido SEM tirar os que já existem (GET + POST só do
+    que falta; comparação sem diferenciar maiúsculas). Idempotente. Devolve os
+    criados agora (vazio = já estava tudo lá, nenhum POST).
+    """
+    http = http or _http_default()
+    atuais = {n.casefold() for n in obter_marcadores(token, id_pedido, http, dormir)}
+    faltam = [n for n in nomes if n.casefold() not in atuais]
+    if faltam:
+        resp = _requisitar(http, "post", f"{BASE}/pedidos/{id_pedido}/marcadores", token,
+                           json=[{"descricao": n} for n in faltam], dormir=dormir)
+        if resp.status_code >= 300:
+            raise OlistFalhou(_erro_legivel(resp))
+    return faltam
+
+
 def criar_pedido_venda(token: str, payload: dict, http=None, dormir=None) -> dict:
     """POST /pedidos → {"olist_id", "olist_numero"}. Retry só em 429."""
     http = http or _http_default()
@@ -388,7 +543,8 @@ def normalizar_pedido(corpo: dict) -> dict:
     """
     GET /pedidos/{id} → o que o pós-emissão usa (PURO). Itens como
     [{"id_produto", "sku", "quantidade", "valor"}] — o SKU vem do cadastro do
-    produto; `infoAdicional` (onde gravamos o SKU na emissão) é o reserva.
+    produto; `infoAdicional` (onde gravamos o SKU na emissão) é o reserva —
+    no modo OC ele guarda só o número do modelo, então não serve de SKU.
     """
     corpo = corpo or {}
     try:

@@ -1642,8 +1642,45 @@ def _secao_integracoes():
         st.caption("O prazo da parcela é o mesmo do pedido de compra "
                    "(card do Bling) — não se configura em dois lugares.")
 
+        # -- Preenchimento dos itens: SKU completo (original) × OC da fábrica --
+        st.markdown("**Preenchimento dos itens**")
+        rotulos_modo = {
+            cliente_olist.MODO_ITENS_SKU: "SKU completo em Informações adicionais",
+            cliente_olist.MODO_ITENS_OC: "Número do modelo + tag de OC nas Observações",
+        }
+        modo = st.radio(
+            "Como o pedido de venda chega à fábrica",
+            options=list(rotulos_modo),
+            index=list(rotulos_modo).index(cliente_olist.modo_itens(cfg)),
+            format_func=rotulos_modo.get,
+            help="Vale para a emissão e para a alteração de pedido já emitido.",
+            key="neg_olist_modo_itens")
+        st.caption(
+            "Modo OC: `ADC012MCIEDF-GG` → `012` em Informações adicionais, e "
+            f"`{cliente_olist.tag_oc('0009')}` na última linha das Observações "
+            "(OC do colégio do pedido). Colégio sem OC ou SKU fora do padrão "
+            "bloqueia a venda.")
+
+        ocs = cfg.get("oc_por_colegio") or {}
+        df_oc = pd.DataFrame({"Colégio": list(ocs), "OC": [str(v) for v in ocs.values()]},
+                             columns=["Colégio", "OC"], dtype=str)   # vazio viraria float
+        df_oc_edit = st.data_editor(
+            df_oc, num_rows="dynamic",
+            column_config={
+                "Colégio": st.column_config.TextColumn(
+                    "Colégio", help="Código do colégio no SKU (NEV, ADC, SES…)"),
+                "OC": st.column_config.TextColumn(
+                    "OC", help="Ordem de criação na fábrica — até 4 dígitos (0009)"),
+            },
+            **padrao_tabela(EDITOR, max(len(df_oc), 3)), key="editor_olist_oc")
+        oc_por_colegio, erros_oc = cliente_olist.normalizar_ocs(
+            df_oc_edit.to_dict("records"))
+
         return {"forma_recebimento_id": str(forma_id or "").strip(),
-                "meio_pagamento_id": meio.strip()}
+                "meio_pagamento_id": meio.strip(),
+                "modo_itens": modo,
+                "oc_por_colegio": oc_por_colegio,
+                "_erros": erros_oc}
 
     def _card_integracao(plataforma: str, titulo: str, campos_negocio: list,
                          extras_form=None):
@@ -1651,7 +1688,8 @@ def _secao_integracoes():
         Card de configuração + conexão OAuth de uma plataforma.
         `extras_form(cfg, conectado) -> dict` desenha campos extras DENTRO do
         form de dados do pedido e devolve o que gravar junto (salvar_config
-        substitui o jsonb inteiro — tudo precisa sair no mesmo submit).
+        substitui o jsonb inteiro — tudo precisa sair no mesmo submit). A chave
+        `_erros` (lista) não é gravada: preenchida, barra o Salvar.
         """
         repo_int = obter_repositorio_integracoes()
         integ = repo_int.ler(plataforma) or {}
@@ -1767,7 +1805,12 @@ def _secao_integracoes():
                             rotulo, value=str(cfg.get(chave, "") or ""),
                             help=ajuda, key=f"neg_{plataforma}_{chave}")
                     extras = extras_form(cfg, conectado) if extras_form else {}
-                    if st.form_submit_button("Salvar dados do pedido", icon=":material/save:"):
+                    erros_extras = extras.pop("_erros", None)
+                    salvar = st.form_submit_button("Salvar dados do pedido", icon=":material/save:")
+                    if salvar and erros_extras:
+                        for _e in erros_extras:
+                            st.error(_e, icon=":material/error:")
+                    elif salvar:
                         novo = {k: v.strip() for k, v in valores.items() if v.strip()}
                         # extras já vêm tipados (int/str) — só descarta string vazia
                         novo.update({k: v for k, v in extras.items()

@@ -44,7 +44,7 @@ etl/
   fabrica.py                # Sugestão tática de produção por SKU (PCP)
   planejamento.py           # Simulação estratégica de rodadas de produção anuais (bottom-up, a partir de demanda.py)
 pedidos/                    # Domínio TRANSACIONAL de Pedidos de Compra (etl/ segue analítico read-only)
-  estados.py                # Máquina de estados pura (RASCUNHO→PRONTO→COMPRA_EMITINDO→COMPRA_EMITIDA→VENDA_EMITINDO→EMITIDO; pós-emissão: EM_ALTERACAO, *_ENVIANDO; badges)
+  estados.py                # Máquina de estados pura (RASCUNHO→PRONTO→COMPRA_EMITINDO→COMPRA_EMITIDA→VENDA_EMITINDO→EMITIDO; pós-emissão: EM_ALTERACAO→ALTERACAO_PRONTA, *_ENVIANDO; CANCELADO→RASCUNHO só pela guarda; badges)
   revisoes.py               # Puro: revisões do pedido — linha de base ("o que está nos ERPs"), envio parcial, diff emitido × novo
   builder.py                # Puro: DataFrame do processar_fabrica → snapshot + grupos Colégio×SuperCategoria
   grade.py                  # Puro: itens ↔ grade SKU pai × tamanho (pivot, diff por id, ordem dos tamanhos por regra)
@@ -345,7 +345,26 @@ Zerado NÃO vira item de pedido (entraria na grade, nos totais e na emissão).
 - **Campos de venda do Olist**: `dataPrevista` = a MESMA `rodada.data_chegada` que
   vai no Bling (os dois ERPs não podem divergir sobre quando a mercadoria chega);
   `produto.tipo = "P"` nos itens; `infoAdicional` = SKU (a memória de cálculo é
-  só do Bling — a fábrica não precisa dela). O pagamento espelha a parcela única
+  só do Bling — a fábrica não precisa dela). **Modo de preenchimento**
+  (`modo_itens` na config da integração Olist, default `sku`): no modo `oc`,
+  `infoAdicional` leva só o número do modelo (`olist.numero_do_sku`:
+  `ADC012MCIEDF-GG` → `012`) e a última linha de `observacoes` recebe
+  `tag{ OC:<4 dígitos>; PRORROGAVEL:S; }` (`olist.observacoes_venda`), com a OC
+  do colégio do pedido em `oc_por_colegio` (editor em Integrações → Olist).
+  Colégio sem OC ou SKU fora do padrão BLOQUEIA (`olist.problemas_modo_oc`,
+  também avisado em PRONTO, antes da compra irreversível). Emissão e alteração
+  passam a mesma `cfg` — não monte itens do Olist sem ela.
+- **Marcadores da venda no Olist** (filtro na listagem, nos DOIS modos):
+  `AKU_<colégio>`, `SCAT - <super categoria do app>` e `Rmm/aaaa` (mês do
+  disparo, igual ao título) — `olist.marcadores_venda`. O `POST /pedidos` NÃO
+  aceita marcadores: vão depois, por `olist.aplicar_marcadores` (GET + POST só
+  do que falta, sem diferenciar maiúsculas). **Nunca use o PUT
+  `/pedidos/{id}/marcadores`**: ele substitui todos e apagaria os postos à mão.
+  A API só recebe o NOME (não lista os da conta) — grafia diferente cria
+  marcador novo; o acerto de grafia é feito no Olist. Na emissão e na
+  alteração é melhor esforço (`res["marcadores_erro"]`, evento `marcadores`);
+  `emissor.marcar_venda_olist` + lote "Marcadores Olist" da 4_Pedidos aplicam
+  retroativamente e reaplicam. O pagamento espelha a parcela única
   do Bling, mas o SHAPE é OUTRO: objeto aninhado `pagamento.{formaRecebimento,
   meioPagamento, parcelas[]}` — no Olist é forma de **recebimento**, não
   `formaPagamento` no topo. `forma_recebimento_id` (obrigatório p/ gerar o bloco),
@@ -589,12 +608,25 @@ Depois de emitido o pedido ainda pode ser **alterado** ou **cancelado** pela
   Bling (`situacao.valor == 0`) e venda "Aberta" no Olist (`situacao == 0`) —
   `emissor.avaliar_abertura`. Não crie outra trava por cima (prazo, status nosso).
 - **Estados:** estado emitido → `EM_ALTERACAO` (repouso EDITÁVEL) →
-  `ALTERACAO_ENVIANDO` → estado emitido; estado emitido →
+  `ALTERACAO_PRONTA` (digitação concluída, itens TRAVADOS — o PRONTO do
+  pós-emissão, DDL 009) → `ALTERACAO_ENVIANDO` → estado emitido; estado emitido →
   `CANCELAMENTO_ENVIANDO` → `CANCELADO`. "Estado emitido" é DERIVADO por
   `estados.estado_emitido(pedido)` (`EMITIDO` se há `olist_id`, senão
   `COMPRA_EMITIDA`) — nunca grave o estado de origem. **Não reuse `RASCUNHO`**
   para o pós-emissão: ele significa "não existe nos ERPs" e libera cancelar
   pedido e rodada.
+- **O envio SÓ sai de `ALTERACAO_PRONTA`** (`emissor.enviar_alteracao` recusa
+  EM_ALTERACAO). Falha antes de tocar ERP volta a PRONTA (a origem); "Voltar a
+  editar" do lock vai a EM_ALTERACAO. Descartar só de EM_ALTERACAO (reescreve
+  itens, que em PRONTA estão travados) — reabra antes. `estados.em_alteracao()`
+  cobre os dois repousos: use-o onde a pergunta é "há versão pendente contra a
+  linha de base" (tela, KPI), não `== EM_ALTERACAO`.
+- **Reabrir pedido cancelado** (`CANCELADO → RASCUNHO`): só pedido que NUNCA foi
+  aos ERPs (sem `bling_id`/`olist_id`) numa rodada `ABERTA` —
+  `estados.impedimentos_reabrir`, imposta por `repositorio.reabrir_cancelado`.
+  `transicionar_pedido` genérico RECUSA sair de CANCELADO (nenhum botão pula a
+  guarda). Cancelado nos ERPs é registro: o grupo volta numa próxima rodada.
+  Rodada cancelada libera novo congelamento — reabrir ali duplicaria o grupo.
 - **`quantidade_final` deixou de ser sempre "o que está nos ERPs".** Em
   `EM_ALTERACAO` é rascunho não enviado. O emitido é a **linha de base**:
   última revisão concluída em `app.pedido_compra_revisao` (DDL 008),
@@ -632,6 +664,21 @@ Depois de emitido o pedido ainda pode ser **alterado** ou **cancelado** pela
   `repositorio.abrir_alteracao` — fora de RASCUNHO/EM_ALTERACAO os itens estão
   travados, então são o que foi emitido.
 - **Item já emitido não se remove numa alteração** (nem o manual): zera-se.
+- **Lote com ERP = `_rodar_lote_erp`** (4_Pedidos; compra, venda, marcadores e
+  envio de alteração): desenha num contêiner da largura da seção (`_area_lote`,
+  FORA do popover que só confirma) título "i de N — pedido · ~tempo restante",
+  barra, a etapa atual numa linha que se reescreve (o `progresso` do emissor) e
+  uma linha por pedido; `dormir` injetado mostra a pausa do rate limit do Olist.
+  O resultado fica na tabela "Último lote" (`pc_lote_resultado`) até "Dispensar".
+  `fn(row, etapa, dormir)` → (True | False | `PULADO`, msg). Passe
+  `expanded=True` em todo `st.status.update` — sem ele a caixa recolhe. Sem
+  botão de parar no meio (decisão do Diogo). Lotes só de banco (aprovar,
+  reabrir, cancelar, marcar pronta) seguem no `_executar_lote` simples.
+- **Lote:** "Abrir alteração (n)" (`emissor.abrir_alteracao_verificada`:
+  confere o status nativo nos ERPs ANTES de abrir; fora de aberto = pulado),
+  "Alteração pronta (n)" e "Enviar aos ERPs (n)" (motivo opcional
+  comum). O lote NUNCA passa `sobrepor=True`: `DivergenciaNoErp` pula o pedido
+  para o modo de um pedido. Motivo da alteração é opcional; o do cancelamento não.
 - **Tela:** "Verificar nos ERPs" é sob demanda (chamada de API; o Olist tem 60
   req/min) e mora na bolsa do `_memo`. Com dois "R$" na mesma linha de markdown
   os cifrões precisam ser escapados (`\$`) — senão viram um bloco LaTeX.

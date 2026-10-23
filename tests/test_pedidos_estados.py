@@ -25,12 +25,16 @@ class TestTransicoes:
         # --- pós-emissão: alterar ---
         (e.EMITIDO, e.EM_ALTERACAO),
         (e.COMPRA_EMITIDA, e.EM_ALTERACAO),        # vale para quem só emitiu a compra
-        (e.EM_ALTERACAO, e.ALTERACAO_ENVIANDO),    # lock do envio
+        (e.EM_ALTERACAO, e.ALTERACAO_PRONTA),      # digitação concluída
+        (e.ALTERACAO_PRONTA, e.EM_ALTERACAO),      # reabrir a alteração
+        (e.ALTERACAO_PRONTA, e.ALTERACAO_ENVIANDO),  # lock do envio
+        (e.ALTERACAO_ENVIANDO, e.ALTERACAO_PRONTA),  # falha antes do ERP → origem
         (e.EM_ALTERACAO, e.EMITIDO),               # descartar
         (e.EM_ALTERACAO, e.COMPRA_EMITIDA),        # descartar (sem venda)
         (e.ALTERACAO_ENVIANDO, e.EMITIDO),         # enviado
         (e.ALTERACAO_ENVIANDO, e.COMPRA_EMITIDA),
-        (e.ALTERACAO_ENVIANDO, e.EM_ALTERACAO),    # falha antes do ERP / voltar a editar
+        (e.ALTERACAO_ENVIANDO, e.EM_ALTERACAO),    # voltar a editar
+        (e.CANCELADO, e.RASCUNHO),                 # reabrir (a guarda é do repositório)
         # --- pós-emissão: cancelar ---
         (e.EMITIDO, e.CANCELAMENTO_ENVIANDO),
         (e.COMPRA_EMITIDA, e.CANCELAMENTO_ENVIANDO),
@@ -55,12 +59,17 @@ class TestTransicoes:
         (e.EMITIDO, e.CANCELADO),
         (e.EMITIDO, e.ALTERACAO_ENVIANDO),         # não envia sem abrir a alteração
         (e.EM_ALTERACAO, e.RASCUNHO),
+        (e.EM_ALTERACAO, e.ALTERACAO_ENVIANDO),    # envio só da alteração pronta
+        (e.ALTERACAO_PRONTA, e.EMITIDO),           # descartar exige reabrir
+        (e.ALTERACAO_PRONTA, e.COMPRA_EMITIDA),
+        (e.ALTERACAO_PRONTA, e.CANCELAMENTO_ENVIANDO),
+        (e.CANCELADO, e.PRONTO),                   # reabre sempre como rascunho
+        (e.CANCELADO, e.EMITIDO),
         (e.EM_ALTERACAO, e.CANCELADO),             # descarta primeiro, cancela depois
         (e.EM_ALTERACAO, e.CANCELAMENTO_ENVIANDO),
         (e.ALTERACAO_ENVIANDO, e.CANCELADO),
         (e.CANCELAMENTO_ENVIANDO, e.EM_ALTERACAO),
         (e.PRONTO, e.EM_ALTERACAO),                # antes de emitir é "reabrir rascunho"
-        (e.CANCELADO, e.RASCUNHO),         # terminal
         (e.SINCRONIZADO, e.PRONTO),        # terminal
         (e.RASCUNHO, e.RASCUNHO),          # auto-transição não existe
     ])
@@ -78,7 +87,8 @@ class TestEditavel:
         assert e.editavel(e.RASCUNHO)
         assert e.editavel(e.EM_ALTERACAO)
         for status in (e.PRONTO, e.COMPRA_EMITINDO, e.COMPRA_EMITIDA,
-                       e.VENDA_EMITINDO, e.EMITIDO, e.ALTERACAO_ENVIANDO,
+                       e.VENDA_EMITINDO, e.EMITIDO, e.ALTERACAO_PRONTA,
+                       e.ALTERACAO_ENVIANDO,
                        e.CANCELAMENTO_ENVIANDO, e.SINCRONIZADO, e.CANCELADO):
             assert not e.editavel(status)
 
@@ -87,9 +97,14 @@ class TestPosEmissao:
     def test_so_pedido_emitido_em_repouso_e_alteravel(self):
         assert e.alteravel(e.COMPRA_EMITIDA) and e.alteravel(e.EMITIDO)
         for status in (e.RASCUNHO, e.PRONTO, e.COMPRA_EMITINDO, e.VENDA_EMITINDO,
-                       e.EM_ALTERACAO, e.ALTERACAO_ENVIANDO,
+                       e.EM_ALTERACAO, e.ALTERACAO_PRONTA, e.ALTERACAO_ENVIANDO,
                        e.CANCELAMENTO_ENVIANDO, e.CANCELADO):
             assert not e.alteravel(status)
+
+    def test_em_alteracao_cobre_digitando_e_pronta(self):
+        assert e.em_alteracao(e.EM_ALTERACAO) and e.em_alteracao(e.ALTERACAO_PRONTA)
+        for status in (e.EMITIDO, e.COMPRA_EMITIDA, e.ALTERACAO_ENVIANDO, e.RASCUNHO):
+            assert not e.em_alteracao(status)
 
     def test_locks_do_pos_emissao_nao_sao_os_da_emissao(self):
         """O 'Destravar' da emissão avisa de duplicata; aqui reexecutar é seguro."""
@@ -134,3 +149,29 @@ class TestConsistencia:
         # Todo lock transiente precisa de exatamente 1 caminho de avanço e 1 de volta
         assert e.TRANSICOES[e.COMPRA_EMITINDO] == {e.COMPRA_EMITIDA, e.PRONTO}
         assert e.TRANSICOES[e.VENDA_EMITINDO] == {e.EMITIDO, e.COMPRA_EMITIDA}
+
+
+class TestImpedimentosReabrir:
+    def _cancelado(self, **kw):
+        return {"status": e.CANCELADO, "bling_id": None, "olist_id": None, **kw}
+
+    def test_nunca_emitido_em_rodada_aberta_reabre(self):
+        assert e.impedimentos_reabrir(self._cancelado(), e.RODADA_ABERTA) == []
+
+    @pytest.mark.parametrize("vazio", [None, "", "  ", float("nan"), "None"])
+    def test_id_vazio_nao_conta_como_emitido(self, vazio):
+        pedido = self._cancelado(bling_id=vazio, olist_id=vazio)
+        assert e.impedimentos_reabrir(pedido, e.RODADA_ABERTA) == []
+
+    @pytest.mark.parametrize("ids", [{"bling_id": "555"}, {"olist_id": 900}])
+    def test_cancelado_nos_erps_nao_reabre(self, ids):
+        motivos = e.impedimentos_reabrir(self._cancelado(**ids), e.RODADA_ABERTA)
+        assert len(motivos) == 1 and "ERPs" in motivos[0]
+
+    @pytest.mark.parametrize("rodada", [e.RODADA_CANCELADA, e.RODADA_CONGELANDO, ""])
+    def test_rodada_fora_de_aberta_nao_reabre(self, rodada):
+        motivos = e.impedimentos_reabrir(self._cancelado(), rodada)
+        assert len(motivos) == 1 and "rodada" in motivos[0]
+
+    def test_so_cancelado_passa_por_aqui(self):
+        assert e.impedimentos_reabrir({"status": e.PRONTO}, e.RODADA_ABERTA)

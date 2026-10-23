@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 from pedidos import emissor, estados as e
+from pedidos.integracoes import olist
 from tests.test_pedidos_repositorio import RepoFake as RepoPedFake, snapshot_min, grupos_min
 from tests.test_integracoes_repositorio import RepoFake as RepoIntFake
 from tests.test_integracoes_payloads import HttpFake, RespostaFake
@@ -37,6 +38,7 @@ def _pedido_pronto(repo_ped):
 
 RESP_BLING = RespostaFake(200, {"data": {"id": 555, "numero": "PC-78"}})
 RESP_OLIST = RespostaFake(200, {"id": 900, "numeroPedido": "V-12"})
+RODADA_MARC = "R08/2026"          # marcador da rodada de snapshot_min()
 
 
 # ---------------------------------------------------------------------------
@@ -146,11 +148,13 @@ class TestEmitirVenda:
     def test_fluxo_feliz_com_mapa_injetado(self):
         repo_ped, repo_int = RepoPedFake(), _repo_int_conectado()
         pid = self._pedido_compra_emitida(repo_ped, repo_int)
-        http = HttpFake([RESP_OLIST])
+        # venda + marcadores (GET: já tem o colégio, posto à mão; POST: o resto)
+        http = HttpFake([RESP_OLIST, RespostaFake(200, [{"descricao": "aku_neves"},
+                                                        {"descricao": "Urgente"}]), OK204])
 
         res = emissor.emitir_venda_olist(pid, "diogo", repo_ped, repo_int,
                                          mapa_sku=MAPA, http=http)
-        assert res == {"olist_id": "900", "olist_numero": "V-12"}
+        assert res == {"olist_id": "900", "olist_numero": "V-12", "marcadores_erro": None}
         pedido = repo_ped.obter_pedido(pid)
         assert pedido["status"] == e.EMITIDO
         assert pedido["olist_id"] == "900"
@@ -158,6 +162,42 @@ class TestEmitirVenda:
         metodo, url, corpo = http.chamadas[0]
         assert corpo["numeroOrdemCompra"] == "PC-78"
         assert corpo["idContato"] == 77
+        # marcadores: só os que faltam, sem duplicar (casefold) nem tirar o "Urgente"
+        assert http.chamadas[1][:2] == ("get", f"{olist.BASE}/pedidos/900/marcadores")
+        assert http.chamadas[2] == ("post", f"{olist.BASE}/pedidos/900/marcadores",
+                                    [{"descricao": "SCAT - CALÇAS"},
+                                     {"descricao": RODADA_MARC}])
+
+    def test_falha_nos_marcadores_nao_derruba_a_venda(self):
+        repo_ped, repo_int = RepoPedFake(), _repo_int_conectado()
+        pid = self._pedido_compra_emitida(repo_ped, repo_int)
+        http = HttpFake([RESP_OLIST, RespostaFake(500, {"message": "fora"})])
+
+        res = emissor.emitir_venda_olist(pid, "diogo", repo_ped, repo_int,
+                                         mapa_sku=MAPA, http=http)
+        assert repo_ped.obter_pedido(pid)["status"] == e.EMITIDO
+        assert "500" in res["marcadores_erro"]
+        ev = repo_int.listar_eventos()
+        assert not ev[ev["acao"] == "marcadores"].iloc[0]["sucesso"]
+
+    def test_marcar_venda_ja_emitida_em_lote(self):
+        repo_ped, repo_int = RepoPedFake(), _repo_int_conectado()
+        pid = self._pedido_compra_emitida(repo_ped, repo_int)
+        emissor.emitir_venda_olist(pid, "t", repo_ped, repo_int, mapa_sku=MAPA,
+                                   http=HttpFake([RESP_OLIST, RespostaFake(500, {})]))
+        http = HttpFake([RespostaFake(200, []), OK204])
+        criados = emissor.marcar_venda_olist(pid, "diogo", repo_ped, repo_int, http=http)
+        assert criados == ["AKU_NEVES", "SCAT - CALÇAS", RODADA_MARC]
+        # idempotente: tudo já lá → só o GET, nenhum POST
+        http2 = HttpFake([RespostaFake(200, [{"descricao": n} for n in criados])])
+        assert emissor.marcar_venda_olist(pid, "diogo", repo_ped, repo_int, http=http2) == []
+        assert [m for m, *_ in http2.chamadas] == ["get"]
+
+    def test_marcar_sem_venda_emitida_recusa(self):
+        repo_ped, repo_int = RepoPedFake(), _repo_int_conectado()
+        pid = self._pedido_compra_emitida(repo_ped, repo_int)
+        with pytest.raises(emissor.EmissaoFalhou, match="emita a venda"):
+            emissor.marcar_venda_olist(pid, "diogo", repo_ped, repo_int, http=HttpFake([]))
 
     def test_ordem_obrigatoria_bling_primeiro(self):
         repo_ped, repo_int = RepoPedFake(), _repo_int_conectado()
@@ -232,6 +272,20 @@ class TestValidacaoEPreview:
         cfg_ok = {"contato_id": "1", "vendedor_id": "2", "deposito_id": "3"}
         assert emissor.validar_pre_emissao_olist(itens, cfg_ok, {"A": 1, "B": 2}) == []
 
+    def test_validacao_modo_oc(self):
+        cfg = {"contato_id": "1", "vendedor_id": "2", "deposito_id": "3",
+               "modo_itens": "oc", "oc_por_colegio": {"ADC": "0009"}}
+        itens = pd.DataFrame({"sku": ["ADC012MCIEDF-GG", "PAM02TEN-32"],
+                              "quantidade_final": [2, 4]})
+        mapa = {"ADC012MCIEDF-GG": 1, "PAM02TEN-32": 2}
+        erros = emissor.validar_pre_emissao_olist(itens, cfg, mapa, {"colegio": "MAB"})
+        assert any("MAB sem OC" in x for x in erros)
+        assert any("PAM02TEN-32" in x for x in erros)
+        assert emissor.validar_pre_emissao_olist(
+            itens.iloc[:1], cfg, mapa, {"colegio": "ADC"}) == []
+        # sem o pedido (chamadas antigas) o modo OC não é checado
+        assert emissor.validar_pre_emissao_olist(itens, cfg, mapa) == []
+
     def test_validacao_bling_exige_forma_pagamento(self):
         """Sem forma de pagamento o pedido sairia sem parcela/vencimento —
         barra ANTES do clique, não no erro do POST."""
@@ -294,7 +348,7 @@ class TestProntidaoOlist:
 # ===========================================================================
 # PÓS-EMISSÃO — alterar e cancelar um pedido que já está nos ERPs
 # ===========================================================================
-from pedidos import revisoes                                          # noqa: E402
+from pedidos import revisoes, repositorio as rp                      # noqa: E402
 from tests.test_pedidos_repositorio import TAB_PEDIDO, TAB_ITEM       # noqa: E402
 from tests.test_integracoes_payloads import bling_pedido              # noqa: E402
 
@@ -332,12 +386,17 @@ def _emitido(com_olist=True):
     return repo_ped, repo_int, pid
 
 
-def _em_alteracao(com_olist=True, cal_p=6):
-    """Pedido emitido, com alteração aberta e CAL-P mudado de 10 para `cal_p`."""
+def _em_alteracao(com_olist=True, cal_p=6, pronta=True):
+    """
+    Pedido emitido, com alteração aberta e CAL-P mudado de 10 para `cal_p`.
+    `pronta` = já marcada como Alteração pronta (o envio só sai dela).
+    """
     repo_ped, repo_int, pid = _emitido(com_olist)
     repo_ped.abrir_alteracao(pid, "diogo")
     item = next(i for i in repo_ped.tabelas[TAB_ITEM] if i["sku"] == "CAL-P")
     repo_ped.atualizar_quantidades(pid, [{"id": item["id"], "quantidade_final": cal_p}], "diogo")
+    if pronta:
+        repo_ped.marcar_alteracao_pronta(pid, "diogo")
     return repo_ped, repo_int, pid
 
 
@@ -353,6 +412,8 @@ def _get_olist(situacao=0, itens=None):
 
 
 PUT_BLING = RespostaFake(200, {"data": {"id": 555, "numero": 78}})
+# Marcadores do Olist depois dos PUTs da venda: GET (nenhum ainda) + POST
+MARCADORES = [RespostaFake(200, []), OK204]
 
 
 def _metodos(http):
@@ -362,6 +423,36 @@ def _metodos(http):
 # ---------------------------------------------------------------------------
 # O filtro: status nativo de cada ERP
 # ---------------------------------------------------------------------------
+class TestAbrirAlteracaoVerificada:
+    def test_em_aberto_nos_dois_abre(self):
+        repo_ped, repo_int, pid = _emitido()
+        http = HttpFake([_get_bling(), _get_olist()])
+        assert emissor.abrir_alteracao_verificada(pid, "d", repo_ped, repo_int, http=http) == []
+        assert repo_ped.obter_pedido(pid)["status"] == e.EM_ALTERACAO
+
+    @pytest.mark.parametrize("bling_valor,olist_sit,quem", [(1, 0, "Bling"), (0, 3, "Olist")])
+    def test_fora_de_em_aberto_nao_abre(self, bling_valor, olist_sit, quem):
+        repo_ped, repo_int, pid = _emitido()
+        http = HttpFake([_get_bling(bling_valor), _get_olist(olist_sit)])
+        impedimentos = emissor.abrir_alteracao_verificada(
+            pid, "d", repo_ped, repo_int, http=http)
+        assert len(impedimentos) == 1 and quem in impedimentos[0]
+        assert repo_ped.obter_pedido(pid)["status"] == e.EMITIDO
+
+    def test_so_compra_emitida_confere_so_o_bling(self):
+        repo_ped, repo_int, pid = _emitido(com_olist=False)
+        http = HttpFake([_get_bling()])
+        assert emissor.abrir_alteracao_verificada(pid, "d", repo_ped, repo_int, http=http) == []
+        assert _metodos(http) == [("get", "/pedidos/compras/555")]
+
+    def test_pedido_nao_emitido_nem_consulta_os_erps(self):
+        repo_ped, repo_int, pid = _em_alteracao()
+        http = HttpFake([])
+        with pytest.raises(emissor.EmissaoFalhou, match="só pedido emitido"):
+            emissor.abrir_alteracao_verificada(pid, "d", repo_ped, repo_int, http=http)
+        assert http.chamadas == []
+
+
 class TestAvaliarAbertura:
     PEDIDO = {"bling_id": "555", "bling_numero": "78", "olist_id": "900", "olist_numero": "12"}
     BLING_ABERTO = {"situacao_valor": 0, "situacao_rotulo": "Em aberto"}
@@ -435,7 +526,7 @@ class TestCompararComErp:
 class TestEnviarAlteracao:
     def test_fluxo_feliz_olist_primeiro_bling_depois(self):
         repo_ped, repo_int, pid = _em_alteracao()
-        http = HttpFake([_get_bling(), _get_olist(), OK204, OK204, PUT_BLING])
+        http = HttpFake([_get_bling(), _get_olist(), OK204, OK204, *MARCADORES, PUT_BLING])
         passos = []
 
         res = emissor.enviar_alteracao(pid, "turma menor", "diogo", repo_ped, repo_int,
@@ -444,6 +535,7 @@ class TestEnviarAlteracao:
         assert _metodos(http) == [
             ("get", "/pedidos/compras/555"), ("get", "/pedidos/900"),
             ("put", "/pedidos/900/itens"), ("put", "/pedidos/900"),
+            ("get", "/pedidos/900/marcadores"), ("post", "/pedidos/900/marcadores"),
             ("put", "/pedidos/compras/555")]
         assert res["revisao"] == 2
         assert repo_ped.obter_pedido(pid)["status"] == e.EMITIDO
@@ -455,7 +547,7 @@ class TestEnviarAlteracao:
         assert "observacoes" in http.chamadas[3][2]
 
         # Bling: mesmo pedido (número/data/vencimento), itens e valor novos
-        corpo = http.chamadas[4][2]
+        corpo = http.chamadas[6][2]
         assert corpo["numero"] == 78 and corpo["data"] == "2026-08-01"
         assert sorted(i["quantidade"] for i in corpo["itens"]) == [4, 6]
         assert corpo["parcelas"] == [{"valor": 500.0, "dataVencimento": "2026-08-31",
@@ -469,6 +561,33 @@ class TestEnviarAlteracao:
         assert "alterar_venda" in acoes and "alterar_compra" in acoes
         assert any("Olist" in p for p in passos) and any("Bling" in p for p in passos)
 
+    def _modo_oc(self, repo_int, ocs):
+        cfg = {**repo_int.ler("olist")["config"], "modo_itens": "oc", "oc_por_colegio": ocs}
+        repo_int.salvar_config("olist", cfg, "t")
+
+    def test_modo_oc_envia_numero_e_tag_na_alteracao(self, monkeypatch):
+        """A venda alterada sai no MESMO formato da emitida (os SKUs do fixture
+        fogem do padrão; o número do modelo é simulado)."""
+        repo_ped, repo_int, pid = _em_alteracao()
+        self._modo_oc(repo_int, {"NEVES": "0008"})
+        monkeypatch.setattr(olist, "numero_do_sku", lambda s: "010")
+        http = HttpFake([_get_bling(), _get_olist(), OK204, OK204, *MARCADORES, PUT_BLING])
+
+        emissor.enviar_alteracao(pid, "turma menor", "diogo", repo_ped, repo_int, http=http)
+
+        assert [i["infoAdicional"] for i in http.chamadas[2][2]["itens"]] == ["010", "010"]
+        obs = http.chamadas[3][2]["observacoes"]
+        assert obs.split("\n")[-1] == "tag{ OC:0008; PRORROGAVEL:S; }"
+
+    def test_modo_oc_sem_oc_falha_antes_de_tocar_erp(self):
+        repo_ped, repo_int, pid = _em_alteracao()
+        self._modo_oc(repo_int, {})
+        http = HttpFake([_get_bling(), _get_olist()])
+        with pytest.raises(emissor.EmissaoFalhou, match="sem OC"):
+            emissor.enviar_alteracao(pid, "x", "diogo", repo_ped, repo_int, http=http)
+        assert all(m == "get" for m, _ in _metodos(http))
+        assert repo_ped.obter_pedido(pid)["status"] == e.ALTERACAO_PRONTA
+
     def test_so_compra_emitida_altera_so_o_bling(self):
         repo_ped, repo_int, pid = _em_alteracao(com_olist=False)
         http = HttpFake([_get_bling(), PUT_BLING])
@@ -477,11 +596,20 @@ class TestEnviarAlteracao:
                                   ("put", "/pedidos/compras/555")]
         assert repo_ped.obter_pedido(pid)["status"] == e.COMPRA_EMITIDA
 
-    def test_motivo_e_obrigatorio_e_nem_trava_o_pedido(self):
+    def test_motivo_e_opcional(self):
         repo_ped, repo_int, pid = _em_alteracao()
+        http = HttpFake([_get_bling(), _get_olist(), OK204, OK204, *MARCADORES, PUT_BLING])
+        res = emissor.enviar_alteracao(pid, "  ", "diogo", repo_ped, repo_int, http=http)
+        assert res["revisao"] == 2
+        assert repo_ped.obter_pedido(pid)["status"] == e.EMITIDO
+        assert repo_ped.obter_linha_de_base(pid)["motivo"] == ""
+
+    def test_alteracao_nao_marcada_como_pronta_nao_envia(self):
+        repo_ped, repo_int, pid = _em_alteracao(pronta=False)
         http = HttpFake([])
-        with pytest.raises(emissor.EmissaoFalhou, match="motivo"):
-            emissor.enviar_alteracao(pid, "  ", "diogo", repo_ped, repo_int, http=http)
+        with pytest.raises(emissor.EmissaoFalhou, match="pronta"):
+            emissor.enviar_alteracao(pid, "x", "diogo", repo_ped, repo_int, http=http)
+        assert http.chamadas == []
         assert repo_ped.obter_pedido(pid)["status"] == e.EM_ALTERACAO
 
     def test_pedido_fora_de_alteracao_nao_envia(self):
@@ -503,7 +631,7 @@ class TestEnviarAlteracao:
             emissor.enviar_alteracao(pid, "x", "diogo", repo_ped, repo_int, http=http)
 
         assert [m for m, _ in _metodos(http)] == ["get", "get"]        # só leu
-        assert repo_ped.obter_pedido(pid)["status"] == e.EM_ALTERACAO  # segue editável
+        assert repo_ped.obter_pedido(pid)["status"] == e.ALTERACAO_PRONTA  # volta à origem
         assert revisoes.pendente(repo_ped.listar_revisoes(pid)) == {}  # sem revisão órfã
 
     def test_edicao_manual_no_erp_vira_pergunta_e_nao_envia(self):
@@ -519,7 +647,7 @@ class TestEnviarAlteracao:
             {"sku": "CAL-G", "enviado": 4, "bling": 9, "olist": 4,
              "diverge_bling": True, "diverge_olist": False}]
         assert [m for m, _ in _metodos(http)] == ["get", "get"]
-        assert repo_ped.obter_pedido(pid)["status"] == e.EM_ALTERACAO
+        assert repo_ped.obter_pedido(pid)["status"] == e.ALTERACAO_PRONTA
         assert len(repo_int.listar_eventos()) == 0        # é pergunta, não falha: sem evento
 
     def test_sobrepor_envia_por_cima_da_edicao_manual(self):
@@ -527,26 +655,32 @@ class TestEnviarAlteracao:
         mexido = bling_pedido()
         mexido["itens"][1]["quantidade"] = 9
         http = HttpFake([RespostaFake(200, {"data": mexido}), _get_olist(),
-                         OK204, OK204, PUT_BLING])
+                         OK204, OK204, *MARCADORES, PUT_BLING])
         emissor.enviar_alteracao(pid, "x", "diogo", repo_ped, repo_int,
                                  sobrepor=True, http=http)
-        corpo = http.chamadas[4][2]
+        corpo = http.chamadas[6][2]
         assert {i["codigoFornecedor"]: i["quantidade"] for i in corpo["itens"]} == {
             "CAL-P": 6, "CAL-G": 4}                      # vale o que está na nossa tela
         assert repo_ped.obter_pedido(pid)["status"] == e.EMITIDO
 
     def test_zerar_tudo_manda_cancelar(self):
-        repo_ped, repo_int, pid = _em_alteracao(cal_p=0)
+        repo_ped, repo_int, pid = _em_alteracao(cal_p=0, pronta=False)
         item = next(i for i in repo_ped.tabelas[TAB_ITEM] if i["sku"] == "CAL-G")
         repo_ped.atualizar_quantidades(pid, [{"id": item["id"], "quantidade_final": 0}], "d")
+        repo_ped.marcar_alteracao_pronta(pid, "d")
         http = HttpFake([])
         with pytest.raises(emissor.EmissaoFalhou, match="Cancelar pedido emitido"):
             emissor.enviar_alteracao(pid, "x", "diogo", repo_ped, repo_int, http=http)
         assert http.chamadas == []
-        assert repo_ped.obter_pedido(pid)["status"] == e.EM_ALTERACAO
+        assert repo_ped.obter_pedido(pid)["status"] == e.ALTERACAO_PRONTA
 
     def test_sem_mudanca_nao_envia(self):
-        repo_ped, repo_int, pid = _em_alteracao(cal_p=10)       # igual ao emitido
+        repo_ped, repo_int, pid = _em_alteracao(cal_p=10, pronta=False)  # igual ao emitido
+        with pytest.raises(rp.TransicaoInvalida, match="Nenhuma quantidade difere"):
+            repo_ped.marcar_alteracao_pronta(pid, "diogo")      # a 1ª barreira
+        # a 2ª: mesmo que chegue pronta (estado forçado), o envio não sai
+        next(p for p in repo_ped.tabelas[TAB_PEDIDO] if p["id"] == pid)["status"] = \
+            e.ALTERACAO_PRONTA
         with pytest.raises(emissor.EmissaoFalhou, match="Nenhuma quantidade difere"):
             emissor.enviar_alteracao(pid, "x", "diogo", repo_ped, repo_int, http=HttpFake([]))
 
@@ -560,7 +694,7 @@ class TestEnviarAlteracao:
             emissor.enviar_alteracao(pid, "x", "diogo", repo_ped, repo_int, http=http)
 
         assert ("put", "/pedidos/compras/555") not in _metodos(http)
-        assert repo_ped.obter_pedido(pid)["status"] == e.EM_ALTERACAO
+        assert repo_ped.obter_pedido(pid)["status"] == e.ALTERACAO_PRONTA
         assert [r["numero"] for r in repo_ped.listar_revisoes(pid)] == [1]   # revisão removida
         ev = repo_int.listar_eventos().iloc[0]
         assert ev["acao"] == "alterar_pedido" and bool(ev["sucesso"]) is False
@@ -568,7 +702,7 @@ class TestEnviarAlteracao:
 
     def test_bling_falha_depois_do_olist_fica_travado_e_concluir_resolve(self):
         repo_ped, repo_int, pid = _em_alteracao()
-        http = HttpFake([_get_bling(), _get_olist(), OK204, OK204,
+        http = HttpFake([_get_bling(), _get_olist(), OK204, OK204, *MARCADORES,
                          RespostaFake(500, {"error": {"description": "Indisponível"}})])
 
         with pytest.raises(emissor.EmissaoFalhou, match="Indisponível"):
@@ -585,7 +719,7 @@ class TestEnviarAlteracao:
         http2 = HttpFake([_get_bling(), _get_olist(itens=[
             {"produto": {"id": 1001, "sku": "CAL-P"}, "quantidade": 6, "valorUnitario": 50.0},
             {"produto": {"id": 1003, "sku": "CAL-G"}, "quantidade": 4, "valorUnitario": 50.0}]),
-            OK204, OK204, PUT_BLING])
+            OK204, OK204, *MARCADORES, PUT_BLING])
         res = emissor.enviar_alteracao(pid, "", "diogo", repo_ped, repo_int, http=http2)
 
         assert res["revisao"] == 2
@@ -595,7 +729,7 @@ class TestEnviarAlteracao:
 
     def test_voltar_a_editar_depois_do_parcial_e_reenviar(self):
         repo_ped, repo_int, pid = _em_alteracao()
-        http = HttpFake([_get_bling(), _get_olist(), OK204, OK204, RespostaFake(500, {})])
+        http = HttpFake([_get_bling(), _get_olist(), OK204, OK204, *MARCADORES, RespostaFake(500, {})])
         with pytest.raises(emissor.EmissaoFalhou):
             emissor.enviar_alteracao(pid, "v1", "diogo", repo_ped, repo_int, http=http)
 
@@ -609,7 +743,8 @@ class TestEnviarAlteracao:
         olist_na_v2 = _get_olist(itens=[
             {"produto": {"id": 1001, "sku": "CAL-P"}, "quantidade": 6, "valorUnitario": 50.0},
             {"produto": {"id": 1003, "sku": "CAL-G"}, "quantidade": 4, "valorUnitario": 50.0}])
-        http2 = HttpFake([_get_bling(), olist_na_v2, OK204, OK204, PUT_BLING])
+        http2 = HttpFake([_get_bling(), olist_na_v2, OK204, OK204, *MARCADORES, PUT_BLING])
+        repo_ped.marcar_alteracao_pronta(pid, "diogo")
         res = emissor.enviar_alteracao(pid, "v2", "diogo", repo_ped, repo_int, http=http2)
 
         assert res["revisao"] == 3
@@ -619,7 +754,7 @@ class TestEnviarAlteracao:
     def test_concluir_quando_so_o_commit_do_estado_faltou(self):
         """ERPs já receberam e a revisão fechou; só o status ficou no lock."""
         repo_ped, repo_int, pid = _em_alteracao()
-        http = HttpFake([_get_bling(), _get_olist(), OK204, OK204, PUT_BLING])
+        http = HttpFake([_get_bling(), _get_olist(), OK204, OK204, *MARCADORES, PUT_BLING])
         emissor.enviar_alteracao(pid, "x", "diogo", repo_ped, repo_int, http=http)
         next(p for p in repo_ped.tabelas[TAB_PEDIDO] if p["id"] == pid)["status"] = \
             e.ALTERACAO_ENVIANDO
@@ -630,10 +765,11 @@ class TestEnviarAlteracao:
         assert repo_ped.obter_pedido(pid)["status"] == e.EMITIDO
 
     def test_sku_novo_sem_cadastro_no_olist_barra_antes_de_tocar(self):
-        repo_ped, repo_int, pid = _em_alteracao()
+        repo_ped, repo_int, pid = _em_alteracao(pronta=False)
         repo_ped.adicionar_itens(pid, [{
             "sku": "NOVO-M", "id_produto_bling": "777", "produto": "Novo", "tamanho": "M",
             "categoria": "Calça", "quantidade_final": 2, "custo_unit": 10.0}], "diogo")
+        repo_ped.marcar_alteracao_pronta(pid, "diogo")
         # GETs dos ERPs + a busca do SKU no catálogo do Olist (família e exato) sem achar
         http = HttpFake([_get_bling(), _get_olist()]
                         + [RespostaFake(200, {"itens": []})] * 4)
@@ -641,7 +777,7 @@ class TestEnviarAlteracao:
             emissor.enviar_alteracao(pid, "x", "diogo", repo_ped, repo_int, http=http,
                                      dormir=lambda _s: None)
         assert not [m for m, _ in _metodos(http) if m == "put"]
-        assert repo_ped.obter_pedido(pid)["status"] == e.EM_ALTERACAO
+        assert repo_ped.obter_pedido(pid)["status"] == e.ALTERACAO_PRONTA
 
 
 class TestRevisaoNaEmissao:
@@ -738,7 +874,8 @@ class TestCancelarEmitido:
             emissor.cancelar_emitido(pid, "", "diogo", repo_ped, repo_int, http=HttpFake([]))
         assert repo_ped.obter_pedido(pid)["status"] == e.EMITIDO
 
-    @pytest.mark.parametrize("status", [e.RASCUNHO, e.PRONTO, e.EM_ALTERACAO, e.CANCELADO])
+    @pytest.mark.parametrize("status", [e.RASCUNHO, e.PRONTO, e.EM_ALTERACAO,
+                                        e.ALTERACAO_PRONTA, e.CANCELADO])
     def test_so_pedido_emitido_em_repouso_cancela_nos_erps(self, status):
         repo_ped, repo_int, pid = _emitido()
         next(p for p in repo_ped.tabelas[TAB_PEDIDO] if p["id"] == pid)["status"] = status

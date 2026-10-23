@@ -15,6 +15,8 @@ _resultado_skus_rodada). O que se repete entre reruns do FRAGMENT (itens do
 pedido aberto, prontidão do Olist) é lido uma vez por rerun de app (ver _memo).
 """
 
+import time
+
 import streamlit as st
 from auth import exigir_admin
 
@@ -25,6 +27,7 @@ from pedidos.repositorio import (
     obter_repositorio, TransicaoInvalida, PedidoNaoEditavel,
     ItemJaExiste, ItemNaoRemovivel, MigracaoPendente,
 )
+from pedidos.integracoes import olist
 from pedidos.integracoes.repositorio import obter_repositorio_integracoes
 from ui_carga import carregar_com_feedback
 from ui_tabelas import (
@@ -70,6 +73,26 @@ def _memo(chave, ler):
     return bolsa[chave]
 
 
+def _cfg_olist_memo() -> dict:
+    """Config da integração Olist (uma leitura por rerun). Falha = {} — só
+    perde os avisos do modo OC; a emissão relê e valida por conta própria."""
+    def _ler():
+        try:
+            return (obter_repositorio_integracoes().ler("olist") or {}).get("config") or {}
+        except Exception:
+            return {}
+    return _memo("cfg_olist", _ler)
+
+
+def _colegios_sem_oc(pedidos_alvo) -> list:
+    """Modo OC: colégios dos pedidos que não têm OC cadastrada (vazio no modo SKU)."""
+    cfg = _cfg_olist_memo()
+    if olist.modo_itens(cfg) != olist.MODO_ITENS_OC:
+        return []
+    return sorted({str(c).strip() or "(vazio)" for c in pedidos_alvo["colegio"]
+                   if not olist.oc_do_colegio(cfg, c)})
+
+
 def _executar_lote(pedidos_alvo, fn_por_pedido):
     """
     Roda `fn_por_pedido(row)` para cada pedido do subconjunto elegível, SEM
@@ -107,6 +130,147 @@ def _flash_resumo_lote(acao: str, sucessos: int, falhas: list):
         else:
             _flash("error",
                    f"{acao}: nenhum concluído. Problemas:\n\n{corpo}")
+
+
+PULADO = "pulado"   # 3º resultado de um lote com ERP: nem ok nem falha (ver _rodar_lote_erp)
+
+_RESULTADO_LOTE = {True: "✅ Concluído", PULADO: "⏭️ Pulado", False: "❌ Falhou"}
+
+
+def _fmt_duracao(segundos: float) -> str:
+    segundos = max(0, int(round(segundos)))
+    if segundos < 60:
+        return f"{segundos} s"
+    minutos, resto = divmod(segundos, 60)
+    return f"{minutos} min {resto:02d} s" if resto else f"{minutos} min"
+
+
+def _rodar_lote_erp(area, titulo: str, pedidos_alvo, fn_por_pedido) -> tuple:
+    """
+    Lote que fala com ERP (emissão, envio de alteração, marcadores): cada
+    pedido leva segundos e o Olist pausa no rate limit, então o operador precisa
+    VER o andamento. Desenha em `area` (contêiner na largura da seção, fora do
+    popover que só confirmou): título com "i de N — pedido · tempo restante",
+    barra, a etapa atual numa linha que se reescreve e uma linha de resultado
+    por pedido. Falha em um não interrompe os outros.
+
+    `fn_por_pedido(row, etapa, dormir)` → (ok, msg), com ok True / False /
+    PULADO. `etapa(texto)` narra o passo atual; `dormir(s)` é a espera do
+    rate limit, que assim aparece na tela em vez de parecer travamento.
+    O resultado fica em session_state["pc_lote_resultado"] (tabela que
+    sobrevive ao rerun). Retorna (sucessos, falhas) como _executar_lote.
+    """
+    total = len(pedidos_alvo)
+    linhas, falhas, sucessos, pulados = [], [], 0, 0
+    inicio = time.monotonic()
+    with area:
+        with st.status(f"{titulo}: começando…", expanded=True) as caixa:
+            barra = st.progress(0.0, text=f"0 de {total}")
+            linha_etapa = st.empty()
+            for i, (_, row) in enumerate(pedidos_alvo.iterrows()):
+                rotulo = f"{row['colegio']} · {row['super_categoria']}"
+                restante = ""
+                if i:
+                    media = (time.monotonic() - inicio) / i
+                    restante = f" · ~{_fmt_duracao(media * (total - i))} restantes"
+                # expanded a cada update: sem ele a caixa recolhe e esconde a
+                # barra, a etapa e as linhas por pedido.
+                caixa.update(label=f"{titulo}: {i + 1} de {total} — {rotulo}{restante}",
+                             expanded=True)
+
+                def etapa(texto, _r=rotulo):
+                    linha_etapa.caption(f":material/sync: **{_r}** · {texto}")
+
+                def dormir(segundos, _r=rotulo):
+                    linha_etapa.caption(
+                        f":material/hourglass_top: **{_r}** · o Olist pediu uma pausa "
+                        f"(limite de chamadas) — aguardando {_fmt_duracao(segundos)}…")
+                    time.sleep(segundos)
+
+                etapa("começando…")
+                t0 = time.monotonic()
+                try:
+                    ok, msg = fn_por_pedido(row, etapa, dormir)
+                except Exception as exc:
+                    ok, msg = False, str(exc)
+                dur = time.monotonic() - t0
+
+                if ok is True:
+                    sucessos += 1
+                    st.markdown(f":green[:material/check_circle:] **{rotulo}** "
+                                f":gray[· {_fmt_duracao(dur)}]")
+                elif ok == PULADO:
+                    pulados += 1
+                    falhas.append(f"**{rotulo}** — {msg}")
+                    st.markdown(f":orange[:material/skip_next:] **{rotulo}** — {msg}")
+                else:
+                    falhas.append(f"**{rotulo}** — {msg}")
+                    st.markdown(f":red[:material/error:] **{rotulo}** — {msg}")
+                linhas.append({"pedido": rotulo, "resultado": _RESULTADO_LOTE[ok],
+                               # célula de tabela não renderiza markdown
+                               "detalhe": str(msg).replace("**", "") if ok is not True else "",
+                               "tempo": _fmt_duracao(dur)})
+                barra.progress((i + 1) / total, text=f"{i + 1} de {total}")
+
+            linha_etapa.empty()
+            res = {"titulo": titulo, "linhas": linhas, "sucessos": sucessos,
+                   "pulados": pulados, "falhas": len(falhas) - pulados,
+                   "duracao": _fmt_duracao(time.monotonic() - inicio),
+                   "quando": pd.Timestamp.now().strftime("%H:%M")}
+            caixa.update(label=f"{titulo}: {_contagem_lote(res)} · {res['duracao']}",
+                         state="error" if res["falhas"] else "complete",
+                         expanded=bool(falhas))
+
+    st.session_state["pc_lote_resultado"] = res
+    return sucessos, falhas
+
+
+def _contagem_lote(res: dict) -> str:
+    """'17 concluído(s) · 4 pulado(s) · 1 falhou' — pulado é a regra agindo, não erro."""
+    partes = [f"{res['sucessos']} concluído(s)"]
+    if res.get("pulados"):
+        partes.append(f"{res['pulados']} pulado(s)")
+    if res.get("falhas"):
+        partes.append(f"{res['falhas']} falhou" if res["falhas"] == 1
+                      else f"{res['falhas']} falharam")
+    return " · ".join(partes)
+
+
+def _flash_lote_erp(acao: str, sucessos: int, falhas: list):
+    """Resumo curto: o detalhe por pedido está na tabela do último lote."""
+    res = st.session_state.get("pc_lote_resultado") or {}
+    if falhas:
+        _flash("warning", f"{acao}: {_contagem_lote(res)} — veja o resultado do "
+                          "lote abaixo.")
+    else:
+        _flash("success", f"{acao}: **{sucessos}** pedido(s) concluído(s).")
+
+
+def _resultado_ultimo_lote() -> None:
+    """Tabela do último lote com ERP — fica até o operador dispensar."""
+    res = st.session_state.get("pc_lote_resultado")
+    if not res:
+        return
+    with st.container(border=True):
+        with st.container(horizontal=True, vertical_alignment="center"):
+            st.markdown(
+                f"**Último lote — {res['titulo']}** :gray[· {res['quando']} · "
+                f"{_contagem_lote(res)} · {res['duracao']}]")
+            if st.button("Dispensar", icon=":material/close:", key="pc_lote_dispensar",
+                         width="content"):
+                st.session_state.pop("pc_lote_resultado", None)
+                st.rerun()
+        df = pd.DataFrame(res["linhas"])
+        # Problemas primeiro: é o que pede ação.
+        df["_ordem"] = df["resultado"].map({v: k for k, v in enumerate(
+            [_RESULTADO_LOTE[False], _RESULTADO_LOTE[PULADO], _RESULTADO_LOTE[True]])})
+        df = df.sort_values("_ordem", kind="stable").drop(columns="_ordem")
+        exibir(df, FILA, {
+            "pedido": col_texto("Pedido"),
+            "resultado": col_texto("Resultado"),
+            "detalhe": col_texto("O que fazer / erro", largura="large"),
+            "tempo": col_texto("Tempo"),
+        })
 
 
 # Rótulos das colunas da memória de cálculo por SKU (ordem de exibição =
@@ -678,45 +842,47 @@ def _tabela_divergencias(divergencias: list, itens: pd.DataFrame) -> None:
                "vai ficar 0 = sai do pedido no envio.")
 
 
-def _secao_enviar_alteracao(pedido_sel, itens: pd.DataFrame, historico: list,
-                            pendente: bool) -> None:
+def _conferencia_alteracao(itens: pd.DataFrame, historico: list) -> None:
     """
-    Conferência + envio da alteração. Mostra SÓ o que muda em relação ao que
-    está nos ERPs (a linha de base) — é o que o gestor assina ao enviar.
+    O que a alteração muda em relação ao que está nos ERPs (a linha de base) —
+    é o que o gestor assina ao enviar. Só as linhas que mudam.
+    """
+    diferencas = revisoes.diferencas(itens, revisoes.linha_de_base(historico))
+    st.markdown("**O que muda nos ERPs**")
+    if not diferencas:
+        st.caption("Nenhuma quantidade difere do que está emitido"
+                   + (" — o envio só realinha os dois ERPs." if revisoes.envio_parcial(historico)
+                      else " — edite a tabela acima ou descarte a alteração."))
+        return
+    df = pd.DataFrame(diferencas)
+    df["delta"] = df["nova"] - df["emitida"]
+    df["delta_valor"] = df["delta"] * df["custo_unit"]
+    df["tamanho"] = df["tamanho"].replace("nan", "")
+    exibir(
+        df[["sku", "produto", "tamanho", "emitida", "nova", "delta", "delta_valor"]],
+        MEMORIA,
+        {
+            "sku": col_sku(),
+            "produto": col_produto(),
+            "tamanho": col_tamanho(),
+            "emitida": col_pecas("Emitida (pçs)", largura=None,
+                                 ajuda="O que está nos ERPs agora"),
+            "nova": col_pecas("Nova (pçs)", largura=None),
+            "delta": st.column_config.NumberColumn("Δ pçs", format="%+d", width="small"),
+            "delta_valor": col_moeda("Δ valor", casas=2),
+        })
+    _dq, _dv = int(df["delta"].sum()), float(df["delta_valor"].sum())
+    st.caption(f"**{len(df)}** item(ns) mudam · **{_dq:+d}** peças · "
+               f"**{'+' if _dv >= 0 else '−'}{_fmt_brl(abs(_dv))}** no pedido.")
+
+
+def _acoes_alteracao_pronta(pedido_sel, itens: pd.DataFrame, botao_csv) -> None:
+    """
+    Linha de ações da Alteração pronta: motivo (opcional) + Enviar (a ação principal,
+    colada na tabela como o "Emitir compra" do PRONTO) · Reabrir · CSV. A edição
+    feita direto no ERP aparece ACIMA da linha, porque bloqueia o envio.
     """
     pedido_id = pedido_sel["id"]
-    base = revisoes.linha_de_base(historico)
-    parcial = revisoes.envio_parcial(historico)
-    diferencas = revisoes.diferencas(itens, base)
-
-    st.markdown("**Enviar alteração aos ERPs**")
-    if not diferencas and not parcial:
-        st.caption("Nenhuma quantidade difere do que está emitido — edite a tabela "
-                   "acima ou descarte a alteração.")
-        return
-
-    if diferencas:
-        df = pd.DataFrame(diferencas)
-        df["delta"] = df["nova"] - df["emitida"]
-        df["delta_valor"] = df["delta"] * df["custo_unit"]
-        df["tamanho"] = df["tamanho"].replace("nan", "")
-        exibir(
-            df[["sku", "produto", "tamanho", "emitida", "nova", "delta", "delta_valor"]],
-            MEMORIA,
-            {
-                "sku": col_sku(),
-                "produto": col_produto(),
-                "tamanho": col_tamanho(),
-                "emitida": col_pecas("Emitida (pçs)", largura=None,
-                                     ajuda="O que está nos ERPs agora"),
-                "nova": col_pecas("Nova (pçs)", largura=None),
-                "delta": st.column_config.NumberColumn("Δ pçs", format="%+d", width="small"),
-                "delta_valor": col_moeda("Δ valor", casas=2),
-            })
-        _dq, _dv = int(df["delta"].sum()), float(df["delta_valor"].sum())
-        st.caption(f"**{len(df)}** item(ns) mudam · **{_dq:+d}** peças · "
-                   f"**{'+' if _dv >= 0 else '−'}{_fmt_brl(abs(_dv))}** no pedido.")
-
     divergencias = st.session_state.get(_chave_divergencia(pedido_id))
     sobrepor = False
     if divergencias:
@@ -728,20 +894,31 @@ def _secao_enviar_alteracao(pedido_sel, itens: pd.DataFrame, historico: list,
         sobrepor = st.checkbox("Sobrepor o que foi alterado direto no ERP",
                                key=f"pc_sobrepor_{pedido_id}")
 
-    motivo = st.text_input("Motivo da alteração", key=f"alt_motivo_{pedido_id}",
-                           placeholder="Ex.: colégio reduziu a turma do 6º ano")
-    if pendente:
-        impede = "Salve as quantidades editadas antes de enviar."
-    elif not motivo.strip():
-        impede = "Informe o motivo da alteração."
-    elif divergencias and not sobrepor:
+    c1, c2, c3, c4 = st.columns([3, 1.4, 1.4, 1.4], vertical_alignment="bottom")
+    with c1:
+        motivo = st.text_input("Motivo da alteração (opcional)",
+                               key=f"alt_motivo_{pedido_id}",
+                               placeholder="Ex.: colégio reduziu a turma do 6º ano")
+    if divergencias and not sobrepor:
         impede = "Confirme a sobreposição do que foi alterado direto no ERP."
     else:
         impede = None
+    with c2:
+        enviar = st.button("Enviar aos ERPs", icon=":material/send:", type="primary",
+                           width="stretch", disabled=bool(impede), help=impede,
+                           key=f"enviar_alt_{pedido_id}")
+    with c3:
+        if st.button("Reabrir alteração", icon=":material/undo:", width="stretch",
+                     key=f"reabrir_alt_{pedido_id}"):
+            ok = repo.reabrir_alteracao(pedido_id, usuario)
+            st.session_state.pop(_chave_divergencia(pedido_id), None)
+            _flash("success", "Alteração reaberta para edição.") if ok else _flash(
+                "warning", "O pedido mudou de estado em outra sessão — recarregado.")
+            st.rerun()
+    with c4:
+        botao_csv()
 
-    if st.button("Enviar alteração", icon=":material/send:", disabled=bool(impede),
-                 help=impede, type="secondary" if pendente else "primary",
-                 key=f"enviar_alt_{pedido_id}"):
+    if enviar:
         with st.status("Enviando alteração aos ERPs…", expanded=True) as _s:
             try:
                 res = emissor.enviar_alteracao(
@@ -893,7 +1070,7 @@ with st.container(border=True):
     # Pedido em alteração (ou com envio em curso) continua emitido nos dois ERPs
     _emitidos = pedidos.apply(
         lambda p: p["status"] == estados.EMITIDO
-        or ((p["status"] == estados.EM_ALTERACAO or estados.enviando_alteracao(p["status"]))
+        or ((estados.em_alteracao(p["status"]) or estados.enviando_alteracao(p["status"]))
             and estados.estado_emitido(p) == estados.EMITIDO), axis=1)
     _k4.metric("Emitidos", int(_emitidos.sum()))
     _k5.metric("Investimento (final)", _fmt_brl(float(pedidos["investimento_final"].sum())))
@@ -964,7 +1141,7 @@ def _secao_pedido(pedidos_f: pd.DataFrame):
     # --- Pós-emissão: numa alteração a referência deixa de ser a sugestão e
     # passa a ser a LINHA DE BASE (o que está nos ERPs). As revisões só são
     # lidas nos estados que as usam. ---
-    em_alteracao = status == estados.EM_ALTERACAO
+    em_alteracao = estados.em_alteracao(status)   # digitando ou já pronta p/ enviar
     historico, _erro_revisoes = [], None
     if (em_alteracao or estados.enviando_alteracao(status)
             or (status == estados.CANCELADO and pedido_sel.get("bling_id"))):
@@ -1162,11 +1339,17 @@ def _secao_pedido(pedidos_f: pd.DataFrame):
             icon=":material/mark_email_read:",
         )
     elif em_alteracao:
-        st.info(
-            "**Em alteração.** Os ERPs continuam com a versão emitida"
-            + (f" (revisão {base['numero']})" if base else "")
-            + " — as quantidades abaixo só passam a valer depois de **Enviar alteração**.",
-            icon=":material/edit_note:")
+        _revisao = f" (revisão {base['numero']})" if base else ""
+        if status == estados.ALTERACAO_PRONTA:
+            st.info(
+                f"**Alteração pronta.** Os ERPs continuam com a versão emitida{_revisao} "
+                "— confira e **envie a alteração**. Para mudar alguma quantidade, "
+                "reabra a alteração.", icon=":material/task_alt:")
+        else:
+            st.info(
+                f"**Em alteração.** Os ERPs continuam com a versão emitida{_revisao} — "
+                "terminada a digitação, **marque a alteração como pronta** para enviar.",
+                icon=":material/edit_note:")
         _parcial = revisoes.envio_parcial(historico)
         if _parcial:
             _recebeu = [nome for erp, nome in (("olist", "Olist"), ("bling", "Bling"))
@@ -1220,7 +1403,7 @@ def _secao_pedido(pedidos_f: pd.DataFrame):
         except Exception as exc:
             _erro_map = str(exc)
         _erros_pre = emissor.validar_pre_emissao_olist(
-            itens, _cfg_olist if not _erro_map else {}, _mapa)
+            itens, _cfg_olist if not _erro_map else {}, _mapa, pedido_sel.to_dict())
         if _erro_map:
             st.warning(f"Não foi possível checar o catálogo do Olist agora: {_erro_map}")
         elif _erros_pre:
@@ -1232,6 +1415,11 @@ def _secao_pedido(pedidos_f: pd.DataFrame):
         for _a in _memo("prontidao_olist", lambda: emissor.checar_prontidao_olist(
                 obter_repositorio_integracoes())):
             st.warning(_a, icon=":material/warning:")
+        # Modo OC: colégio sem OC ou SKU fora do padrão bloqueia a VENDA — e
+        # só seria visto depois da compra emitida. Avisa agora.
+        for _p in olist.problemas_modo_oc(pedido_sel.to_dict(), itens, _cfg_olist_memo()):
+            st.warning(f"Venda no Olist (modo OC): {_p} Resolva antes de emitir a compra.",
+                       icon=":material/warning:")
 
     # --- Observações + CSV (só montados aqui; exibidos abaixo das ações) ---
     obs_bling = builder.montar_observacoes_bling(
@@ -1378,8 +1566,14 @@ def _secao_pedido(pedidos_f: pd.DataFrame):
                             mapa_sku=_mapa)
                         _s.update(label=f"Venda emitida · nº {res['olist_numero']}",
                                   state="complete")
-                        _flash("success",
-                               f"Venda emitida no Olist · nº **{res['olist_numero']}**.")
+                        if res.get("marcadores_erro"):
+                            _flash("warning",
+                                   f"Venda emitida no Olist · nº **{res['olist_numero']}**, "
+                                   f"mas os marcadores falharam ({res['marcadores_erro']}). "
+                                   "Reaplique em Ação em lote → Marcadores Olist.")
+                        else:
+                            _flash("success",
+                                   f"Venda emitida no Olist · nº **{res['olist_numero']}**.")
                     except emissor.EmissaoFalhou as exc:
                         _s.update(label="Falha na emissão da venda", state="error")
                         _flash("error", f"Emissão da venda falhou: {exc}")
@@ -1394,14 +1588,36 @@ def _secao_pedido(pedidos_f: pd.DataFrame):
             _botao_csv()
         _acoes_pos_emissao(pedido_sel)
 
+    elif status == estados.ALTERACAO_PRONTA:
+        _acoes_alteracao_pronta(pedido_sel, itens, _botao_csv)
+        _conferencia_alteracao(itens, historico)
+
     elif em_alteracao:
-        c1, c2, c3 = st.columns(3)
+        _parcial = bool(revisoes.envio_parcial(historico))
+        _nada_muda = not _parcial and not revisoes.diferencas(itens, base)
+        c1, c2, c3, c4 = st.columns(4)
         with c1:
             # Uma ação primária por vez: com edição pendente é o Salvar; sem
-            # pendência o destaque passa ao "Enviar alteração", logo abaixo.
+            # pendência o destaque passa ao "Marcar alteração pronta".
             _botao_salvar()
         with c2:
-            _parcial = bool(revisoes.envio_parcial(historico))
+            # Bloqueado com edição pendente pelo mesmo motivo do "Marcar como
+            # Pronto": ele não grava a tabela, e o digitado se perderia.
+            _impede = ("Salve as alterações antes de marcar como pronta." if _pendente
+                       else "Nenhuma quantidade difere do que está emitido — "
+                            "descarte a alteração." if _nada_muda else None)
+            if st.button("Marcar alteração pronta", icon=":material/task_alt:",
+                         width="stretch", disabled=bool(_impede), help=_impede,
+                         type="secondary" if _impede else "primary",
+                         key=f"alt_pronta_{pedido_id}"):
+                try:
+                    ok = repo.marcar_alteracao_pronta(pedido_id, usuario)
+                    _flash("success", "Alteração marcada como **pronta**.") if ok else _flash(
+                        "warning", "O pedido mudou de estado em outra sessão — recarregado.")
+                except (MigracaoPendente, TransicaoInvalida) as exc:
+                    _flash("error", str(exc))
+                st.rerun()
+        with c3:
             with st.popover("Descartar alteração", icon=":material/undo:", width="stretch",
                             disabled=_parcial,
                             help="Um dos ERPs já recebeu esta alteração — envie de "
@@ -1419,9 +1635,9 @@ def _secao_pedido(pedidos_f: pd.DataFrame):
                     except (TransicaoInvalida, MigracaoPendente) as exc:
                         _flash("warning", str(exc))
                     st.rerun()
-        with c3:
+        with c4:
             _botao_csv()
-        _secao_enviar_alteracao(pedido_sel, itens, historico, _pendente)
+        _conferencia_alteracao(itens, historico)
 
     elif estados.enviando_alteracao(status):
         _eh_alteracao = status == estados.ALTERACAO_ENVIANDO
@@ -1479,7 +1695,35 @@ def _secao_pedido(pedidos_f: pd.DataFrame):
         with c2:
             _botao_csv()
 
-    else:  # SINCRONIZADO / CANCELADO — sem ações, só o CSV
+    elif status == estados.CANCELADO:
+        # Só volta o que nunca foi aos ERPs, numa rodada ainda aberta — a
+        # mesma regra que o repositório impõe (estados.impedimentos_reabrir).
+        _impede = " ".join(estados.impedimentos_reabrir(
+            pedido_sel.to_dict(), rodada_sel["status"]))
+        c1, c2, _ = st.columns([1, 1, 2])
+        with c1:
+            with st.popover("Reabrir para edição", icon=":material/undo:",
+                            width="stretch", disabled=bool(_impede),
+                            help=_impede or None):
+                st.caption("O pedido volta a **Rascunho** com as quantidades que "
+                           "tinha ao ser cancelado — revise e marque como Pronto.")
+                if st.button("Confirmar reabertura", type="primary",
+                             key=f"reabrir_canc_{pedido_id}"):
+                    try:
+                        ok = repo.reabrir_cancelado(pedido_id, usuario)
+                        _nova_rev()
+                        _flash("success", "Pedido reaberto como **Rascunho**.") if ok \
+                            else _flash("warning", "O pedido mudou de estado em outra "
+                                                   "sessão — recarregado.")
+                    except TransicaoInvalida as exc:
+                        _flash("warning", str(exc))
+                    st.rerun()
+        with c2:
+            _botao_csv()
+        if _impede:
+            st.caption(f":material/lock: {_impede}")
+
+    else:  # SINCRONIZADO — sem ações, só o CSV
         c1, _ = st.columns([1, 3])
         with c1:
             _botao_csv()
@@ -1516,6 +1760,8 @@ def _secao_pedido(pedidos_f: pd.DataFrame):
                     with vpv:
                         st.markdown("**Venda (Olist)**")
                         st.json(_prev["venda"], expanded=False)
+                        st.caption("Marcadores (enviados logo após criar a venda): "
+                                   + " · ".join(f"`{m}`" for m in _prev["marcadores"]))
                 except Exception as exc:
                     st.caption(f"Preview indisponível: {exc}")
 
@@ -1549,6 +1795,8 @@ def _secao_lote(pedidos_f: pd.DataFrame, assinatura_filtro: str):
     cada clique. Os botões de ação chamam st.rerun() (escopo app) para refletir
     a mudança na página inteira + a mensagem de resultado.
     """
+    _resultado_ultimo_lote()
+
     view_ped = pedidos_f.copy()
     view_ped["Status"] = view_ped["status"].map(estados.ROTULOS_BADGE)
     view_ped["Δ"] = view_ped["qtd_final"] - view_ped["qtd_sugerida"]
@@ -1598,8 +1846,15 @@ def _secao_lote(pedidos_f: pd.DataFrame, assinatura_filtro: str):
     if len(sel) >= 1:
         _rasc = sel[sel["status"] == estados.RASCUNHO]
         _pronto = sel[sel["status"] == estados.PRONTO]   # também os "reabríveis"
+        _cancelados = sel[sel["status"] == estados.CANCELADO]
+        _em_alt = sel[sel["status"] == estados.EM_ALTERACAO]
+        _alt_pronta = sel[sel["status"] == estados.ALTERACAO_PRONTA]
+        _alteraveis = sel[sel["status"].map(estados.alteravel)]
+        _reabriveis = pd.concat([_pronto, _cancelados, _alt_pronta])
         _compra = sel[sel["status"] == estados.COMPRA_EMITIDA]
         _cancelaveis = sel[sel["status"].isin([estados.RASCUNHO, estados.PRONTO])]
+        _com_venda = sel[sel["olist_id"].fillna("").astype(str).str.strip() != ""] \
+            if "olist_id" in sel else sel.iloc[0:0]
 
         st.divider()
         _s1, _s2, _s3 = st.columns(3)
@@ -1607,7 +1862,11 @@ def _secao_lote(pedidos_f: pd.DataFrame, assinatura_filtro: str):
         _s2.metric("Peças finais", num(int(sel['qtd_final'].sum())))
         _s3.metric("Investimento", _fmt_brl(float(sel['investimento_final'].sum())))
 
-        b1, b2, b3, b4, b5 = st.columns(5)
+        # Lotes com ERP desenham o andamento AQUI, na largura da seção — dentro
+        # do popover de confirmação ele ficava espremido ou escondido.
+        _area_lote = st.container()
+
+        b1, b2, b3, b4, b5, b6 = st.columns(6)
 
         # Aprovar: RASCUNHO → PRONTO
         with b1:
@@ -1624,14 +1883,21 @@ def _secao_lote(pedidos_f: pd.DataFrame, assinatura_filtro: str):
 
         # Reabrir: PRONTO → RASCUNHO
         with b2:
-            if st.button(f"Reabrir ({len(_pronto)})", icon=":material/undo:",
-                         disabled=_pronto.empty, width="stretch",
-                         help="Volta os selecionados em Pronto para Rascunho (edição)"):
+            if st.button(f"Reabrir ({len(_reabriveis)})", icon=":material/undo:",
+                         disabled=_reabriveis.empty, width="stretch",
+                         help="Volta para edição: Pronto e cancelados que nunca foram "
+                              "aos ERPs → Rascunho; Alteração pronta → Em alteração"):
+                # Cancelado passa pela guarda (reabrir_cancelado): o que já foi
+                # aos ERPs ou é de rodada cancelada volta como problema no resumo.
+                def _reabrir(r):
+                    if r["status"] == estados.CANCELADO:
+                        return repo.reabrir_cancelado(r["id"], usuario)
+                    if r["status"] == estados.ALTERACAO_PRONTA:
+                        return repo.reabrir_alteracao(r["id"], usuario)
+                    return repo.transicionar_pedido(
+                        r["id"], estados.PRONTO, estados.RASCUNHO, usuario)
                 suc, fal = _executar_lote(
-                    _pronto, lambda r: (
-                        repo.transicionar_pedido(
-                            r["id"], estados.PRONTO, estados.RASCUNHO, usuario),
-                        "o estado mudou em outra sessão"))
+                    _reabriveis, lambda r: (_reabrir(r), "o estado mudou em outra sessão"))
                 _flash_resumo_lote("Reabertura", suc, fal)
                 st.rerun()
 
@@ -1665,19 +1931,22 @@ def _secao_lote(pedidos_f: pd.DataFrame, assinatura_filtro: str):
                 for _a in _memo("prontidao_olist", lambda: emissor.checar_prontidao_olist(
                         obter_repositorio_integracoes())):
                     st.warning(_a, icon=":material/warning:")
+                _sem_oc = _colegios_sem_oc(_pronto)
+                if _sem_oc:
+                    st.warning("Venda no Olist (modo OC): sem OC cadastrada para "
+                               f"{', '.join(_sem_oc)} — essas vendas serão bloqueadas "
+                               "depois da compra. Cadastre em Integrações → Olist.",
+                               icon=":material/warning:")
                 if st.button("Confirmar emissão das compras", type="primary",
                              key="emit_compra_lote"):
-                    with st.status(f"Emitindo {len(_pronto)} compra(s) no Bling…",
-                                   expanded=True) as _s:
-                        suc, fal = _executar_lote(
-                            _pronto, lambda r: (
-                                bool(emissor.emitir_compra_bling(
-                                    r["id"], usuario, repo,
-                                    obter_repositorio_integracoes())), ""))
-                        _s.update(
-                            label=f"Compras processadas: {suc} ok, {len(fal)} com problema",
-                            state="error" if fal else "complete")
-                    _flash_resumo_lote("Emissão de compra (Bling)", suc, fal)
+                    def _compra_um(r, etapa, _dormir):
+                        etapa("Bling: criando o pedido de compra…")
+                        res = emissor.emitir_compra_bling(
+                            r["id"], usuario, repo, obter_repositorio_integracoes())
+                        return True, f"nº {res.get('bling_numero', '?')}"
+                    suc, fal = _rodar_lote_erp(
+                        _area_lote, "Emissão de compra (Bling)", _pronto, _compra_um)
+                    _flash_lote_erp("Emissão de compra (Bling)", suc, fal)
                     st.rerun()
 
         # Emitir venda (Olist): COMPRA_EMITIDA → Olist (com confirmação + total)
@@ -1691,8 +1960,8 @@ def _secao_lote(pedidos_f: pd.DataFrame, assinatura_filtro: str):
                 )
                 if st.button("Confirmar emissão das vendas", type="primary",
                              key="emit_venda_lote"):
-                    with st.status(f"Emitindo {len(_compra)} venda(s) no Olist…",
-                                   expanded=True) as _s:
+                    with _area_lote, st.status(f"Venda no Olist: mapeando os SKUs do lote…",
+                                               expanded=True) as _s:
                         # Mapeia SKU→Olist UMA vez p/ todo o lote (cache +
                         # família + fallback) — passar mapa_sku=None por
                         # pedido refazia a busca N vezes e estourava o rate
@@ -1707,20 +1976,122 @@ def _secao_lote(pedidos_f: pd.DataFrame, assinatura_filtro: str):
                             })
                             _s.write(f"Mapeando {len(_skus)} SKU(s) no Olist…")
                             _mapa_lote, _ = emissor.resolver_ids_olist(_skus, _ri)
+                            _s.update(label=f"Venda no Olist: {len(_skus)} SKU(s) mapeados",
+                                      state="complete", expanded=False)
                         except Exception as _exc:
                             _mapa_lote = None
                             _s.write(f":orange[:material/warning:] Pré-mapeamento falhou ({_exc}); "
                                      "cada pedido mapeia sozinho.")
-                        suc, fal = _executar_lote(
-                            _compra, lambda r: (
-                                bool(emissor.emitir_venda_olist(
-                                    r["id"], usuario, repo,
-                                    obter_repositorio_integracoes(),
-                                    mapa_sku=_mapa_lote)), ""))
-                        _s.update(
-                            label=f"Vendas processadas: {suc} ok, {len(fal)} com problema",
-                            state="error" if fal else "complete")
-                    _flash_resumo_lote("Emissão de venda (Olist)", suc, fal)
+                            _s.update(state="error", expanded=True)
+
+                    def _venda_um(r, etapa, _dormir):
+                        etapa("Olist: criando o pedido de venda…")
+                        res = emissor.emitir_venda_olist(
+                            r["id"], usuario, repo, obter_repositorio_integracoes(),
+                            mapa_sku=_mapa_lote)
+                        return True, f"nº {res.get('olist_numero', '?')}"
+                    suc, fal = _rodar_lote_erp(
+                        _area_lote, "Emissão de venda (Olist)", _compra, _venda_um)
+                    _flash_lote_erp("Emissão de venda (Olist)", suc, fal)
+                    st.rerun()
+
+        # Marcadores no Olist: retroativo (vendas de antes dos marcadores) e
+        # reaplicação quando a marcação da emissão falhou. Só ACRESCENTA.
+        with b6:
+            with st.popover(f"Marcadores Olist ({len(_com_venda)})", icon=":material/label:",
+                            width="stretch", disabled=_com_venda.empty):
+                st.caption(
+                    f"Garante colégio, super categoria e rodada em **{len(_com_venda)}** "
+                    "venda(s) já emitida(s) no Olist. Só acrescenta o que falta — "
+                    "marcadores postos à mão continuam lá.")
+                if st.button("Aplicar marcadores", type="primary", key="marcar_lote"):
+                    def _marcar_um(r, etapa, dormir):
+                        etapa("Olist: conferindo os marcadores da venda…")
+                        criados = emissor.marcar_venda_olist(
+                            r["id"], usuario, repo, obter_repositorio_integracoes(),
+                            dormir=dormir)
+                        return True, (f"{len(criados)} marcador(es) incluído(s)"
+                                      if criados else "já estava completo")
+                    suc, fal = _rodar_lote_erp(
+                        _area_lote, "Marcadores (Olist)", _com_venda, _marcar_um)
+                    _flash_lote_erp("Marcadores (Olist)", suc, fal)
+                    st.rerun()
+
+        # Pós-emissão: marcar pronta (não toca ERP, igual ao Aprovar) e enviar
+        # as alterações prontas aos ERPs. O lote NUNCA sobrepõe edição feita
+        # direto no ERP: esse pedido é pulado e tratado um a um.
+        c_abrir, c_alt, c_env, _ = st.columns([1, 1, 1, 3])
+        with c_abrir:
+            with st.popover(f"Abrir alteração ({len(_alteraveis)})", icon=":material/edit:",
+                            width="stretch", disabled=_alteraveis.empty):
+                st.caption(
+                    f"Leva **{len(_alteraveis)}** pedido(s) emitido(s) para **Em alteração**. "
+                    "Cada um é conferido no Bling e no Olist antes: só abre o que está "
+                    "Em aberto / Aberta lá — o resto é pulado. Nada é enviado aos ERPs "
+                    "agora; o envio sai depois, da Alteração pronta.")
+                if st.button("Confirmar abertura", type="primary", key="abrir_alt_lote"):
+                    def _abrir_um(r, etapa, dormir):
+                        impedimentos = emissor.abrir_alteracao_verificada(
+                            r["id"], usuario, repo, obter_repositorio_integracoes(),
+                            dormir=dormir, progresso=etapa)
+                        if impedimentos:
+                            return PULADO, " ".join(impedimentos)
+                        return True, "em alteração"
+                    suc, fal = _rodar_lote_erp(
+                        _area_lote, "Abertura de alteração", _alteraveis, _abrir_um)
+                    _nova_rev()
+                    _flash_lote_erp("Abertura de alteração", suc, fal)
+                    if suc:   # o que fazer agora — a abertura sozinha não muda nada nos ERPs
+                        _flash(st.session_state["pc_pagina_msg"][0],
+                               st.session_state["pc_pagina_msg"][1]
+                               + " Próximo passo: ajuste as quantidades (filtro **Em "
+                                 "alteração**), marque como **Alteração pronta** e envie.")
+                    st.rerun()
+        with c_alt:
+            if st.button(f"Alteração pronta ({len(_em_alt)})", icon=":material/task_alt:",
+                         disabled=_em_alt.empty, width="stretch",
+                         help="Marca os selecionados Em alteração como Alteração pronta "
+                              "(itens travam)"):
+                suc, fal = _executar_lote(
+                    _em_alt, lambda r: (
+                        repo.marcar_alteracao_pronta(r["id"], usuario),
+                        "o estado mudou em outra sessão"))
+                _flash_resumo_lote("Alteração pronta", suc, fal)
+                st.rerun()
+        with c_env:
+            with st.popover(f"Enviar aos ERPs ({len(_alt_pronta)})", icon=":material/send:",
+                            width="stretch", disabled=_alt_pronta.empty):
+                st.caption(
+                    f"Sobrepõe **{len(_alt_pronta)}** pedido(s) no Olist e no Bling com "
+                    "as quantidades da alteração pronta (um por vez; falha em um não "
+                    "interrompe os outros). Pedido alterado direto no ERP é **pulado** "
+                    "— abra-o no modo de um pedido para conferir e sobrepor.")
+                _motivo_lote = st.text_input("Motivo (opcional, vale para todos)",
+                                             key="alt_motivo_lote")
+
+                def _enviar(r, etapa, dormir):
+                    try:
+                        res = emissor.enviar_alteracao(
+                            r["id"], _motivo_lote, usuario, repo,
+                            obter_repositorio_integracoes(), dormir=dormir,
+                            progresso=etapa)
+                    except emissor.DivergenciaNoErp:
+                        return PULADO, ("alterado direto no ERP — abra o pedido para "
+                                        "conferir e sobrepor")
+                    except emissor.EmissaoFalhou as exc:
+                        # Falha depois de tocar um ERP deixa o pedido no lock:
+                        # o operador precisa saber que a saída é o "Concluir".
+                        if estados.enviando_alteracao(repo.obter_pedido(r["id"]).get("status")):
+                            return False, f"{exc} — abra o pedido e use Concluir envio"
+                        raise
+                    return True, f"revisão {res.get('revisao')}"
+
+                if st.button("Confirmar envio aos ERPs", type="primary",
+                             key="enviar_alt_lote"):
+                    suc, fal = _rodar_lote_erp(
+                        _area_lote, "Envio das alterações", _alt_pronta, _enviar)
+                    _nova_rev()
+                    _flash_lote_erp("Envio das alterações", suc, fal)
                     st.rerun()
 
 
