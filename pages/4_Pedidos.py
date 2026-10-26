@@ -842,7 +842,8 @@ def _tabela_divergencias(divergencias: list, itens: pd.DataFrame) -> None:
                "vai ficar 0 = sai do pedido no envio.")
 
 
-def _conferencia_alteracao(itens: pd.DataFrame, historico: list) -> None:
+def _conferencia_alteracao(itens: pd.DataFrame, historico: list,
+                           pronta: bool = False) -> None:
     """
     O que a alteração muda em relação ao que está nos ERPs (a linha de base) —
     é o que o gestor assina ao enviar. Só as linhas que mudam.
@@ -852,7 +853,10 @@ def _conferencia_alteracao(itens: pd.DataFrame, historico: list) -> None:
     if not diferencas:
         st.caption("Nenhuma quantidade difere do que está emitido"
                    + (" — o envio só realinha os dois ERPs." if revisoes.envio_parcial(historico)
-                      else " — edite a tabela acima ou descarte a alteração."))
+                      else " — o envio regrava os ERPs com as mesmas quantidades (ex.: "
+                           "venda no Olist no formato configurado)." if pronta
+                      else " — edite a tabela acima, descarte a alteração ou marque "
+                           "\"Reenviar sem mudar quantidades\"."))
         return
     df = pd.DataFrame(diferencas)
     df["delta"] = df["nova"] - df["emitida"]
@@ -1590,11 +1594,19 @@ def _secao_pedido(pedidos_f: pd.DataFrame):
 
     elif status == estados.ALTERACAO_PRONTA:
         _acoes_alteracao_pronta(pedido_sel, itens, _botao_csv)
-        _conferencia_alteracao(itens, historico)
+        _conferencia_alteracao(itens, historico, pronta=True)
 
     elif em_alteracao:
         _parcial = bool(revisoes.envio_parcial(historico))
         _nada_muda = not _parcial and not revisoes.diferencas(itens, base)
+        # Reenvio deliberado das MESMAS quantidades (ex.: trocar o formato da
+        # venda no Olist para OC) — só aparece quando nada mudou.
+        _reenviar = _nada_muda and not _pendente and st.checkbox(
+            "Reenviar sem mudar quantidades (ex.: trocar o formato da venda no Olist)",
+            key=f"alt_reenvio_{pedido_id}",
+            help="Marca como pronta mesmo sem diferença: o envio regrava a venda no "
+                 "Olist no formato configurado e a compra no Bling com as mesmas "
+                 "quantidades.")
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             # Uma ação primária por vez: com edição pendente é o Salvar; sem
@@ -1604,14 +1616,16 @@ def _secao_pedido(pedidos_f: pd.DataFrame):
             # Bloqueado com edição pendente pelo mesmo motivo do "Marcar como
             # Pronto": ele não grava a tabela, e o digitado se perderia.
             _impede = ("Salve as alterações antes de marcar como pronta." if _pendente
-                       else "Nenhuma quantidade difere do que está emitido — "
-                            "descarte a alteração." if _nada_muda else None)
+                       else "Nenhuma quantidade difere do que está emitido — descarte "
+                            "a alteração ou marque \"Reenviar sem mudar quantidades\"."
+                       if _nada_muda and not _reenviar else None)
             if st.button("Marcar alteração pronta", icon=":material/task_alt:",
                          width="stretch", disabled=bool(_impede), help=_impede,
                          type="secondary" if _impede else "primary",
                          key=f"alt_pronta_{pedido_id}"):
                 try:
-                    ok = repo.marcar_alteracao_pronta(pedido_id, usuario)
+                    ok = repo.marcar_alteracao_pronta(pedido_id, usuario,
+                                                      sem_diferenca=bool(_reenviar))
                     _flash("success", "Alteração marcada como **pronta**.") if ok else _flash(
                         "warning", "O pedido mudou de estado em outra sessão — recarregado.")
                 except (MigracaoPendente, TransicaoInvalida) as exc:
@@ -2048,16 +2062,22 @@ def _secao_lote(pedidos_f: pd.DataFrame, assinatura_filtro: str):
                                  "alteração**), marque como **Alteração pronta** e envie.")
                     st.rerun()
         with c_alt:
-            if st.button(f"Alteração pronta ({len(_em_alt)})", icon=":material/task_alt:",
-                         disabled=_em_alt.empty, width="stretch",
-                         help="Marca os selecionados Em alteração como Alteração pronta "
-                              "(itens travam)"):
-                suc, fal = _executar_lote(
-                    _em_alt, lambda r: (
-                        repo.marcar_alteracao_pronta(r["id"], usuario),
-                        "o estado mudou em outra sessão"))
-                _flash_resumo_lote("Alteração pronta", suc, fal)
-                st.rerun()
+            with st.popover(f"Alteração pronta ({len(_em_alt)})", icon=":material/task_alt:",
+                            width="stretch", disabled=_em_alt.empty):
+                st.caption(f"Marca **{len(_em_alt)}** pedido(s) Em alteração como "
+                           "**Alteração pronta** (itens travam). Nada vai aos ERPs agora.")
+                _reenviar_lote = st.checkbox(
+                    "Reenviar sem mudar quantidades (ex.: trocar o formato da venda no "
+                    "Olist)", key="alt_reenvio_lote",
+                    help="Sem esta opção, pedido sem diferença de quantidade é recusado.")
+                if st.button("Confirmar", type="primary", key="alt_pronta_lote"):
+                    suc, fal = _executar_lote(
+                        _em_alt, lambda r: (
+                            repo.marcar_alteracao_pronta(r["id"], usuario,
+                                                         sem_diferenca=_reenviar_lote),
+                            "o estado mudou em outra sessão"))
+                    _flash_resumo_lote("Alteração pronta", suc, fal)
+                    st.rerun()
         with c_env:
             with st.popover(f"Enviar aos ERPs ({len(_alt_pronta)})", icon=":material/send:",
                             width="stretch", disabled=_alt_pronta.empty):

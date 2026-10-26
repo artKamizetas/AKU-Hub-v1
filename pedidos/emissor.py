@@ -615,9 +615,9 @@ def enviar_alteracao(pedido_id: str, motivo: str, usuario: str, repo_ped, repo_i
             raise EmissaoFalhou(
                 "A alteração zerou todos os itens — para desistir da compra use "
                 "\"Cancelar pedido emitido\".")
-        if not revisao and not mudou and not revisoes.envio_parcial(historico):
-            raise EmissaoFalhou(
-                "Nenhuma quantidade difere do que está emitido — descarte a alteração.")
+        # Sem diferença de quantidade o envio é um REENVIO deliberado: a trava
+        # mora em repositorio.marcar_alteracao_pronta, que só deixa chegar
+        # aqui quem marcou "reenviar sem mudar quantidades" (ou envio parcial).
 
         avisar("Conferindo a situação do pedido nos ERPs…")
         erps = consultar_erps(pedido, repo_int, http, dormir)

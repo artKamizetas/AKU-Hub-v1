@@ -677,7 +677,9 @@ Depois de emitido o pedido ainda pode ser **alterado** ou **cancelado** pela
 - **Lote:** "Abrir alteração (n)" (`emissor.abrir_alteracao_verificada`:
   confere o status nativo nos ERPs ANTES de abrir; fora de aberto = pulado),
   "Alteração pronta (n)" e "Enviar aos ERPs (n)" (motivo opcional
-  comum). O lote NUNCA passa `sobrepor=True`: `DivergenciaNoErp` pula o pedido
+  comum). "Reenviar sem mudar quantidades" (`marcar_alteracao_pronta(
+  sem_diferenca=True)`) é a ÚNICA porta para alteração sem diferença — a trava
+  mora no repositório; o envio confia na Alteração pronta. O lote NUNCA passa `sobrepor=True`: `DivergenciaNoErp` pula o pedido
   para o modo de um pedido. Motivo da alteração é opcional; o do cancelamento não.
 - **Tela:** "Verificar nos ERPs" é sob demanda (chamada de API; o Olist tem 60
   req/min) e mora na bolsa do `_memo`. Com dois "R$" na mesma linha de markdown

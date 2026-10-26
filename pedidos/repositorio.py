@@ -734,15 +734,18 @@ class RepositorioPedidos:
                 raise MigracaoPendente(_MSG_DDL_008) from exc
             raise
 
-    def marcar_alteracao_pronta(self, pedido_id: str, usuario: str) -> bool:
+    def marcar_alteracao_pronta(self, pedido_id: str, usuario: str,
+                                sem_diferenca: bool = False) -> bool:
         """
         EM_ALTERACAO → ALTERACAO_PRONTA (CAS): digitação concluída, itens travam.
-        Recusa alteração que não muda nada em relação aos ERPs (o envio a
-        recusaria depois) — salvo envio parcial, que precisa ir de novo para
-        alinhar os dois ERPs. A regra mora aqui para valer na tela e no lote.
+        Recusa alteração que não muda nada em relação aos ERPs — salvo envio
+        parcial (precisa ir de novo para alinhar os dois) ou `sem_diferenca`,
+        a escolha EXPLÍCITA de reenviar as mesmas quantidades (ex.: trocar o
+        formato da venda no Olist para OC). A regra mora aqui para valer na
+        tela e no lote.
         """
         historico = self.listar_revisoes(pedido_id)
-        if not revisoes.envio_parcial(historico) and not revisoes.diferencas(
+        if not sem_diferenca and not revisoes.envio_parcial(historico) and not revisoes.diferencas(
                 self.listar_itens(pedido_id), revisoes.linha_de_base(historico)):
             raise TransicaoInvalida(
                 "Nenhuma quantidade difere do que está emitido — descarte a alteração.")
