@@ -127,6 +127,12 @@ aqui); qualquer outra situação → impedimento, nada é tocado.
 - **Em alteração:** Salvar · **Marcar alteração pronta** · Descartar; a conferência
   emitida × nova aparece, sem o botão de enviar. **Alteração pronta:** Reabrir
   alteração · motivo + **Enviar alteração**.
+- **Reenvio sem mudar quantidades** (out/2026): opção explícita "Reenviar sem
+  mudar quantidades" no pedido e no lote "Alteração pronta"
+  (`marcar_alteracao_pronta(sem_diferenca=True)`). Caso de uso: regravar as
+  vendas já emitidas no formato OC do Olist. Sem a opção, alteração sem
+  diferença segue recusada; a trava mora só no repositório (o envio confia
+  na Alteração pronta).
 - **Motivo da alteração é opcional** (out/2026, a pedido do Diogo): quando
   informado vai para a revisão e para os eventos; o do cancelamento segue
   obrigatório.

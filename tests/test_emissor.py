@@ -674,15 +674,28 @@ class TestEnviarAlteracao:
         assert http.chamadas == []
         assert repo_ped.obter_pedido(pid)["status"] == e.ALTERACAO_PRONTA
 
-    def test_sem_mudanca_nao_envia(self):
+    def test_sem_mudanca_so_marca_pronta_com_reenvio_explicito(self):
         repo_ped, repo_int, pid = _em_alteracao(cal_p=10, pronta=False)  # igual ao emitido
         with pytest.raises(rp.TransicaoInvalida, match="Nenhuma quantidade difere"):
-            repo_ped.marcar_alteracao_pronta(pid, "diogo")      # a 1ª barreira
-        # a 2ª: mesmo que chegue pronta (estado forçado), o envio não sai
-        next(p for p in repo_ped.tabelas[TAB_PEDIDO] if p["id"] == pid)["status"] = \
-            e.ALTERACAO_PRONTA
-        with pytest.raises(emissor.EmissaoFalhou, match="Nenhuma quantidade difere"):
-            emissor.enviar_alteracao(pid, "x", "diogo", repo_ped, repo_int, http=HttpFake([]))
+            repo_ped.marcar_alteracao_pronta(pid, "diogo")
+        assert repo_ped.marcar_alteracao_pronta(pid, "diogo", sem_diferenca=True) is True
+
+    def test_reenvio_sem_mudanca_regrava_os_dois_erps_no_formato_atual(self, monkeypatch):
+        """Troca do formato da venda para OC sem mexer em quantidade."""
+        repo_ped, repo_int, pid = _em_alteracao(cal_p=10, pronta=False)
+        repo_ped.marcar_alteracao_pronta(pid, "diogo", sem_diferenca=True)
+        self._modo_oc(repo_int, {"NEVES": "0008"})
+        monkeypatch.setattr(olist, "numero_do_sku", lambda s: "010")
+        http = HttpFake([_get_bling(), _get_olist(), OK204, OK204, *MARCADORES, PUT_BLING])
+
+        res = emissor.enviar_alteracao(pid, "", "diogo", repo_ped, repo_int, http=http)
+
+        assert res["revisao"] == 2
+        assert [i["infoAdicional"] for i in http.chamadas[2][2]["itens"]] == ["010", "010"]
+        assert http.chamadas[3][2]["observacoes"].split("\n")[-1] == \
+            "tag{ OC:0008; PRORROGAVEL:S; }"
+        assert sorted(i["quantidade"] for i in http.chamadas[6][2]["itens"]) == [4, 10]
+        assert repo_ped.obter_pedido(pid)["status"] == e.EMITIDO
 
     def test_recusa_do_olist_nao_muda_nada_em_lugar_nenhum(self):
         """Olist vai primeiro: se ELE recusa, o Bling nem é chamado."""
