@@ -367,6 +367,20 @@ def _mes_ano(ts) -> str:
     return f"{demanda.NOMES_MES[ts.month - 1]}/{ts.year}"
 
 
+def data_prevista(rodada: dict) -> pd.Timestamp:
+    """
+    Data prevista que vai aos ERPs (`dataPrevista` do Bling e do Olist) —
+    regra ÚNICA, para os dois nunca divergirem: a data escolhida na rodada
+    (`data_prevista_erp`, DDL 010) ou, sem escolha, a `data_chegada` do
+    cálculo. A `data_chegada` segue intocada: é o início da janela de
+    cobertura que gerou as quantidades.
+    """
+    escolhida = rodada.get("data_prevista_erp")
+    if escolhida is not None and not pd.isna(escolhida) and str(escolhida).strip():
+        return pd.Timestamp(str(escolhida)).normalize()
+    return pd.Timestamp(str(rodada["data_chegada"])).normalize()
+
+
 def montar_observacoes_bling(rodada: dict, pedido: dict, itens: pd.DataFrame) -> str:
     """
     Texto padronizado COMPLETO para o campo "Observações" (público) do pedido
@@ -392,7 +406,7 @@ def montar_observacoes_bling(rodada: dict, pedido: dict, itens: pd.DataFrame) ->
 
     return "\n".join([
         str(pedido["titulo"]),
-        (f"Rodada: disparo {_mes_ano(disparo)} → chega {_mes_ano(rodada['data_chegada'])} · "
+        (f"Rodada: disparo {_mes_ano(disparo)} → chega {data_prevista(rodada):%d/%m/%Y} · "
          f"cobre {_mes_ano(rodada['data_chegada'])}→{_mes_ano(rodada['data_chegada_seguinte'])}"),
         f"Itens: {n_skus} SKUs · {pares} pares · {_fmt_brl(investimento)}",
         (f"Origem: Simulador AKU · congelada em {congelada_em} "

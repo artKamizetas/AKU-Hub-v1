@@ -53,6 +53,9 @@ _COLS_RODADA_LEVE = (
     "rodada_numero,janela_label,data_referencia,congelada_em,congelada_por,"
     "ativo_crescimento,status,observacao"
 )
+# DDL 010: data prevista escolhida para os ERPs. Fica fora da lista base para
+# a leitura cair nela enquanto o DDL não foi aplicado (ver _selecionar_rodada_leve).
+_COLS_DATA_PREVISTA = "data_prevista_erp,data_prevista_erp_por,data_prevista_erp_em"
 
 
 class RodadaJaCongelada(Exception):
@@ -89,6 +92,11 @@ def _e_coluna_ausente(exc: Exception) -> bool:
     return getattr(exc, "code", "") == "PGRST204" or "PGRST204" in str(exc)
 
 
+def _e_coluna_inexistente(exc: Exception) -> bool:
+    """42703 = undefined_column — SELECT pedindo coluna que o DDL ainda não criou."""
+    return str(getattr(exc, "code", "") or "") == "42703" or "42703" in str(exc)
+
+
 def _e_tabela_ausente(exc: Exception) -> bool:
     """PGRST205 / 42P01 = tabela fora do schema (DDL não aplicado)."""
     codigo = str(getattr(exc, "code", "") or "")
@@ -102,6 +110,10 @@ def _e_check_violado(exc: Exception) -> bool:
 
 _MSG_DDL_008 = ("Alterar ou cancelar pedido emitido exige a migração "
                 "docs/sql/008_app_alteracao_pos_emissao.sql — rode "
+                "`python scripts/migrar.py aplicar`.")
+
+_MSG_DDL_010 = ("Escolher a data prevista dos ERPs exige a migração "
+                "docs/sql/010_app_data_prevista_erp.sql — rode "
                 "`python scripts/migrar.py aplicar`.")
 
 _MSG_DDL_009 = ("Marcar a alteração como pronta exige a migração "
@@ -357,9 +369,23 @@ class RepositorioPedidos:
     # -----------------------------------------------------------------
     # Leitura
     # -----------------------------------------------------------------
+    def _selecionar_rodada_leve(self, filtros: dict = None) -> list:
+        """
+        Colunas leves da rodada + a data prevista dos ERPs. Sem o DDL 010 a
+        coluna não existe (42703): relê sem ela e a data cai na data_chegada
+        (builder.data_prevista) — a tela e a emissão seguem funcionando.
+        """
+        try:
+            return self._selecionar(TAB_RODADA, filtros,
+                                    colunas=f"{_COLS_RODADA_LEVE},{_COLS_DATA_PREVISTA}")
+        except Exception as exc:
+            if not _e_coluna_inexistente(exc):
+                raise
+            return self._selecionar(TAB_RODADA, filtros, colunas=_COLS_RODADA_LEVE)
+
     def listar_rodadas(self) -> pd.DataFrame:
         """Rodadas congeladas SEM os jsonb (payload leve p/ listagem)."""
-        linhas = self._selecionar(TAB_RODADA, colunas=_COLS_RODADA_LEVE)
+        linhas = self._selecionar_rodada_leve()
         df = pd.DataFrame(linhas)
         if len(df):
             df = df.sort_values("congelada_em", ascending=False).reset_index(drop=True)
@@ -432,8 +458,7 @@ class RepositorioPedidos:
 
     def obter_rodada_leve(self, rodada_id: str) -> dict:
         """Rodada SEM os jsonb (payload de emissão só precisa das datas/metadados)."""
-        linhas = self._selecionar(TAB_RODADA, {"id": rodada_id},
-                                  colunas=_COLS_RODADA_LEVE)
+        linhas = self._selecionar_rodada_leve({"id": rodada_id})
         return linhas[0] if linhas else {}
 
     # -----------------------------------------------------------------
@@ -798,6 +823,32 @@ class RepositorioPedidos:
                      "atualizado_em": agora, "atualizado_por": usuario})
         return self.transicionar_pedido(
             pedido_id, estados.EM_ALTERACAO, estados.estado_emitido(pedido), usuario)
+
+    def definir_data_prevista(self, rodada_id: str, data, usuario: str) -> int:
+        """
+        Grava a data prevista que vai aos ERPs (`data` None = volta à
+        data_chegada do cálculo). Só em rodada ABERTA. Não toca nos ERPs:
+        devolve quantos pedidos já foram emitidos — esses só recebem a data
+        nova num envio de alteração.
+        """
+        rodada = self.obter_rodada_leve(rodada_id)
+        if rodada.get("status") != estados.RODADA_ABERTA:
+            raise TransicaoInvalida("Só dá para mudar a data prevista de rodada aberta.")
+        valor = None if data is None else str(pd.Timestamp(str(data)).date())
+        try:
+            self._atualizar(TAB_RODADA, {"id": rodada_id},
+                            {"data_prevista_erp": valor,
+                             "data_prevista_erp_por": usuario,
+                             "data_prevista_erp_em": _agora_iso()})
+        except Exception as exc:
+            if _e_coluna_ausente(exc):
+                raise MigracaoPendente(_MSG_DDL_010) from exc
+            raise
+        pedidos = self._selecionar(TAB_PEDIDO, {"rodada_id": rodada_id},
+                                   colunas="id,status,bling_id,olist_id")
+        return sum(1 for p in pedidos
+                   if p.get("status") != estados.CANCELADO
+                   and (p.get("bling_id") or p.get("olist_id")))
 
     def cancelar_rodada(self, rodada_id: str, usuario: str) -> None:
         """

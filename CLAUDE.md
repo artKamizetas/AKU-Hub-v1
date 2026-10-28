@@ -342,8 +342,16 @@ Zerado NÃO vira item de pedido (entraria na grade, nos totais e na emissão).
   `prazo_pagamento_dias` (default 30) e `formaPagamento.id` (`forma_pagamento_id`,
   selectbox por nome via `GET /formas-pagamentos`). Os três moram na aba
   Integrações — são fixos do acordo comercial, não decisão por rodada.
-- **Campos de venda do Olist**: `dataPrevista` = a MESMA `rodada.data_chegada` que
-  vai no Bling (os dois ERPs não podem divergir sobre quando a mercadoria chega);
+- **Data prevista nos ERPs** (DDL 010): `dataPrevista` do Bling e do Olist sai de
+  `builder.data_prevista(rodada)` — a `data_prevista_erp` escolhida na rodada
+  (4_Pedidos, "Mudar data prevista", só rodada ABERTA, via
+  `repositorio.definir_data_prevista`) ou, vazia, a `data_chegada` do cálculo.
+  Nunca leia `rodada["data_chegada"]` direto num payload: ela segue sendo o início
+  da janela de cobertura (snapshot imutável). Pedido já emitido só recebe a data
+  nova num envio de alteração (a tela avisa ao salvar). Sem o DDL a leitura cai
+  na `data_chegada` (42703 → relê sem a coluna) e salvar dá `MigracaoPendente`.
+- **Campos de venda do Olist**: `dataPrevista` = a MESMA de `builder.data_prevista`
+  que vai no Bling (os dois ERPs não podem divergir sobre quando a mercadoria chega);
   `produto.tipo = "P"` nos itens; `infoAdicional` = SKU (a memória de cálculo é
   só do Bling — a fábrica não precisa dela). **Modo de preenchimento**
   (`modo_itens` na config da integração Olist, default `sku`): no modo `oc`,

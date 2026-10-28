@@ -147,7 +147,7 @@ def montar_payload_compra(pedido: dict, itens: pd.DataFrame, rodada: dict,
 
     payload = {
         "fornecedor": {"id": int(fornecedor_id)},
-        "dataPrevista": str(pd.Timestamp(str(rodada["data_chegada"])).date()),
+        "dataPrevista": str(builder.data_prevista(rodada).date()),
         "observacoes": str(obs_completa),
         "observacoesInternas": str(pedido["titulo"]),
         "itens": itens_payload,

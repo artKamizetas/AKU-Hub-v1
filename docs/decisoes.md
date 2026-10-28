@@ -9,6 +9,20 @@ Records). Adicione no topo as mais recentes.
 
 ---
 
+## 2026-10 · Data prevista dos ERPs escolhida por rodada
+A `dataPrevista` do Bling e do Olist era sempre a `data_chegada` do snapshot
+(disparo + lead time). Agora o gestor a escolhe **por rodada** na 4_Pedidos
+(`app.rodada_congelada.data_prevista_erp`, DDL 010; vazio = a chegada do cálculo).
+A regra de leitura é única (`builder.data_prevista`), usada pela emissão nos dois
+ERPs, pelo envio de alteração e pela linha "chega" das observações — os dois ERPs
+seguem sem poder divergir. **Por quê uma coluna nova:** `data_chegada` é o início
+da janela de cobertura que gerou as quantidades e o snapshot é imutável; a data
+dos ERPs é decisão de execução e não refaz a conta. **Só por rodada** (decisão do
+Diogo): sem data por pedido. **Emitidos não são atualizados sozinhos:** ao salvar,
+a tela avisa quantos já foram aos ERPs; a data nova chega a eles pelo lote
+"Abrir alteração → Reenviar sem mudar quantidades → Enviar aos ERPs".
+**Alternativa descartada:** botão que propaga a data aos emitidos numa ação só.
+
 ## 2026-10 · Reabrir pedido cancelado e estado "Alteração pronta"
 **Reabrir cancelado** (`CANCELADO → RASCUNHO`) entrou para desfazer cancelamento
 por engano — mas só para pedido que **nunca foi aos ERPs** e numa rodada **ABERTA**

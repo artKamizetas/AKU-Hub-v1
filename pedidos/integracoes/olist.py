@@ -400,7 +400,7 @@ def montar_payload_venda(pedido: dict, itens: pd.DataFrame, rodada: dict,
     Texto espelha o Bling: observacoesInternas = título curto (busca/listagem),
     observacoes = bloco completo (obs_completa) com o resumo da rodada — no
     modo OC, com a tag de OC acrescentada na última linha (observacoes_venda).
-    `dataPrevista` = data de chegada da rodada — o MESMO valor que vai no Bling,
+    `dataPrevista` = builder.data_prevista(rodada) — o MESMO valor que vai no Bling,
     para os dois ERPs nunca divergirem sobre quando a mercadoria chega.
 
     `pagamento` tem SHAPE diferente do Bling: objeto aninhado com
@@ -431,7 +431,7 @@ def montar_payload_venda(pedido: dict, itens: pd.DataFrame, rodada: dict,
 
     itens_payload = montar_itens_venda(validos, mapa_sku, cfg, pedido)
 
-    chegada = pd.Timestamp(str(rodada["data_chegada"])).normalize()
+    chegada = builder.data_prevista(rodada)
     payload = {
         "idContato": int(cfg["contato_id"]),
         "situacao": int(cfg.get("situacao", 0)),          # 0 = Aberta

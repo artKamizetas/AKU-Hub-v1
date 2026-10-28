@@ -667,7 +667,7 @@ def enviar_alteracao(pedido_id: str, motivo: str, usuario: str, repo_ped, repo_i
             olist.atualizar_itens_pedido(token_o, pedido["olist_id"], itens_o, http, dormir)
             tocou = True
             olist.atualizar_pedido(token_o, pedido["olist_id"], {
-                "dataPrevista": str(pd.Timestamp(str(rodada["data_chegada"])).date()),
+                "dataPrevista": str(builder.data_prevista(rodada).date()),
                 "observacoes": obs_o,
                 "observacoesInternas": str(pedido["titulo"]),
             }, http, dormir)

@@ -383,6 +383,30 @@ class TestObservacoesBling:
         assert (builder.montar_observacoes_bling(rodada, pedido, itens)
                 == builder.montar_observacoes_bling(rodada, pedido, itens))
 
+    def test_linha_da_rodada_mostra_a_data_prevista_dos_erps(self):
+        rodada, pedido, itens = self._base()
+        linha = builder.montar_observacoes_bling(
+            {**rodada, "data_prevista_erp": "2026-09-15"}, pedido, itens).split("\n")[1]
+        assert "chega 15/09/2026" in linha
+        assert "cobre Ago/2026" in linha            # a janela do cálculo não muda
+
     def test_titulo_padrao(self):
         assert (builder.montar_titulo("Neves", "calças", 8, 2026)
                 == "NEVES - CALÇAS - R08/2026")
+
+
+# ---------------------------------------------------------------------------
+# data_prevista — regra única da dataPrevista dos ERPs (DDL 010)
+# ---------------------------------------------------------------------------
+class TestDataPrevista:
+    def test_sem_escolha_usa_a_chegada_do_calculo(self):
+        assert builder.data_prevista({"data_chegada": "2026-08-29"}) == pd.Timestamp("2026-08-29")
+
+    def test_vazia_ou_nula_usa_a_chegada(self):
+        for vazio in (None, "", float("nan"), pd.NaT):
+            r = {"data_chegada": "2026-08-29", "data_prevista_erp": vazio}
+            assert builder.data_prevista(r) == pd.Timestamp("2026-08-29")
+
+    def test_escolhida_vence(self):
+        r = {"data_chegada": "2026-08-29", "data_prevista_erp": "2026-09-15"}
+        assert builder.data_prevista(r) == pd.Timestamp("2026-09-15")
