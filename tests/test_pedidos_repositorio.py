@@ -372,6 +372,70 @@ def item_manual(sku="Z-M", qtd=6):
             "quantidade_sugerida": 99, "memoria_sugerida": {"x": 1}, "origem": "SIMULACAO"}
 
 
+class TestDataPrevista:
+    def test_grava_e_conta_os_emitidos(self):
+        repo = RepoFake()
+        res = repo.congelar_rodada(snapshot_min(), grupos_min())
+        pids = list(repo.listar_pedidos(res["id"])["id"])
+        repo._atualizar(TAB_PEDIDO, {"id": pids[0]}, {"bling_id": "B1"})
+
+        n = repo.definir_data_prevista(res["id"], "2026-09-15", "tester")
+        rodada = repo.obter_rodada_leve(res["id"])
+        assert rodada["data_prevista_erp"] == "2026-09-15"
+        assert rodada["data_prevista_erp_por"] == "tester"
+        assert n == 1                    # só o emitido precisa de reenvio
+
+    def test_none_volta_a_data_do_calculo(self):
+        repo = RepoFake()
+        res = repo.congelar_rodada(snapshot_min(), grupos_min())
+        repo.definir_data_prevista(res["id"], "2026-09-15", "tester")
+        repo.definir_data_prevista(res["id"], None, "tester")
+        assert repo.obter_rodada_leve(res["id"])["data_prevista_erp"] is None
+
+    def test_emitido_cancelado_nao_conta(self):
+        repo = RepoFake()
+        res = repo.congelar_rodada(snapshot_min(), grupos_min())
+        pid = repo.listar_pedidos(res["id"]).iloc[0]["id"]
+        repo._atualizar(TAB_PEDIDO, {"id": pid}, {"bling_id": "B1", "status": e.CANCELADO})
+        assert repo.definir_data_prevista(res["id"], "2026-09-15", "tester") == 0
+
+    def test_recusa_rodada_cancelada(self):
+        repo = RepoFake()
+        res = repo.congelar_rodada(snapshot_min(), grupos_min())
+        repo.cancelar_rodada(res["id"], "tester")
+        with pytest.raises(TransicaoInvalida):
+            repo.definir_data_prevista(res["id"], "2026-09-15", "tester")
+
+    def test_sem_ddl_010_escrita_vira_migracao_pendente(self):
+        repo = RepoFake()
+        res = repo.congelar_rodada(snapshot_min(), grupos_min())
+        original = repo._atualizar
+
+        def sem_coluna(tabela, filtros, valores):
+            if "data_prevista_erp" in valores:
+                raise FakeAPIError("PGRST204")
+            return original(tabela, filtros, valores)
+        repo._atualizar = sem_coluna
+        with pytest.raises(MigracaoPendente):
+            repo.definir_data_prevista(res["id"], "2026-09-15", "tester")
+
+    def test_sem_ddl_010_leitura_cai_sem_a_coluna(self):
+        repo = RepoFake()
+        res = repo.congelar_rodada(snapshot_min(), grupos_min())
+        original = repo._selecionar
+        pedidas = []
+
+        def sem_coluna(tabela, filtros=None, colunas="*"):
+            pedidas.append(colunas)
+            if "data_prevista_erp" in colunas:
+                raise FakeAPIError("42703")
+            return original(tabela, filtros, colunas)
+        repo._selecionar = sem_coluna
+        assert repo.obter_rodada_leve(res["id"])["id"] == res["id"]
+        assert len(repo.listar_rodadas()) == 1
+        assert "data_prevista_erp" not in pedidas[-1]
+
+
 class TestItensManuais:
     def _repo_com_pedido(self):
         repo = RepoFake()

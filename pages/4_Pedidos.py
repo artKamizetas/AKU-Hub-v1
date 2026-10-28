@@ -964,6 +964,56 @@ if _msg:
 
 repo = obter_repositorio()
 
+
+def _secao_data_prevista(rodada: dict):
+    """
+    Data que vai como `dataPrevista` no Bling e no Olist, escolhida por rodada.
+    Vazia = a chegada do cálculo (disparo + lead time). Mudar aqui NÃO refaz
+    as quantidades nem toca nos ERPs: pedido já emitido só recebe a data nova
+    num envio de alteração (aviso ao salvar).
+    """
+    chegada = pd.Timestamp(str(rodada["data_chegada"])).date()
+    prevista = builder.data_prevista(rodada).date()
+    escolhida = prevista != chegada
+    st.markdown(
+        f":material/event: Data prevista nos ERPs: **{prevista:%d/%m/%Y}** · "
+        + ("escolhida na rodada" if escolhida else "a chegada do cálculo")
+        + (f" (o cálculo previa {chegada:%d/%m/%Y})" if escolhida else ""))
+
+    if rodada["status"] != estados.RODADA_ABERTA:
+        return
+    with st.popover("Mudar data prevista", icon=":material/edit_calendar:"):
+        st.caption(
+            "Vale para o Bling e o Olist. Não muda as quantidades: o cálculo "
+            f"continua considerando a chegada em {chegada:%d/%m/%Y}.")
+        nova = st.date_input("Data prevista", value=prevista, format="DD/MM/YYYY",
+                             key=f"pc_data_prev_{rodada['id']}")
+        c1, c2 = st.columns(2)
+        salvar = c1.button("Salvar data", type="primary", icon=":material/save:",
+                           disabled=nova == prevista, width="stretch")
+        voltar = c2.button("Usar a do cálculo", icon=":material/undo:",
+                           disabled=not escolhida, width="stretch")
+        if salvar or voltar:
+            try:
+                n_emitidos = repo.definir_data_prevista(
+                    rodada["id"], None if voltar or nova == chegada else nova, usuario)
+            except (TransicaoInvalida, MigracaoPendente) as exc:
+                _flash("error", str(exc))
+                st.rerun()
+            if n_emitidos:
+                _flash("warning",
+                       f"Data prevista salva. **{n_emitidos}** pedido(s) já emitido(s) "
+                       "continuam com a data antiga nos ERPs: para atualizar, use no "
+                       "modo Lote **Abrir alteração → Reenviar sem mudar quantidades "
+                       "→ Enviar aos ERPs** (só pedidos em aberto nos ERPs).")
+            else:
+                _flash("success", "Data prevista salva.")
+            # O widget guarda a data digitada; sem limpar, "Usar a do cálculo"
+            # deixaria o campo na data antiga.
+            st.session_state.pop(f"pc_data_prev_{rodada['id']}", None)
+            st.rerun()
+
+
 # Leituras reaproveitadas ENTRE reruns do fragment (ver _memo). Esta linha só
 # roda em rerun de APP — que é o que toda ação de escrita dispara —, então o
 # que foi gravado é sempre relido.
@@ -1040,6 +1090,8 @@ with st.container(border=True):
                 mime="text/csv",
             )
             st.json(rodada_full["config_snapshot"], expanded=False)
+
+    _secao_data_prevista(rodada_sel.to_dict())
 
     if rodada_sel["status"] == estados.RODADA_ABERTA:
         with st.popover("Cancelar rodada congelada", icon=":material/block:"):

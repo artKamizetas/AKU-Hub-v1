@@ -152,6 +152,14 @@ class TestPayloadVenda:
                                         {"fornecedor_id": "1"}, OBS)
         assert p["dataPrevista"] == b["dataPrevista"]
 
+    def test_data_escolhida_na_rodada_vai_igual_aos_dois_erps(self):
+        rodada = {**RODADA, "data_prevista_erp": "2026-09-15"}
+        p = olist.montar_payload_venda(PEDIDO, itens_df(), rodada, CFG_OLIST,
+                                       MAPA, "PC-1", OBS)
+        b = bling.montar_payload_compra(PEDIDO, itens_df(), rodada,
+                                        {"fornecedor_id": "1"}, OBS)
+        assert p["dataPrevista"] == b["dataPrevista"] == "2026-09-15"
+
     def test_sem_forma_recebimento_nao_manda_pagamento(self):
         p = olist.montar_payload_venda(PEDIDO, itens_df(), RODADA, CFG_OLIST,
                                        MAPA, "PC-1", OBS)
